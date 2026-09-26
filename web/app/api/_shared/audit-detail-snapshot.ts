@@ -25,11 +25,9 @@ export async function readAuditDetailSnapshot(
       ? previewBundle.audit_briefs
       : snapshotId === AUDIT_SNAPSHOT_IDS.stories
         ? previewBundle.audit_stories
-        : snapshotId === AUDIT_SNAPSHOT_IDS.decisions
-          ? previewBundle.audit_decisions
-          : null;
+        : null;
     const detail = snapshotId === AUDIT_SNAPSHOT_IDS.briefs ? "briefs"
-      : snapshotId === AUDIT_SNAPSHOT_IDS.stories ? "stories" : "decisions";
+      : "stories";
     if (!resource || !validAuditDetailPayload(detail, resource)) {
       return previewJson({
         error: unavailableLabel,

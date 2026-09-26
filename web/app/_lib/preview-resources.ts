@@ -11,9 +11,6 @@ export function previewResources(): Record<string, unknown> {
   resources[
     `${PREVIEW_RESOURCES.newsIndex}?page=1&limit=${PREVIEW_NEWS_PAGE_SIZE}&review_state=COMPLETED`
   ] = previewBundle.news_index;
-  if (previewBundle.learning_summary) {
-    resources[PREVIEW_RESOURCES.learning] = previewBundle.learning_summary;
-  }
   return resources;
 }
 

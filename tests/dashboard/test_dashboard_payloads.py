@@ -3,7 +3,6 @@ from __future__ import annotations
 import pytest
 
 from xauusd_forecaster.dashboard.payloads import audit_briefs_payload
-from xauusd_forecaster.dashboard.payloads import audit_decisions_payload
 from xauusd_forecaster.dashboard.payloads import audit_status_payload
 from xauusd_forecaster.dashboard.payloads import audit_stories_payload
 from xauusd_forecaster.dashboard.payloads import bounded_evidence_window
@@ -54,7 +53,6 @@ def test_audit_summary_is_independent_of_every_growing_detail_family() -> None:
     assert audit_status_payload(grown) == baseline
     assert baseline["audit_briefs_resource"] == "/api/audit-briefs"
     assert baseline["audit_stories_resource"] == "/api/audit-stories"
-    assert baseline["audit_decisions_resource"] == "/api/audit-decisions"
 
 
 def test_audit_detail_projections_bound_items_and_nested_growth() -> None:
@@ -82,14 +80,10 @@ def test_audit_detail_projections_bound_items_and_nested_growth() -> None:
     }
 
     briefs = audit_briefs_payload(payload, brief_limit=3)
-    decisions = audit_decisions_payload(payload, decision_limit=20)
     stories = audit_stories_payload(payload)
 
     assert len(briefs["daily_news_briefs"]) == 3
     assert all("brief_json" not in row for row in briefs["daily_news_briefs"])
-    assert len(decisions["recent_decisions"]) == 20
-    assert all("features" not in row for row in decisions["recent_decisions"])
-    assert all(len(row["predictions"]) == 8 for row in decisions["recent_decisions"])
     assert len(stories["storylines"]) == 12
     assert all(len(row["timeline"]) == 6 for row in stories["storylines"])
     assert all(row["timeline"][:3] == [0, 1, 2] for row in stories["storylines"])
@@ -104,7 +98,6 @@ def test_audit_detail_projections_bound_items_and_nested_growth() -> None:
 @pytest.mark.parametrize("family,field,projector", [
     ("briefs", "daily_news_briefs", audit_briefs_payload),
     ("stories", "storylines", audit_stories_payload),
-    ("decisions", "recent_decisions", audit_decisions_payload),
 ])
 def test_audit_source_absence_never_becomes_authoritative_empty(family, field, projector):
     for value in (None, {}, "missing", [None]):

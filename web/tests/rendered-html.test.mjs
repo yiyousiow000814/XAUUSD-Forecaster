@@ -10,8 +10,6 @@ const { applyFreshness } = await import("../app/api/status/freshness.js");
 const { runtimeUpdateFailurePresentation } = await import("../app/_lib/runtime-update-failure.js");
 const { countPresentation, formatCompactCount, formatExactCount, progressCountPresentation } = await import("../app/_lib/count-format.ts");
 const { versionResultLabel } = await import("../app/_lib/version-result-state.ts");
-const { modelVersionMarkers } = await import("../app/_lib/model-version-markers.ts");
-const { buildTrainingCutoffChart } = await import("../app/_lib/training-cutoff-chart.ts");
 const { statusFieldPhase } = await import("../app/_lib/current-data-provenance.ts");
 const { shouldPollDashboardResource } = await import("../app/_lib/dashboard-refresh-policy.ts");
 const { quoteBridgePresentation } = await import("../app/_lib/quote-bridge-state.ts");
@@ -151,27 +149,6 @@ test("renders human incident diagnostics before nested raw machine evidence", ()
   assert.match(css, /\.incident-raw-evidence code,.incident-raw-evidence small \{[^}]*overflow-wrap:anywhere/);
 });
 
-test("presents decision output stalls separately from collector liveness", () => {
-  const [incident] = correlateOperationalEvents([{
-    code: "OPS_DECISION_OUTPUT_STALLED",
-    severity: "ERROR",
-    scope: "decision_output",
-    message_zh: "市场与报价正常，但 5 分钟决策输出已超过容许节奏。",
-    blocking: true,
-    evidence: { status: "STALLED", age_seconds: 1200 },
-  }]);
-
-  assert.equal(incident.title_zh, "决策输出停滞");
-  assert.equal(incident.root_event.scope, "decision_output");
-  assert.equal(incident.action_state, "ACTION_REQUIRED");
-  assert.equal(operationalIncidentActionLabels[incident.action_state], "需要人工处理");
-  assert.deepEqual(operationalEventDiagnostic(incident.root_event), {
-    status: "STALLED · 已持续 20 分 0 秒",
-    component: "5 分钟决策输出",
-    reasons: [],
-  });
-});
-
 test("retains bounded operational incidents for deterministic Preview hydration", () => {
   const operationalHealth = {
     schema_version: "operational-health.v1",
@@ -182,21 +159,6 @@ test("retains bounded operational incidents for deterministic Preview hydration"
   assert.deepEqual(compact.operational_health, operationalHealth);
   const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
   assert.ok(manifest.statusInlineKeys.includes("operational_health"));
-});
-
-test("bounds Preview decision evidence without retaining model internals", () => {
-  const rows = Array.from({ length: 20 }, (_, index) => ({
-    id: index,
-    features: { private: index },
-    predictions: { private: index },
-    decision: index % 2 ? "WAIT" : "LONG",
-  }));
-  const status = compactPreviewStatus({ recent_decisions: rows });
-  assert.equal(status.recent_decisions.length, 18);
-  assert.equal(status.recent_decisions[0].decision, "LONG");
-  assert.ok(!("features" in status.recent_decisions[0]));
-  assert.ok(!("predictions" in status.recent_decisions[0]));
-  assert.equal(compactPreviewAuditDetail({ recent_decisions: rows }).recent_decisions.length, 12);
 });
 
 test("summarizes Assistant queue evidence without exposing job content", () => {
@@ -375,59 +337,6 @@ test("renders Daily Brief from authoritative date lifecycle state", () => {
   );
 });
 
-test("labels version results from their durable evaluation state", () => {
-  assert.equal(versionResultLabel({ oos_rows: 12, evaluation_status: "HAS_RESULTS" }, "+1.250%"), "+1.250%");
-  assert.equal(versionResultLabel({ oos_rows: 0, evaluation_status: "AWAITING_OUTCOME" }, "+0.000%"), "等待结果");
-  assert.equal(versionResultLabel({ oos_rows: 0, evaluation_status: "OUTCOME_UNAVAILABLE" }, "+0.000%"), "无结果");
-  assert.equal(versionResultLabel({ oos_rows: 0, evaluation_status: "AWAITING_FIRST_PREDICTION" }, "+0.000%"), "没行动");
-  assert.equal(versionResultLabel({ oos_rows: 0, evaluation_status: "NO_PREDICTIONS" }, "+0.000%"), "没行动");
-  assert.equal(versionResultLabel({ oos_rows: 0 }, "+0.000%"), "状态未知");
-});
-
-test("derives model handovers from the predictions actually shown", () => {
-  assert.deepEqual(modelVersionMarkers([
-    { decision_time: "2026-08-14T01:00:00Z", model_version: "version-a" },
-    { decision_time: "2026-08-14T01:05:00Z", model_version: "version-a" },
-    { decision_time: "2026-08-14T01:10:00Z", model_version: "version-b" },
-    { decision_time: "2026-08-14T01:15:00Z", model_version: "version-b" },
-    { decision_time: "2026-08-14T01:20:00Z", model_version: "version-c" },
-  ]), [
-    {
-      decision_time: "2026-08-14T01:10:00Z",
-      previous_model_version: "version-a",
-      model_version: "version-b",
-    },
-    {
-      decision_time: "2026-08-14T01:20:00Z",
-      previous_model_version: "version-b",
-      model_version: "version-c",
-    },
-  ]);
-  assert.deepEqual(modelVersionMarkers([
-    { decision_time: "2026-08-14T01:00:00Z", model_version: "version-a" },
-  ]), []);
-});
-
-test("aligns models by comparable training cutoff without inventing history", () => {
-  const chart = buildTrainingCutoffChart([
-    { model_identity: "MARKET_ONLY", created_at: "2026-08-14T01:00:00Z", generation: 1, training_rows: 1000 },
-    { model_identity: "MARKET_ONLY", created_at: "2026-08-14T02:00:00Z", generation: 2, training_rows: 1050 },
-    { model_identity: "MARKET_ONLY", created_at: "2026-08-14T03:00:00Z", generation: 3, training_rows: 1100 },
-    { model_identity: "NEWS_ONLY", created_at: "2026-08-14T02:00:00Z", generation: 1, training_rows: 1050 },
-    { model_identity: "NEWS_ONLY", created_at: "2026-08-14T03:00:00Z", generation: 2, training_rows: 1100 },
-    { model_identity: "NEWS_ONLY", created_at: "2026-08-14T03:00:00Z", generation: 3, training_rows: 1100 },
-  ], row => row.training_rows);
-
-  assert.deepEqual(chart.cutoffs, [1000, 1050, 1100]);
-  const market = chart.series.find(series => series.modelIdentity === "MARKET_ONLY");
-  const news = chart.series.find(series => series.modelIdentity === "NEWS_ONLY");
-  assert.deepEqual(market.points.map(point => point.cutoffIndex), [0, 1, 2]);
-  assert.deepEqual(news.points.map(point => point.cutoffIndex), [1, 2, 2]);
-  assert.equal(news.points[0].row.training_rows, 1050);
-  assert.deepEqual(news.points.slice(1).map(point => point.row.generation), [2, 3]);
-  assert.equal(chart.cutoffs.at(-1), 1100);
-});
-
 test("keeps branch throughput limits while refreshing Preview metrics from D1", () => {
   const merged = withPreviewIdentity({
     annotation_queue: { ready: 9, requests_per_minute: 48 },
@@ -587,16 +496,16 @@ test("keeps every remaining audit destination in one balanced desktop grid", () 
   const view = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const auditGrid = [...css.matchAll(/\.audit-tabs\s*\{([^}]*)\}/g)]
     .map((match) => match[1])
-    .find((rule) => /grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/.test(rule)) ?? "";
-  assert.match(auditGrid, /grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/);
+    .find((rule) => /grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/.test(rule)) ?? "";
+  assert.match(auditGrid, /grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
   assert.match(auditGrid, /gap:0/);
   assert.match(auditGrid, /padding:0/);
   assert.match(auditGrid, /background:var\(--paper\)/);
   assert.match(css, /\.audit-tabs a \{ border:0; background:var\(--paper\); \}/);
-  assert.match(css, /\.audit-tabs a:not\(:nth-child\(4n\+1\)\) \{ border-left:1px solid var\(--ink\); \}/);
-  assert.match(css, /\.audit-tabs a:nth-child\(n\+5\) \{ border-top:1px solid var\(--ink\); \}/);
+  assert.match(css, /\.audit-tabs a:not\(:nth-child\(3n\+1\)\) \{ border-left:1px solid var\(--ink\); \}/);
+  assert.match(css, /\.audit-tabs a:nth-child\(n\+4\) \{ border-top:1px solid var\(--ink\); \}/);
   assert.doesNotMatch(view, /audit-tab-primary/);
-  assert.equal(view.match(/<a href="\/audit\?view=/g)?.length, 8);
+  assert.equal(view.match(/<a href="\/audit\?view=/g)?.length, 6);
   assert.match(css, /\.annotation-queue \{ grid-template-columns:repeat\(4,minmax\(0,1fr\)\); gap:0;[^}]*background:var\(--paper\); \}/);
   assert.match(css, /\.annotation-queue>span\+span \{ border-left:1px solid var\(--ink\); \}/);
   assert.match(css, /\.annotation-queue>details \{ grid-column:1\/-1; border-top:1px solid var\(--ink\); padding:0; \}/);
@@ -632,7 +541,7 @@ test("renders the live room inside the canonical product shell", async () => {
   const html = await response.text();
   assert.match(html, /Aurum Signal Room/);
   assert.match(html, /XAUUSD · Forward-only intelligence/);
-  assert.match(html, /新闻与决策/);
+  assert.match(html, /新闻与事件/);
   assert.match(html, /<a[^>]*aria-current="page"[^>]*>总览<\/a>/);
   assert.doesNotMatch(html, /返回实时室|新闻 \/ 结果/);
   assert.doesNotMatch(html, /next\/link|rel="prefetch"/);
@@ -668,7 +577,7 @@ test("keeps global shell ownership centralized and prevents view-level design dr
   assert.match(css.match(/\.dashboard-section-nav a \{([^}]+)\}/)?.[1] ?? "", /flex:1 1 0/);
   assert.match(mobile, /DASHBOARD_GLOBAL_DESTINATIONS\.map/);
   assert.doesNotMatch(mobile, /const SECTIONS|MobileDashboardSection/);
-  assert.equal(navigation.match(/label: "(?:总览|新闻与决策|系统|管理员登录)"/g)?.length, 3);
+  assert.equal(navigation.match(/label: "(?:总览|新闻与事件|系统|管理员登录)"/g)?.length, 3);
   assert.match(navigation, /href: "\/audit\?view=news"/);
   assert.match(shell, /href="\/health"/);
   assert.match(navigation, /DASHBOARD_ADMIN_DESTINATIONS/);
@@ -686,15 +595,15 @@ test("keeps global shell ownership centralized and prevents view-level design dr
 test("renders static public shell and path-specific admin shells with one invariant header", async () => {
   const routes = [
     ["/", "总览"],
-    ["/audit?view=news", "新闻与决策"],
-    ["/audit?view=league", "新闻与决策"],
+    ["/audit?view=news", "新闻与事件"],
+    ["/audit?view=league", "新闻与事件"],
     ["/health", "系统"],
     ["/admin", "管理员登录"],
     ["/admin/assistant", "管理员登录"],
     ["/admin/retry-jobs", "管理员登录"],
     ["/admin/ai-usage", "管理员登录"],
   ];
-  const publicLabels = ["总览", "新闻与决策"];
+  const publicLabels = ["总览", "新闻与事件"];
 
   for (const [path, activeLabel] of routes) {
     const { response, html } = await renderSettled(path, /dashboard-header topbar/);
@@ -798,8 +707,8 @@ test("keeps branch Preview identity and blocks writes", async () => {
 
   for (const path of [
     "/api/ingest", "/api/audit", "/api/audit-briefs",
-    "/api/audit-stories", "/api/audit-decisions",
-    "/api/learning", "/api/learning-history",
+    "/api/audit-stories",
+
     "/api/news-index", "/api/news-content", "/api/news-evidence", "/api/market-chart",
     "/api/market-history", "/api/news-questions", "/api/assistant-chat",
     "/api/assistant-worker/chat", "/api/assistant-worker/conversations",
@@ -844,38 +753,29 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   assert.match(health, /initialPayload \?\? readDashboardResource<StatusPayload>\("\/api\/status"\)/);
   assert.match(status, /const statusUrl = `\$\{ADMIN_API_PREFIX\}\/admin-status`/);
   assert.match(status, /readDashboardResource<StatusPayload>\(statusUrl\)/);
-  assert.match(previewResources, /previewBundle\.learning_summary/);
   const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
   const learning = readFileSync(new URL("../build/preview-learning.ts", import.meta.url), "utf8");
   const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
   const previewBuilder = readFileSync(new URL("../../scripts/validation/build_preview_bundle.py", import.meta.url), "utf8");
-  assert.match(vite, /compactPreviewLearning/);
   assert.match(vite, /compactPreviewStatus/);
   assert.match(vite, /compactPreviewAudit/);
   assert.match(vite, /compactPreviewAuditDetail/);
   assert.match(vite, /compactPreviewNewsIndex/);
-  assert.match(vite, /delete bundle\.learning/);
   assert.match(learning, /daily_news_briefs: 2/);
-  assert.match(learning, /recent_decisions: 12/);
   assert.match(learning, /value\.slice\(0, limit\)/);
   assert.match(learning, /items\.slice\(0, PREVIEW_NEWS_PAGE_SIZE\)/);
   assert.match(learning, /totals_scope: "BUILD_SNAPSHOT"/);
   assert.match(learning, /history_resource: market\.history_resource \?\? PREVIEW_RESOURCES\.marketHistory/);
-  assert.match(learning, /training_markers: market\.training_markers \?\? \[\]/);
-  for (const key of ["story_event_candidates", "recent_decisions"]) {
+  for (const key of ["story_event_candidates"]) {
     assert.ok(manifest.auditInlineKeys.includes(key), key);
   }
   assert.ok(!manifest.statusInlineKeys.includes("news_evidence"));
   assert.equal(manifest.resources.newsEvidence, "/api/news-evidence");
   assert.equal(manifest.resources.marketHistory, "/api/market-history");
   assert.doesNotMatch(page, /function previewRoomResources/);
-  assert.match(learning, /models\.filter/);
-  assert.match(learning, /lifecycle_status === "LATEST"/);
-  assert.match(learning, /identity_curves: \[\]/);
   assert.match(previewBuilder, /"news_evidence": news_evidence/);
   assert.match(previewBuilder, /UNAVAILABLE_IN_BUILD_SNAPSHOT/);
   const auditView = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
-  assert.match(auditView, /liveOosModelGroups === undefined\s*\? "读取中"/);
   assert.doesNotMatch(auditView, /Live OOS[^\n]*点击查看/);
   assert.doesNotMatch(page, /auditView === "league"/);
   assert.match(previewResources, /\[PREVIEW_RESOURCES\.status\]: publicDashboardStatus\(previewBundle\.status\)/);
@@ -890,7 +790,6 @@ test("uses one current-data contract across every dashboard surface", () => {
   const statusRoute = readFileSync(new URL("../app/api/status/route.ts", import.meta.url), "utf8");
   const statusReader = readFileSync(new URL("../app/api/_shared/dashboard-status.ts", import.meta.url), "utf8");
   const statusContract = readFileSync(new URL("../app/api/_shared/dashboard-snapshot.ts", import.meta.url), "utf8");
-  const learningRoute = readFileSync(new URL("../app/api/learning/route.ts", import.meta.url), "utf8");
 
   assert.doesNotMatch(component, /正在同步页面当前指标/);
   assert.doesNotMatch(component, />同步</);
@@ -905,19 +804,14 @@ test("uses one current-data contract across every dashboard surface", () => {
     assert.match(source, /CurrentDataNotice/, `${view} must expose current-data state`);
   }
   const audit = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
-  assert.match(audit, /live_oos_model_groups !== undefined\s*\? statusState/);
 
   const statusD1 = statusReader.indexOf("dashboard_snapshots WHERE id = ?");
   const statusPreviewFallback = statusRoute.indexOf("if (previewBundle) return previewJson(publicDashboardStatus(previewBundle.status))");
-  const learningD1 = learningRoute.indexOf("dashboard_snapshots WHERE id = ?");
-  const learningPreviewFallback = learningRoute.indexOf("if (previewBundle?.learning_summary)");
   assert.ok(statusD1 >= 0 && statusPreviewFallback > statusD1, "Preview status must prefer current D1 data");
-  assert.ok(learningD1 >= 0 && learningPreviewFallback > learningD1, "Preview learning must prefer current D1 data");
   assert.match(statusRoute, /withPreviewIdentity\(current\.payload, previewBundle\.status\)/);
   assert.match(statusRoute, /publicDashboardStatus\(payload\)/);
   assert.match(statusReader, /PUBLIC_STATUS_PRIVATE_FIELDS/);
   assert.match(statusContract, /"annotation_queue"[\s\S]*"llm_routing"/);
-  assert.match(learningRoute, /"X-Aurum-Preview": "read-only-d1-snapshot"/);
 });
 
 test("preserves field-level provenance while overlaying current read-only status", async () => {
@@ -984,26 +878,6 @@ test("preserves field-level provenance while overlaying current read-only status
   assert.equal(result.system.source_of_truth, "生产 D1 当前只读数据");
 });
 
-test("uses frozen bounded status fields only when current D1 omits them", () => {
-  const frozen = {
-    recent_decisions: [{ decision_id: "frozen" }],
-    counts: { live_oos_model_groups: 3 },
-  };
-  const missing = withPreviewIdentity({ counts: { decision_events: 20 } }, frozen);
-  assert.deepEqual(missing.recent_decisions, [{ decision_id: "frozen" }]);
-  assert.equal(missing.counts.live_oos_model_groups, 3);
-  assert.ok(missing.preview.branch_snapshot.status_paths.includes("recent_decisions"));
-  assert.ok(missing.preview.branch_snapshot.status_paths.includes("counts.live_oos_model_groups"));
-
-  const realZero = withPreviewIdentity({
-    recent_decisions: [], counts: { decision_events: 20, live_oos_model_groups: 0 },
-  }, frozen);
-  assert.deepEqual(realZero.recent_decisions, []);
-  assert.equal(realZero.counts.live_oos_model_groups, 0);
-  assert.ok(!realZero.preview.branch_snapshot.status_paths.includes("recent_decisions"));
-  assert.ok(!realZero.preview.branch_snapshot.status_paths.includes("counts.live_oos_model_groups"));
-});
-
 test("marks only declared branch snapshot fields as snapshots", () => {
   const paths = ["factor_coverage", "annotation_queue.requests_per_minute"];
   assert.equal(statusFieldPhase("ready", paths, "factor_coverage"), "snapshot");
@@ -1051,7 +925,7 @@ test("keeps every audit collection in the compact Preview manifest", () => {
   const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
   for (const key of [
     "storylines", "story_event_candidates", "theme_streams",
-    "market_reaction_streams", "recent_decisions",
+    "market_reaction_streams",
   ]) {
     assert.ok(manifest.auditInlineKeys.includes(key), key);
   }
@@ -1060,7 +934,6 @@ test("keeps every audit collection in the compact Preview manifest", () => {
   assert.equal(manifest.resources.audit, "/api/audit");
   assert.equal(manifest.resources.auditBriefs, "/api/audit-briefs");
   assert.equal(manifest.resources.auditStories, "/api/audit-stories");
-  assert.equal(manifest.resources.auditDecisions, "/api/audit-decisions");
   assert.equal(manifest.resources.newsEvidence, "/api/news-evidence");
   assert.deepEqual(manifest.branchSnapshotStatusPaths, [
     "factor_coverage",
@@ -1244,7 +1117,6 @@ test("refreshes current resources without polling build-snapshot-only resources"
   assert.match(helper, /live:\s*15_000/);
   assert.match(helper, /status:\s*60_000/);
   assert.match(helper, /news:\s*30_000/);
-  assert.match(helper, /learning:\s*300_000/);
   assert.match(helper, /deployment:\s*120_000/);
   assert.match(helper, /DashboardResourceMode = "current" \| "build-snapshot"/);
   assert.match(helper, /resourceMode === "current"/);
@@ -1364,16 +1236,6 @@ test("returns a verified main revision through the deployment status endpoint", 
   assert.match(snapshot, /json_valid\(payload\)/);
   assert.match(snapshot, /content-length/);
   assert.match(snapshot, /MAX_DASHBOARD_SNAPSHOT_BYTES/);
-});
-
-test("replaces the forecast state with the broker reopening countdown", () => {
-  const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
-  assert.match(source, /const forecastStatus = marketClosed/);
-  assert.match(source, /距离重开/);
-  assert.match(source, /marketClosed \|\| marketUnavailable \|\| \(signalRemaining > 0 && online\)/);
-  assert.match(source, /等待行情恢复/);
-  assert.match(source, /等待最新预测/);
-  assert.doesNotMatch(source, /当前不可参考/);
 });
 
 test("renders the Gemini quota status route", async () => {
@@ -1719,29 +1581,13 @@ test("reports cTrader health independently from downstream decision lag", () => 
   });
 });
 
-test("live room presents broker-confirmed closure instead of a WAIT prediction", () => {
-  const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
-  assert.match(source, /距离重开/);
-  assert.doesNotMatch(source, /cTrader 已确认 XAUUSD 休市/);
-  assert.match(source, /const dialAction = marketClosed/);
-  assert.match(source, /marketUnavailable\s*\? "无行情"/);
-});
-
-test("live room hides a stale forecast when broker status is unavailable", () => {
-  const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
-  assert.match(source, /const marketUnavailable = Boolean\(payload && !online && !marketClosed\)/);
-  assert.match(source, /marketUnavailable\s*\? "unavailable"/);
-  assert.match(source, /marketUnavailable\s*\? "无行情"/);
-  assert.match(source, /marketClosed \|\| marketUnavailable \|\|/);
-});
-
 test("renders the news and decision audit route", async () => {
   const response = await render("/audit?view=news");
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /Aurum Signal Room/);
   assert.match(html, /XAUUSD · Forward-only intelligence/);
-  assert.match(html, /新闻与决策/);
+  assert.match(html, /新闻与事件/);
   const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   assert.match(source, />新闻 <b>/);
   assert.match(source, /当前可用新闻事件/);
@@ -1769,10 +1615,8 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /大视野新闻还纳入单一可靠来源并降低权重/);
   assert.match(source, /api\/news-content\?key=/);
   assert.match(source, /api\/news-index\?/);
-  assert.match(source, /api\/learning/);
   assert.match(source, /briefs: "\/api\/audit-briefs"/);
   assert.match(source, /stories: "\/api\/audit-stories"/);
-  assert.match(source, /decisions: "\/api\/audit-decisions"/);
   assert.match(source, /当前页面尚未加载，不会显示为零或空资料/);
   assert.match(source, /if \(view !== "news"\) \{[\s\S]*?fullNewsIndexReadyRef\.current[\s\S]*?refreshNews\(true\)/);
   assert.match(source, /Do not poll off-screen/);
@@ -1784,7 +1628,7 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /row\.model_unseen_reason_codes\.map/);
   assert.doesNotMatch(source, /IDENTITY_LABELS/);
   assert.match(source, /MODEL_LABELS\[identity\] \?\? identity/);
-  assert.match(source, /读取中…/);
+  assert.match(source, /读取中/);
   assert.match(source, /学习数据暂不可用|暂不可用/);
   assert.doesNotMatch(source, /payload\?\.system\.online && !error/);
   assert.match(source, /api\/news-content\?keys=/);
@@ -1812,20 +1656,12 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /个 key 轮换|每分钟最多生成/);
   assert.ok(source.indexOf('<nav className="audit-tabs"') < source.indexOf('<section className="annotation-queue"'));
   assert.doesNotMatch(source, /已经积累多少结果|真实上线后结果|当前模型学到哪里|距离下次学习/);
-  assert.match(source, /上一次学习/);
-  assert.match(source, /下一次学习/);
-  assert.match(source, /还差 \$\{formatExactCount\(rowsUntilTraining\)\} 条/);
-  assert.match(source, /目标 \$\{formatExactCount\(payload\?\.training\?\.next_training_at\)\} 条/);
   assert.doesNotMatch(source, /next_training_at\)} − \$\{formatExactCount/);
   assert.doesNotMatch(source, /查看技术审计明细/);
   assert.doesNotMatch(source, /旧工程数据|修复后的训练种子|上线后前向结果/);
   assert.doesNotMatch(source, /Legacy Engineering|Repaired Seed|Next fit/);
   assert.match(source, /大视野新闻还纳入单一可靠来源并降低权重/);
   assert.match(source, /按事件类型和有效交易时间逐步衰减/);
-  assert.match(source, /无效样本/);
-  assert.match(source, /activeLearningIdentities/);
-  assert.match(source, /counts\?\.live_oos_model_groups/);
-  assert.match(source, /Live OOS 学习曲线 · \{liveOosModelGroups === undefined \? "读取中"/);
   assert.doesNotMatch(source, /Live OOS 学习曲线 · .*点击查看/);
   assert.match(source, /className="news-table"/);
 });
@@ -1903,51 +1739,9 @@ test("keeps large chart snapshots off the Worker JSON serialization path", () =>
   assert.doesNotMatch(route, /NextResponse\.json\(JSON\.parse\(row\.payload\)/);
 });
 
-test("reads the bounded learning first page before the compact live relay", () => {
-  const source = readFileSync(new URL("../app/api/learning/route.ts", import.meta.url), "utf8");
-  const d1Read = source.indexOf("dashboard_snapshots WHERE id = ?");
-  const relayRead = source.indexOf("process.env.STATUS_RELAY_URL");
-  assert.ok(d1Read >= 0, "learning route must read the dedicated D1 snapshot");
-  assert.ok(relayRead > d1Read, "the compact relay must remain a fallback");
-  assert.match(source, /append-only learning records stored in D1/);
-  assert.match(source, /return new Response\(row\.payload/);
-  assert.doesNotMatch(source, /NextResponse\.json\(JSON\.parse\(row\.payload\)/);
-  assert.match(source, /previewBundle\?\.learning_summary/);
-  assert.match(source, /writeDashboardSnapshot\(request, binding, 3,/);
-  assert.doesNotMatch(source, /JSON\.parse\(serialized\)|TextEncoder/);
-});
-
-test("stores growing learning history as bounded idempotent D1 records", () => {
-  const route = readFileSync(new URL("../app/api/learning-history/route.ts", import.meta.url), "utf8");
-  const sync = readFileSync(new URL("../../xauusd_forecaster/dashboard/sync/resources.py", import.meta.url), "utf8");
-  const contracts = readFileSync(new URL("../../xauusd_forecaster/dashboard/resource_contracts.py", import.meta.url), "utf8");
-  assert.match(route, /MAX_INGEST_BYTES = 350_000/);
-  assert.match(route, /readBoundedBody\(request, MAX_INGEST_BYTES\)/);
-  assert.match(route, /json_each\(json_extract\(doc,'\$\.records'\)\)/);
-  assert.match(route, /ON CONFLICT\(resource,record_key\) DO UPDATE/);
-  assert.match(route, /body\.serialized\.length < 2000/);
-  assert.match(route, /MAX_RESPONSE_BYTES = 400_000/);
-  assert.match(route, /length\(CAST\(payload AS BLOB\)\)/);
-  assert.match(route, /running_bytes<=\?/);
-  assert.doesNotMatch(route, /results\.map\(row => JSON\.parse\(row\.payload\)\)/);
-  assert.match(route, /next_cursor/);
-  assert.match(route, /type LearningCursor/);
-  assert.match(route, /watermarkEpoch/);
-  assert.match(route, /\(lr\.sort_epoch,lr\.record_key\)<=\(watermark\.sort_epoch,watermark\.record_key\)/);
-  assert.match(route, /FROM learning_record_counts/);
-  assert.match(route, /ORDER BY lr\.sort_epoch DESC,lr\.record_key DESC LIMIT \?/);
-  assert.doesNotMatch(route, /SELECT count\(\*\) FROM base/);
-  assert.match(contracts, /LEARNING_HISTORY_CONTRACT_VERSION = "exact-chart-history-v1"/);
-  assert.doesNotMatch(route, /row_number\(\) OVER \(PARTITION BY model_identity/);
-  assert.match(sync, /learning_history_records/);
-  assert.match(sync, /from xauusd_forecaster\.dashboard\.resource_contracts import/);
-  assert.match(contracts, /LEARNING_SUMMARY_GROUPS_PER_IDENTITY = 6/);
-});
-
 test("uses one D1-validated writer for every large dashboard snapshot", () => {
   for (const [path, id] of [
     ["../app/api/market-chart/route.ts", 2],
-    ["../app/api/learning/route.ts", 3],
   ]) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
     assert.match(source, new RegExp(`writeDashboardSnapshot\\(request, binding, ${id},`), path);
@@ -2163,7 +1957,6 @@ test("handles a non-JSON service failure without exposing a parser error", () =>
   assert.match(resource, /数据服务暂时不可用/);
   assert.match(resource, /await response\.text\(\)/);
   assert.doesNotMatch(resource, /await response\.json\(\)/);
-  assert.match(audit, /DASHBOARD_REFRESH_INTERVALS\.learning/);
 });
 
 test("shows single events immediately and keeps later changes in one thread", () => {
@@ -2198,183 +1991,6 @@ test("shows single events immediately and keeps later changes in one thread", ()
   assert.doesNotMatch(css, /\.story-grid[^}]+background:var\(--ink\)/);
 });
 
-test("keeps the learning disclaimer short and explicit", () => {
-  const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
-  assert.match(source, /仅供研究观察，不代表盈利，也不会自动下单/);
-  assert.doesNotMatch(source, /早期曲线用于观察学习过程/);
-  assert.doesNotMatch(source, /Champion 始终是 Always Wait/);
-});
-
-test("uses one modal timeline for model generations and market decisions", () => {
-  const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
-  const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
-  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(page, /打开交互图表/);
-  assert.match(page, /新闻修正量/);
-  assert.match(page, /核心新闻修正/);
-  assert.match(page, /大视野新闻修正量/);
-  assert.match(page, /return-flow/);
-  assert.match(page, /本组开始前的历史累计/);
-  assert.match(page, /加入本组后的连续累计/);
-  assert.match(page, /本组独立贡献/);
-  assert.match(modal, /长期 OOS 曲线/);
-  assert.match(modal, /每组独立成绩/);
-  assert.match(modal, /所有模型的训练组成绩/);
-  assert.match(modal, /const pageSize = 6/);
-  assert.match(modal, /visibleRows\.map/);
-  assert.match(modal, /function VersionPagination/);
-  assert.match(modal, /训练组分页（/);
-  assert.match(modal, /aria-label="上一页训练组"/);
-  assert.match(modal, /aria-label="下一页训练组"/);
-  assert.doesNotMatch(modal, /pendingPageScrollRef|scroller\.scrollTo|scrollIntoView/);
-  assert.match(modal, /className="version-page-results" aria-busy=\{pageLoading\}/);
-  assert.match(modal, /busy=\{pageLoading\}/);
-  assert.match(css, /version-page-results \{ min-height:420px; display:flex; flex-direction:column/);
-  assert.match(modal, /position="bottom"/);
-  assert.match(modal, /buildTrainingCutoffChart/);
-  assert.match(modal, /crossesMissingCutoff/);
-  assert.match(modal, /strokeDasharray=\{crossesMissingCutoff \? "7 6"/);
-  assert.match(modal, /共同训练截止量对齐/);
-  assert.match(modal, /查看模型明细/);
-  assert.match(modal, /最近20个训练截止点/);
-  assert.match(modal, /图中 \{formatExactCount\(graphRows\.length\)\} \/ \{formatExactCount\(matureRows\.length\)\} 个成熟结果/);
-  assert.match(modal, /组等待结果/);
-  assert.doesNotMatch(modal, /横轴按共同训练运行时间排列|pointerTime/);
-  assert.match(modal, /每30分钟（固定 :00 \/ :30）/);
-  assert.match(page, /六套模型，现在表现怎样/);
-  assert.match(page, /等待新版生成/);
-  assert.match(page, /training-card-total/);
-  assert.match(page, /className="training-progress-tail"/);
-  assert.match(css, /\.training-card-total strong \.training-progress-tail \{[^}]*font-size:\.42em/);
-  assert.doesNotMatch(css, /\.training-progress-pair small \{/);
-  assert.match(page, /还差/);
-  assert.doesNotMatch(page, /含新闻的决策时点/);
-  assert.doesNotMatch(page, /重复决策样本，不是文章数/);
-  assert.doesNotMatch(page, /learning-data-flow/);
-  assert.match(page, /方法与实盘边界/);
-  assert.match(modal, /K线与决策/);
-  assert.doesNotMatch(modal, /冻结 Shadow 动作/);
-  assert.match(modal, /每小时 :00 \/ :30/);
-  assert.match(modal, /每5分钟/);
-  assert.doesNotMatch(modal, /成本后 EV 较优方向/);
-  assert.doesNotMatch(modal, /setArrowMode/);
-  assert.match(modal, /U5 只是统一波动尺度，不是 WAIT 开关/);
-  assert.match(modal, /<details className="wait-explainer"><summary>方向怎样产生<\/summary>/);
-  assert.match(modal, /<details className="market-reading-guide"><summary>图表怎么看<\/summary>/);
-  assert.match(modal, /className="market-action-filters"/);
-  assert.match(modal, /LONG <span>看多<\/span>/);
-  assert.match(modal, /market-version-toggle/);
-  assert.doesNotMatch(modal, /等待退出 OOS/);
-  assert.match(modal, /点击图中的三角形/);
-  assert.match(modal, /Ridge 预测未来30分钟连续收益/);
-  assert.match(modal, /较高的一边只要大于0就记录为 Shadow 方向/);
-  assert.match(modal, /return bestEv > 0 \? bestAction : "WAIT"/);
-  assert.match(modal, /每根K线5分钟 · 每个箭头预测未来30分钟/);
-  assert.match(modal, /全部历史/);
-  assert.match(modal, /查看更早行情/);
-  assert.match(modal, /查看较新行情/);
-  assert.match(modal, /title="暂无行情数据"/);
-  assert.match(modal, /模型当时尚未开始预测/);
-  assert.match(modal, /这段时间没有预测/);
-  assert.match(modal, /marketGaps/);
-  assert.match(modal, /"数据缺口"/);
-  assert.match(modal, /gap\.duration >= 45 \* 60_000/);
-  assert.match(modal, /历史＋实时成熟 OOS（只追加，不重写）/);
-  assert.match(modal, /24小时/);
-  assert.match(modal, /7天/);
-  assert.match(modal, /30天/);
-  assert.match(modal, /全部历史/);
-  assert.match(modal, /较早一段/);
-  assert.match(modal, /较晚一段/);
-  assert.match(modal, /回到最新/);
-  assert.match(modal, /仅在点数过多时抽样/);
-  assert.match(modal, /Page by elapsed market-open time/);
-  assert.match(modal, /Plot result time, not wall-clock time/);
-  assert.match(modal, /curve-gap-bridge/);
-  assert.match(modal, /抽样点连接/);
-  assert.match(modal, /curve-gap-carry-in/);
-  assert.match(modal, /窗口开始前的抽样连接/);
-  assert.doesNotMatch(modal, /points\.unshift\(\{ decision_time: new Date\(start\)/);
-  assert.doesNotMatch(modal, /points\.push\(\{ decision_time: new Date\(end\)/);
-  assert.match(modal, /成本后EV较高方向/);
-  assert.match(modal, /模型版本/);
-  assert.match(modal, /历史规则不一致/);
-  assert.match(modal, /getUTCMinutes\(\) % 30 === 0/);
-  assert.match(modal, /const xAtIndex/);
-  assert.match(modal, /条模型评分/);
-  assert.match(modal, /所有模型的训练组成绩/);
-  assert.match(modal, /按同一训练截止点比较/);
-  assert.match(modal, /pendingRows = graphGroups\.length - matureRows\.length/);
-  assert.match(modal, /最近20个训练截止点/);
-  assert.match(modal, /aria-label=\{pointLabel\}/);
-  assert.match(modal, /comparisonCutoff/);
-  assert.doesNotMatch(modal, /activeCycle|hoveredCycle|pinnedCycle/);
-  assert.match(modal, /versionBoundaries/);
-  assert.match(modal, /pools\.direction !== null && pools\.direction !== state\.lastDirectionRows/);
-  assert.match(modal, /pools\.news !== null && pools\.news !== state\.lastNewsRows/);
-  assert.match(modal, /sort\(\(a, b\) => Date\.parse\(a\) - Date\.parse\(b\)\)/);
-  assert.match(modal, /方向 \$\{boundary\.direction\}/);
-  assert.match(modal, /新闻 \$\{boundary\.news\}/);
-  assert.match(modal, /version-boundary-badge/);
-  assert.match(modal, /const laneEnds: number\[\] = \[\]/);
-  assert.match(modal, /boundaryLayouts/);
-  assert.match(modal, /const compactBoundaryRail = range !== "24h"/);
-  assert.match(modal, /clusterTimelineItems\(displayedBoundaries/);
-  assert.match(modal, /boundaryDividerY = compactBoundaryRail \? 24/);
-  assert.match(modal, /<circle className="version-event-dot" aria-hidden="true"/);
-  assert.doesNotMatch(modal, /version-event-control|version-event-hit|selectedBoundary|hoveredBoundary/);
-  assert.doesNotMatch(modal, /curve-event-readout|完整换版证据|点选图表上方圆点查看/);
-  assert.doesNotMatch(css, /\.version-event-control|\.version-event-hit|\.curve-event-readout/);
-  assert.doesNotMatch(modal, /<title>\{boundary\./);
-  assert.match(css, /\.curve-navigation-actions button \{[^}]*width:44px;[^}]*min-height:44px/);
-  assert.match(modal, /version-boundary-leader/);
-  assert.match(modal, /boundaryDividerY/);
-  assert.doesNotMatch(modal, /标签分别显示方向池与新闻池/);
-  assert.match(modal, /version-label-divider/);
-  assert.doesNotMatch(modal, /changes\[0\]\?\.training_rows/);
-  assert.match(modal, /模型换版本/);
-  assert.match(modal, /30分钟结果/);
-  assert.match(modal, /无效样本 · 已隔离/);
-  assert.doesNotMatch(modal, /三种动作同一30分钟结果/);
-  assert.doesNotMatch(modal, /30分钟退出线/);
-  assert.match(css, /\.version-pagination/);
-  assert.match(css, /\.version-pagination button \{ width:46px; height:46px/);
-  assert.match(css, /font-size:clamp\(24px,7vw,28px\)/);
-  assert.match(css, /height:calc\(100dvh - 16px\)/);
-  assert.match(css, /grid-template-rows:auto auto minmax\(0,1fr\) auto/);
-  assert.match(modal, /graph-modal-\$\{tab\}/);
-  assert.match(modal, /useLayoutEffect\(\(\) => \{[\s\S]*const cancel = settleResponsiveScroll\(options => bodyRef\.current\?\.scrollTo\(options\), \(\) => bodyRef\.current\?\.scrollTop \?\? 0, pendingScrollTop\.current!\);[\s\S]*return cancel;[\s\S]*\}, \[tab\]\)/);
-  assert.match(modal, /graph-scope-mobile/);
-  assert.match(css, /graph-modal\.graph-modal-curve,\.graph-modal\.graph-modal-versions \{ height:calc\(100dvh - 16px\); max-height:none; grid-template-rows:auto auto minmax\(0,1fr\) auto/);
-  assert.match(css, /graph-modal\.graph-modal-curve>\.graph-modal-body,\.graph-modal\.graph-modal-versions>\.graph-modal-body \{ min-height:0; max-height:none; overflow:auto/);
-  assert.match(css, /scrollbar-gutter:stable/);
-  assert.match(css, /long-curve-block>\.learning-svg \{ height:clamp\(390px,48dvh,520px\)/);
-  assert.match(css, /\.curve-navigation/);
-  assert.match(css, /version-ledger-controls \{ display:grid; grid-template-columns:minmax\(210px,1\.16fr\) minmax\(190px,1fr\) minmax\(180px,\.9fr\)/);
-  assert.doesNotMatch(css, /\.modal-version-ledger>header \{[^}]*position:sticky/);
-  assert.match(modal, /className="version-result-head"/);
-  assert.match(modal, /className="version-training"/);
-  assert.match(modal, /className="version-result-metrics"/);
-  assert.match(modal, /data-label="上线后"/);
-  assert.match(modal, /data-label="本组收益"/);
-  assert.match(modal, /data-label="PF \/ 出方向"/);
-  assert.match(css, /\.version-result-metrics>\[data-label\]::before \{ content:attr\(data-label\)/);
-  assert.match(css, /@media \(max-width:1100px\)\{[\s\S]*?\.version-ledger>header \{ grid-template-columns:1fr/);
-  assert.match(css, /long-curve-block>\.chart-legend \{ margin-top:16px; padding-bottom:10px/);
-});
-
-test("keeps the learning page focused and folds secondary research below the scoreboard", () => {
-  const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
-  const summary = page.indexOf('<div className="learning-summary-grid">');
-  const graph = page.indexOf('<section className="graph-launch">');
-  const scoreboard = page.indexOf('<section className="model-score-summary">');
-  const methods = page.indexOf('<details className="model-method-note">', scoreboard);
-  assert.ok(summary >= 0 && graph > summary);
-  assert.ok(scoreboard > graph && methods > scoreboard);
-  assert.doesNotMatch(page, /learning-audit-details|NEWS MODEL CONTRACT/);
-  assert.doesNotMatch(page, /league-cost-note/);
-});
-
 test("accepts split audit resources without status-only system provenance", () => {
   const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   assert.match(page, /system\?: \{ online: boolean/);
@@ -2389,7 +2005,6 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   const responsiveScroll = readFileSync(new URL("../app/_lib/responsive-scroll.ts", import.meta.url), "utf8");
   const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const mobileNav = readFileSync(new URL("../app/_components/MobileDashboardNav.tsx", import.meta.url), "utf8");
-  const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(page, /className="audit-tabs"/);
   assert.match(page, /className="audit-view-picker"/);
@@ -2407,7 +2022,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(shell, /<MobileDashboardNav[\s\S]*activeDestination=\{activeDestination\}/);
   assert.match(mobileNav, /DASHBOARD_GLOBAL_DESTINATIONS/);
   assert.doesNotMatch(mobileNav, /const SECTIONS|学习曲线|AI 模型用量|系统健康/);
-  for (const label of ["总览", "新闻与决策", "系统", "管理员登录"]) {
+  for (const label of ["总览", "新闻与事件", "系统", "管理员登录"]) {
     assert.match(navigation, new RegExp(label));
   }
   assert.match(mobileNav, /aria-label="切换主要区域"/);
@@ -2425,22 +2040,12 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /@media \(max-width:430px\)\{[\s\S]*?\.throughput-summary \{ grid-template-columns:1fr; \}/);
   assert.match(css, /\.graph-modal>nav \{ grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
   assert.match(css, /\.graph-modal,\.graph-modal\.graph-modal-curve,\.graph-modal\.graph-modal-versions \{ width:100vw; height:100dvh/);
-  assert.match(page, /return-value return-history/);
-  assert.match(page, /return-value return-total/);
-  assert.match(page, /return-value return-group/);
   assert.match(css, /\.compact-model-summary article \{ grid-template-columns:minmax\(0,1fr\)/);
   assert.match(css, /\.return-flow \{ width:100%; grid-template-columns:minmax\(0,1fr\) 12px minmax\(0,1fr\) 10px minmax\(0,1fr\)/);
   assert.match(css, /\.story-grid>article \{ overflow:hidden/);
   assert.match(css, /\.unassigned-story-events>div \{ grid-template-columns:minmax\(0,1fr\)/);
   assert.match(css, /\.return-value>span,\.return-value>strong \{ overflow:visible;[\s\S]*?font-size:clamp\(14px,4\.4vw,17px\)/);
   assert.match(css, /\.summary-cadence \{ display:grid; grid-template-columns:minmax\(0,1fr\) minmax\(0,1fr\)/);
-  assert.match(modal, /mobile-chart-scroll/);
-  assert.match(modal, /左右滑动浏览/);
-  assert.match(modal, /closeButtonRef\.current\?\.focus\(\)/);
-  assert.match(modal, /openerRef\.current\?\.focus\(\)/);
-  assert.match(modal, /event\.key !== "Tab"/);
-  assert.match(modal, /select:not\(\[disabled\]\), summary, \[href\]/);
-  assert.match(modal, /element\.getClientRects\(\)\.length > 0/);
   assert.match(css, /\.mobile-chart-scroll \{ width:100%; overflow-x:auto/);
   assert.match(css, /\.long-curve-block \.mobile-chart-scroll \{ overflow-x:auto; \}/);
   assert.match(css, /\.long-curve-block \.mobile-chart-scroll>\.learning-svg \{ width:720px; min-width:720px; min-height:300px; height:300px;/);
@@ -2454,16 +2059,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.market-chart-block \.mobile-chart-scroll>\.learning-svg \{ display:block; width:720px; min-width:720px; min-height:300px; height:300px;/);
   assert.match(css, /\.market-action-filters \{ grid-column:1\/-1; display:grid; grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
   assert.match(css, /\.market-action-filters button\.active\+button\.active \{ border-left-color:rgba\(239,235,223,\.58\); \}/);
-  assert.match(modal, /const selectNearestDecision = \(event: ReactMouseEvent<SVGSVGElement>\)/);
-  assert.match(modal, /onClick=\{selectNearestDecision\}/);
-  assert.match(modal, /左右滑动浏览 · 点击箭头查看30分钟结果/);
-  assert.match(modal, /className="market-selected-window-caption"/);
-  assert.match(modal, /预测 \{timeLabel\(activeSelected\.decision_time\)\} → 30分钟后/);
-  assert.doesNotMatch(modal, /selected-window[^\n]*<text/);
-  assert.match(modal, /useLayoutEffect\(\(\) => \{[\s\S]*?chart\.scrollLeft = chart\.scrollWidth - chart\.clientWidth;[\s\S]*?historyState, latestCandleTime/);
-  assert.match(modal, /Math\.max\(88, Math\.min\(220, 30 \+ label\.length \* 14\)\)/);
   assert.match(css, /\.market-selected-window-caption \{ display:flex;/);
-  assert.match(modal, /左右滑动浏览长期曲线 · 文字与时间轴保持可读大小/);
   assert.match(css, /\.market-chart-block>\.chart-legend \{ display:flex; flex-wrap:wrap;/);
   assert.match(css, /\.quota-row \{ grid-template-columns:minmax\(72px,\.8fr\) minmax\(88px,1fr\) auto;/);
   assert.match(css, /\.chart-block \{ overflow:visible/);
@@ -2531,28 +2127,6 @@ test("presents Daily Brief as a compact Gemma synthesis with readable states", (
   assert.match(css, /\.brief-evidence-stories>summary \{ display:grid; grid-template-columns:1fr auto auto; align-items:center; min-height:64px;/);
 });
 
-test("explains U5 as a risk scale rather than a probability", () => {
-  const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
-  assert.match(source, /30分钟波动风险/);
-  assert.match(source, /risk-scale/);
-  assert.match(source, /它不是亏损概率，也不代表方向/);
-  assert.match(source, /research_forecast/);
-  assert.match(source, /30分钟预测/);
-  assert.match(source, /forecast-state/);
-  assert.match(source, /新闻覆盖：降级/);
-  assert.match(source, /复核正在自动重试/);
-  assert.doesNotMatch(source, /复核正在自动恢复/);
-  assert.match(source, /当前预测仅使用决策时已完成的新闻证据/);
-  assert.match(source, /当前无符合条件的新闻/);
-  assert.match(source, /新闻系统运行正常/);
-  assert.match(source, /新闻输入不可用/);
-  assert.match(source, /Market-only 仍独立评估/);
-  assert.doesNotMatch(source, /成本后 EV 较高方向/);
-  assert.doesNotMatch(source, /固定观察30分钟 · 不下单/);
-  assert.doesNotMatch(source, /30分钟结果窗口已完成/);
-  assert.match(readFileSync(new URL("../app/globals.css", import.meta.url), "utf8"), /timeline-panel \{ grid-column:1; grid-row:1 \/ span 3; \}/);
-});
-
 test("keeps live quotes online between five-minute decisions", async () => {
   const now = Date.now();
   const payload = applyFreshness({
@@ -2589,38 +2163,12 @@ test("does not turn a locally offline collector back online", () => {
   assert.equal(payload.system.online, false);
 });
 
-test("loads market history by bounded range instead of one growing snapshot", () => {
-  const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
-  const route = readFileSync(new URL("../app/api/market-history/route.ts", import.meta.url), "utf8");
-  assert.match(modal, /history_resource/);
-  assert.match(modal, /historyQuery\.set\("before", before\)/);
-  assert.match(modal, /setBefore\(candles\[0\]\.time\)/);
-  assert.match(route, /OVERVIEW_POINTS = 480/);
-  assert.match(route, /OVERVIEW_DECISIONS = 480/);
-  assert.match(route, /source_decision_count/);
-  assert.match(route, /decision_downsampled/);
-  assert.match(route, /WHERE time_epoch>=\? AND time_epoch<\?/);
-  assert.match(route, /ON CONFLICT\(decision_key\) DO UPDATE/);
-  assert.match(route, /MAX_INGEST_BYTES = 400_000/);
-  assert.match(route, /ORDER BY decision_epoch,decision_key/);
-  assert.match(modal, /loadDashboardResource<MarketData>/);
-  assert.match(modal, /return \(\) => \{ cancelled = true; \}/);
-  assert.match(modal, /!candles\.length \? <div className="graph-visual-stage market-empty-stage">/);
-  assert.match(modal, /onClick=\{goLater\}>→ 返回较新行情/);
-  assert.match(route, /previousCandleEnd/);
-  assert.match(modal, /Plot trading time, not wall-clock time/);
-  assert.doesNotMatch(modal, /休市 \$\{Math\.max/);
-});
+test("loads market history by bounded range without model decisions", () => {
+  const source = readFileSync(new URL("../app/api/market-history/route.ts", import.meta.url), "utf8");
+  assert.match(source, /time_epoch>=\? AND time_epoch<\?/);
+  assert.match(source, /previousCandleEnd/);
+  assert.doesNotMatch(source, /market_decisions|market_decision_overviews/);
 
-test("explains training rows separately from independent news events", () => {
-  const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
-  const metrics = readFileSync(new URL("../app/_lib/news-metrics.ts", import.meta.url), "utf8");
-  assert.match(source, /newsMetrics\.training\.current_contract_rows/);
-  assert.match(source, /newsMetrics\.training\.distinct_events/);
-  assert.match(source, /文章、独立事件、预测读取和训练记录是四种不同口径/);
-  assert.match(metrics, /schema_version: "news-metrics-v1"/);
-  assert.match(metrics, /One compatibility boundary; views never reinterpret news counts themselves/);
-  assert.doesNotMatch(source, /news_evidence_summary\?\./);
 });
 
 test("live room reports articles and independent events instead of revision rows", async () => {
@@ -2629,7 +2177,7 @@ test("live room reports articles and independent events instead of revision rows
   assert.match(source, /NEWS ARTICLES/);
   assert.match(source, /newsMetrics\.articles\.received/);
   assert.match(source, /newsMetrics\.events\.independent/);
-  assert.match(payloads, /"counts", "outcome_summary", "news_metrics", "news_source_health"/);
+  assert.match(payloads, /"counts", "news_metrics", "news_source_health"/);
   assert.doesNotMatch(source, /NEWS REVISIONS/);
   assert.doesNotMatch(source, /counts\.news_revisions/);
   const { resolveNewsMetrics } = await import("../app/_lib/news-metrics.ts");
@@ -2637,95 +2185,6 @@ test("live room reports articles and independent events instead of revision rows
   assert.equal(Number.isNaN(unavailable.articles.received), true);
   assert.equal(Number.isNaN(unavailable.events.independent), true);
   assert.equal(resolveNewsMetrics({ counts: { news_revisions: 0 } }).articles.stored_revisions, 0);
-});
-
-test("shows residual and news-only research directions without implying execution", () => {
-  const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
-  assert.match(source, /修正量自己的30分钟方向研究/);
-  assert.match(source, /正修正显示 LONG，负修正显示 SHORT/);
-  assert.match(source, /只看新闻的30分钟方向研究/);
-  assert.match(source, /model\.recommended_action/);
-  assert.doesNotMatch(source, /REPLAYED_FROM_FROZEN_POST_COST_EV/);
-  assert.doesNotMatch(source, /暂不参考方向/);
-  assert.doesNotMatch(source, /仅显示修正值，不单独判断方向/);
-});
-
-test("auto-loads the bounded learning summary but keeps deep history interactive", () => {
-  const audit = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
-  const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
-  const compact = readFileSync(new URL("../build/preview-learning.ts", import.meta.url), "utf8");
-  assert.match(compact, /learning_preview_summary: true/);
-  assert.match(compact, /preview_status_summary: true/);
-  assert.match(compact, /identity_curves: \[\]/);
-  assert.match(audit, /refreshStatus\(!fullStatusReadyRef\.current\)/);
-  assert.match(audit, /refreshLearning\(!fullLearningReadyRef\.current\)/);
-  assert.doesNotMatch(audit, /if \(view !== "league"\) return/);
-  assert.doesNotMatch(audit, /点击查看/);
-  assert.match(audit, /if \(!fullLearningReadyRef\.current\) void refreshLearning\(true\)/);
-  assert.match(audit, /historyResource=\{payload\?\.learning_history_resource\}/);
-  assert.match(modal, /resource: "version-group"/);
-  assert.doesNotMatch(modal, /resource=curve-overview/);
-  assert.match(modal, /const resolvedCurves = historyResource \? historyCurves\[requestKey\] \?\? \[\] : curves/);
-  assert.doesNotMatch(modal, /const resolvedCurves = historyCurves\[cadence\] \?\? curves/);
-  assert.match(modal, /next_cursor/);
-  assert.match(modal, /const pageCursor = pageCursors\[page\]/);
-  assert.doesNotMatch(modal, /loadedPageKeys/);
-});
-
-test("distinguishes market history loading, empty, and failed states", () => {
-  const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
-  const resource = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
-  const history = readFileSync(new URL("../app/api/market-history/route.ts", import.meta.url), "utf8");
-  const schema = readFileSync(new URL("../db/schema.ts", import.meta.url), "utf8");
-  const migration = readFileSync(new URL("../drizzle/0006_materialized_history_overviews.sql", import.meta.url), "utf8");
-  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(modal, /historyState === "loading"/);
-  assert.match(modal, /historyState === "error"/);
-  assert.match(modal, /正在读取行情/);
-  assert.match(modal, /activeMarket = remoteHistory \? historyResult\?\.data \?\? market : market/);
-  assert.match(modal, /className="market-visual-shell" aria-busy=\{historyState === "loading"\}/);
-  assert.match(modal, /className="market-refresh-signal" role="status"/);
-  assert.match(modal, /disabled=\{historyState === "loading" \|\| !canGoEarlier\}/);
-  assert.match(modal, /disabled=\{historyState === "loading" \|\| !canGoLater\}/);
-  assert.doesNotMatch(modal, /historyState === "loading" && candles\.length > 0 && <GraphLoading/);
-  assert.match(css, /\.market-refresh-signal \{ position:absolute/);
-  assert.match(modal, /正在读取长期曲线/);
-  assert.match(modal, /正在读取这组成绩/);
-  assert.match(modal, /graph-state-compact/);
-  assert.doesNotMatch(modal, /if \(pageLoading \|\| overviewState === "loading"\)/);
-  assert.doesNotMatch(modal, /if \(historyLoading\) return <GraphLoading/);
-  assert.doesNotMatch(modal, /historyState === "loading"\) return <GraphLoading/);
-  assert.match(modal, /graph-visual-stage market-empty-stage/);
-  assert.doesNotMatch(modal, /compact-market-empty/);
-  assert.match(css, /graph-visual-stage \{ min-height:clamp\(420px,58dvh,620px\)/);
-  assert.match(modal, /title="暂无行情数据"/);
-  assert.match(modal, /重新读取/);
-  assert.doesNotMatch(modal, /还没有保存过可绘制的 Bid\/Ask 行情/);
-  assert.doesNotMatch(modal, /等待可验证数据/);
-  assert.doesNotMatch(resource, /MIN_VISIBLE_LOADING_MS|waitForMinimumLoading/);
-  assert.match(modal, /loadDashboardResource/);
-  assert.match(modal, /readDashboardResource/);
-  assert.match(modal, /HISTORY_CACHE_MAX_AGE_MS = 60_000/);
-  assert.match(modal, /Number\.POSITIVE_INFINITY/);
-  assert.match(modal, /initialHistoryResult/);
-  assert.doesNotMatch(modal, /waitForMinimumLoading|startedAt/);
-  assert.match(modal, /point\.source_gap_before/);
-  assert.match(modal, /first\.source_gap_before/);
-  assert.match(modal, /run\[0\]\.source_gap_before !== true/);
-  assert.match(modal, /first\.source_gap_before !== true/);
-  assert.match(modal, /overviewStep/);
-  assert.match(modal, /Date\.parse\(point\.decision_time\) - Date\.parse\(previous\.decision_time\) >= overviewStep/);
-  assert.doesNotMatch(modal, /source_gap_before \?\?/);
-  assert.match(history, /market_history_overview/);
-  assert.match(history, /market_decision_overviews/);
-  assert.match(schema, /marketHistoryOverview/);
-  assert.match(schema, /marketDecisionOverviews/);
-  assert.match(migration, /CREATE TABLE IF NOT EXISTS `market_history_overview`/);
-  assert.match(migration, /CREATE TABLE IF NOT EXISTS `market_decision_overviews`/);
-  assert.doesNotMatch(history, /SELECT count\(\*\) count, min\(time_epoch\)/);
-  assert.doesNotMatch(history, /row_number\(\) OVER/);
-  assert.match(css, /graph-data-pulse/);
-  assert.match(css, /prefers-reduced-motion:reduce/);
 });
 
 test("reflows news evidence into readable mobile cards", () => {
@@ -3119,30 +2578,12 @@ test("release validation authorizes before exposing a non-mutating context", asy
   assert.deepEqual(await unauthorized.json(), { error: "unauthorized" });
 });
 
-test("keeps learning cadence controls at the shared interaction target height", () => {
-  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(css, /\.summary-cadence button \{ min-height:44px;/);
-  assert.match(css, /\.summary-cadence button \{ width:100%; min-width:0; min-height:48px;/);
-});
-
-test("release route plan supplies the required learning-history resource", () => {
-  const manifest = JSON.parse(readFileSync(
-    new URL("../worker-validation-manifest.json", import.meta.url), "utf8",
-  ));
-  const route = manifest.routes.find(row =>
-    row.method === "GET" && row.path === "/api/learning-history"
-  );
-  assert.equal(route.request_query, "?resource=model&limit=100");
-});
-
 test("production-shaped release validation reaches work before every mutation", () => {
   for (const [path, family, completion] of [
     ["../app/api/ingest/route.ts", "status-ingest", "releaseValidationResponse(validation"],
     ["../app/api/audit/route.ts", "audit-write", "releaseValidationResponse(validation"],
-    ["../app/api/learning/route.ts", "learning-write", "releaseValidationResponse(validation"],
     ["../app/api/market-chart/route.ts", "market-chart-write", "releaseValidationResponse(validation"],
     ["../app/api/market-history/route.ts", "market-history-write", "releaseValidationResponse(validation"],
-    ["../app/api/learning-history/route.ts", "learning-history-write", "releaseValidationResponse(validation"],
     ["../app/api/news-evidence/route.ts", "news-evidence-write", "releaseValidationResponse(validation"],
   ]) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
@@ -3340,7 +2781,6 @@ test("split audit routes share authenticated bounded zero-mutation validation", 
   for (const [resource, id, family] of [
     ["briefs", "briefs", "audit-briefs-write"],
     ["stories", "stories", "audit-stories-write"],
-    ["decisions", "decisions", "audit-decisions-write"],
   ]) {
     const route = readFileSync(new URL(
       `../app/api/audit-${resource}/route.ts`, import.meta.url,
@@ -3498,7 +2938,7 @@ test('global status uses four-character labels without losing health axes', () =
 test('architecture route renders meaningful drill targets inside the shared shell', async () => {
   const page = await renderSettled('/admin/architecture', /从业务流程逐层查看实现/);
   assert.equal(page.response.status, 200);
-  for (const title of ['行情采集', '新闻处理', '预测与记录', '模型训练', '网页与同步']) assert.ok(page.html.includes(title), title);
+  for (const title of ['行情采集', '新闻处理', '网页与同步']) assert.ok(page.html.includes(title), title);
   assert.match(page.html, /展开流程/);
   assert.doesNotMatch(page.html, /DECLARED SOURCE SELECTIONS|UNRESOLVED|证据待确认|Explorer experience mode/);
   assert.match(page.html, /aria-label="查看系统运行状态"[^>]*href="\/health"/);

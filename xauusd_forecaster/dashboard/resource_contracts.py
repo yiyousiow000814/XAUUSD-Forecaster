@@ -12,7 +12,6 @@ from datetime import datetime
 
 from xauusd_forecaster.dashboard.payloads import (
     audit_briefs_payload,
-    audit_decisions_payload,
     audit_stories_payload,
     audit_status_payload,
     critical_status_payload,
@@ -34,15 +33,8 @@ from xauusd_forecaster.news_projection import (
 
 REMOTE_PAYLOAD_LIMIT_BYTES = 750_000
 REMOTE_NEWS_LIMIT = 200
-REMOTE_DECISION_LIMIT = 20
 REMOTE_DAILY_BRIEF_LIMIT = 14
-LEARNING_HISTORY_CONTRACT_VERSION = "exact-chart-history-v1"
-LEARNING_HISTORY_BATCH_LIMIT_BYTES = 60_000
-LEARNING_SUMMARY_GROUPS_PER_IDENTITY = 6
-MARKET_OVERVIEW_DECISIONS_PER_SERIES = 240
-REMOTE_MARKET_DECISION_LIMIT = 288 * 5
 REMOTE_MARKET_CANDLE_LIMIT = 576
-REMOTE_MARKET_DENSE_LIMITS = (1440, 1152, 864, 576, 288, 192, 144, 0)
 REMOTE_MARKET_OVERVIEW_LIMITS = (480, 240, 120, 80, 40)
 MARKET_CHART_SNAPSHOT_LIMIT_BYTES = 230_000
 AUDIT_FIRST_PAGE_LIMIT_BYTES = 16_000
@@ -55,11 +47,6 @@ class PayloadContractError(ValueError):
     error_code = "PAYLOAD_CONTRACT_REJECTED"
 
 
-MARKET_DECISION_FIELDS = (
-    "source_decision_id", "decision_time", "model_identity",
-    "recommended_action", "outcome_status", "ev_long_u5", "ev_short_u5",
-    "long_quote_return", "short_quote_return",
-)
 
 
 def _stable_news_key(row: dict) -> str:
@@ -138,220 +125,18 @@ def _epoch(value: object) -> int:
         return 0
 
 
-def _learning_record(
-    resource: str, record_key: str, sort_epoch: int, payload: dict
-) -> dict:
-    return {
-        "resource": resource,
-        "record_key": record_key,
-        "sort_epoch": sort_epoch,
-        "payload_hash": _json_hash(payload),
-        "payload": payload,
-    }
 
 
-def _visual_decision_overview(rows: list[dict], limit: int) -> list[dict]:
-    """Retain the time span and action changes in a bounded marker summary."""
-    ordered = sorted(rows, key=lambda row: (
-        row.get("decision_time") or "", row.get("source_decision_id") or "",
-    ))
-    deduplicated = {
-        str(row.get("source_decision_id") or ""): row
-        for row in ordered if row.get("source_decision_id")
-    }
-    ordered = sorted(deduplicated.values(), key=lambda row: (
-        row.get("decision_time") or "", row.get("source_decision_id") or "",
-    ))
-    if len(ordered) <= limit:
-        return ordered
-    bucket_count = max(1, limit // 4)
-    bucket_size = math.ceil(len(ordered) / bucket_count)
-    overview: list[dict] = []
-    for start in range(0, len(ordered), bucket_size):
-        bucket = ordered[start:start + bucket_size]
-        selected = {0, len(bucket) - 1}
-        for action in ("LONG", "SHORT"):
-            match = next((
-                index for index, row in enumerate(bucket)
-                if row.get("recommended_action") == action
-            ), None)
-            if match is not None:
-                selected.add(match)
-        overview.extend(bucket[index] for index in sorted(selected))
-    return overview[:limit]
 
 
-def _update_decision_overviews(
-    summaries: dict, decisions: list[dict], after: str | None,
-) -> dict:
-    """Refresh sampled decisions and append only genuinely new observations."""
-    updated = copy.deepcopy(summaries) if isinstance(summaries, dict) else {}
-    for identity in sorted({
-        str(row.get("model_identity") or "") for row in decisions
-        if isinstance(row, dict) and row.get("model_identity")
-    }):
-        identity_rows = [
-            row for row in decisions
-            if isinstance(row, dict) and row.get("model_identity") == identity
-        ]
-        for frequency in ("5m", "30m"):
-            incoming = identity_rows if frequency == "5m" else [
-                row for row in identity_rows
-                if _epoch(row.get("decision_time")) % 1_800 == 0
-            ]
-            key = f"{identity}\0{frequency}"
-            previous = updated.get(key) if isinstance(updated.get(key), dict) else {}
-            previous_rows = [
-                row for row in previous.get("decisions", [])
-                if isinstance(row, dict) and row.get("source_decision_id")
-            ]
-            previous_by_key = {
-                str(row["source_decision_id"]): row for row in previous_rows
-            }
-            incoming_by_key = {
-                str(row["source_decision_id"]): row for row in incoming
-                if row.get("source_decision_id")
-            }
-            new_rows = [
-                row for row in incoming
-                if row.get("source_decision_id")
-                and str(row["source_decision_id"]) not in previous_by_key
-                and (not after or _epoch(row.get("decision_time")) >= _epoch(after))
-            ]
-            refreshed_rows = [
-                incoming_by_key.get(str(row["source_decision_id"]), row)
-                for row in previous_rows
-            ]
-            if not new_rows and refreshed_rows == previous_rows:
-                continue
-            merged = [*refreshed_rows, *new_rows]
-            overview = _visual_decision_overview(
-                merged, MARKET_OVERVIEW_DECISIONS_PER_SERIES,
-            )
-            updated[key] = {
-                "model_identity": identity,
-                "frequency": frequency,
-                "source_decision_count": int(
-                    previous.get("source_decision_count") or 0
-                ) + len(new_rows),
-                "decision_count": len(overview),
-                "decision_downsampled": (
-                    int(previous.get("source_decision_count") or 0)
-                    + len(new_rows) > len(overview)
-                ),
-                "decisions": overview,
-            }
-    return updated
 
 
-def learning_history_records(
-    payload: dict,
-) -> list[dict]:
-    """Normalize append-only learning evidence into idempotent D1 records."""
-    learning = payload.get("learning_curves") or {}
-    records: list[dict] = []
-    for row in learning.get("models", []):
-        if not isinstance(row, dict):
-            continue
-        identity = str(row.get("model_identity") or "")
-        version = str(row.get("model_version") or "")
-        if identity and version:
-            records.append(_learning_record(
-                "model", f"{identity}\0{version}", _epoch(row.get("created_at")), row,
-            ))
-    for row in learning.get("version_groups", []):
-        if not isinstance(row, dict):
-            continue
-        identity = str(row.get("model_identity") or "")
-        dataset_hash = str(row.get("training_dataset_hash") or "")
-        if identity and dataset_hash:
-            records.append(_learning_record(
-                "version-group", f"{identity}\0{dataset_hash}",
-                _epoch(row.get("created_at")), row,
-            ))
-    for curve in learning.get("identity_curves", []):
-        if not isinstance(curve, dict):
-            continue
-        identity = str(curve.get("model_identity") or "")
-        if not identity:
-            continue
-        for field, resource in (("points", "curve-5m"), ("points_30m", "curve-30m")):
-            for point in curve.get(field, []) or []:
-                if not isinstance(point, dict) or not point.get("decision_time"):
-                    continue
-                record_payload = {"model_identity": identity, **point}
-                records.append(_learning_record(
-                    resource, f"{identity}\0{point['decision_time']}",
-                    _epoch(point["decision_time"]), record_payload,
-                ))
-    return records
 
 
-def learning_history_batches(rows: list[dict]) -> list[list[dict]]:
-    return _bounded_item_batches(
-        rows, LEARNING_HISTORY_BATCH_LIMIT_BYTES, envelope="records"
-    )
 
 
-def _learning_summary(payload: dict, *, record_total: int | None = None) -> dict:
-    """Return a fixed-size first page; D1 owns every older learning record."""
-    if (payload.get("learning_history_manifest") or {}).get("contract_version") == LEARNING_HISTORY_CONTRACT_VERSION:
-        return {key: copy.deepcopy(payload[key]) for key in (
-            "learning_curves", "learning_history_resource", "learning_history_manifest",
-        )}
-    learning = copy.deepcopy(payload.get("learning_curves") or {})
-    models = learning.get("models")
-    if isinstance(models, list):
-        learning["archived_model_count"] = sum(
-            row.get("lifecycle_status") not in {"LATEST", "PREVIOUS"}
-            for row in models
-        )
-        learning["model_detail_total"] = len(models)
-        learning["models"] = [
-            row for row in models
-            if row.get("active_rank") is not None
-            or row.get("lifecycle_status") in {"LATEST", "PREVIOUS"}
-        ]
-    version_groups = learning.get("version_groups")
-    if isinstance(version_groups, list):
-        learning["version_group_total"] = len(version_groups)
-        retained_groups = []
-        identities = sorted({
-            str(row.get("model_identity") or "") for row in version_groups
-            if isinstance(row, dict)
-        })
-        for identity in identities:
-            rows = sorted(
-                (row for row in version_groups if row.get("model_identity") == identity),
-                key=lambda row: (row.get("generation") or 0, row.get("created_at") or ""),
-                reverse=True,
-            )
-            retained_groups.extend(rows[:LEARNING_SUMMARY_GROUPS_PER_IDENTITY])
-        learning["version_groups"] = retained_groups
-    learning["identity_curves"] = []
-    for field in ("full_minus_market", "broad_full_minus_core_full"):
-        if isinstance(learning.get(field), list):
-            learning[field] = []
-
-    return {
-        "learning_curves": learning,
-        "learning_history_resource": "/api/learning-history",
-        "learning_history_manifest": {
-            "contract_version": LEARNING_HISTORY_CONTRACT_VERSION,
-            "model_total": len(payload.get("learning_curves", {}).get("models", [])),
-            "version_group_total": len(payload.get("learning_curves", {}).get("version_groups", [])),
-            "record_total": record_total if record_total is not None else len(
-                learning_history_records(payload)),
-        },
-    }
 
 
-def _decision_key(row: dict) -> tuple[str, str, str]:
-    return (
-        str(row.get("source_decision_id") or ""),
-        str(row.get("model_identity") or ""),
-        str(row.get("model_version") or ""),
-    )
 
 
 def _downsample_market_overview(rows: list[dict], limit: int) -> list[dict]:
@@ -373,7 +158,6 @@ def _downsample_market_overview(rows: list[dict], limit: int) -> list[dict]:
 
 def compact_market_chart(
     payload: dict,
-    dense_limit: int = REMOTE_MARKET_DECISION_LIMIT,
     overview_limit: int = REMOTE_MARKET_OVERVIEW_LIMITS[0],
 ) -> dict:
     """Keep a bounded recent chart; D1 owns the complete market history."""
@@ -394,67 +178,27 @@ def compact_market_chart(
                     compact[key] = round(float(compact[key]), 3)
             compact_candles.append(compact)
         market[candle_key] = compact_candles
-    compact_decisions = []
-    for row in market.get("decisions", []):
-        compact = {
-            key: row.get(key)
-            for key in MARKET_DECISION_FIELDS
-            if row.get(key) is not None
-        }
-        for key in ("ev_long_u5", "ev_short_u5"):
-            if key in compact:
-                compact[key] = round(float(compact[key]), 6)
-        if row.get("model_version"):
-            compact["model_version"] = str(row["model_version"])[-12:]
-        if str(compact.get("decision_time") or "").endswith("+00:00"):
-            compact["decision_time"] = str(compact["decision_time"])[:-6] + "Z"
-        if row.get("prediction_status") != "PROVISIONAL_POST_COST_EV":
-            compact["prediction_status"] = row.get("prediction_status")
-        if row.get("outcome_reason_codes"):
-            compact["outcome_reason_codes"] = row["outcome_reason_codes"]
-        compact_decisions.append(compact)
-    compact_decisions.sort(key=lambda row: (
-        row.get("decision_time") or "", row.get("model_identity") or ""
-    ))
-    retained = {}
-    if dense_limit:
-        for row in compact_decisions[-dense_limit:]:
-            retained[_decision_key(row)] = row
-    market["decisions"] = sorted(retained.values(), key=lambda row: (
-        row.get("decision_time") or "", row.get("model_identity") or ""
-    ))
+    for retired in ("decisions", "training_markers", "prediction_history_start"):
+        market.pop(retired, None)
     return market
 
 
 def market_chart_snapshot(payload: dict) -> bytes:
     last_size = 0
-    for dense_limit in REMOTE_MARKET_DENSE_LIMITS:
-        for overview_limit in REMOTE_MARKET_OVERVIEW_LIMITS:
-            encoded = json.dumps(
-                compact_market_chart(payload, dense_limit, overview_limit),
-                ensure_ascii=False, allow_nan=False, separators=(",", ":"),
-            ).encode("utf-8")
-            last_size = len(encoded)
-            if last_size <= MARKET_CHART_SNAPSHOT_LIMIT_BYTES:
-                return encoded
+    for overview_limit in REMOTE_MARKET_OVERVIEW_LIMITS:
+        encoded = json.dumps(
+            compact_market_chart(payload, overview_limit),
+            ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+        ).encode("utf-8")
+        last_size = len(encoded)
+        if last_size <= MARKET_CHART_SNAPSHOT_LIMIT_BYTES:
+            return encoded
     raise PayloadContractError(
         f"half-hour market chart payload is {last_size} bytes "
         f"(limit {MARKET_CHART_SNAPSHOT_LIMIT_BYTES})"
     )
 
 
-def learning_snapshot(payload: dict) -> bytes:
-    """Build the bounded first page after history has been stored in D1."""
-    encoded = json.dumps(
-        _learning_summary(payload), ensure_ascii=False, allow_nan=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    if len(encoded) > REMOTE_PAYLOAD_LIMIT_BYTES:
-        raise PayloadContractError(
-            f"bounded learning summary is {len(encoded)} bytes "
-            f"(limit {REMOTE_PAYLOAD_LIMIT_BYTES})"
-        )
-    return encoded
 
 
 def _encoded_snapshot(snapshot: dict, *, label: str) -> bytes:
@@ -514,16 +258,6 @@ def audit_briefs_snapshot(
     )
 
 
-def audit_decisions_snapshot(
-    payload: dict, producer_revision: str | None = None,
-) -> bytes:
-    return _audit_detail_snapshot(
-        _with_projection_producer(
-            audit_decisions_payload(payload, decision_limit=REMOTE_DECISION_LIMIT),
-            producer_revision,
-        ),
-        family="decisions",
-    )
 
 
 def audit_stories_snapshot(

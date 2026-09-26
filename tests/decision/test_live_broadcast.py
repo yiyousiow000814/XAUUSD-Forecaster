@@ -10,7 +10,6 @@ import pytest
 from xauusd_forecaster.live_broadcast import (
     ContinuousLivePublisher,
     MAX_LIVE_BYTES,
-    MAX_RECENT_DECISIONS,
     LiveBroadcastContractError,
     LiveSequenceStore,
     public_live_state,
@@ -53,7 +52,8 @@ def test_public_live_projection_is_bounded_and_private_free() -> None:
     state = public_live_state(status(), sequence=9, source_revision="abc123")
     encoded = serialize_live_state(state)
     assert len(encoded) < MAX_LIVE_BYTES
-    assert len(state["recent_decisions"]) == MAX_RECENT_DECISIONS
+    assert "recent_decisions" not in state
+    assert "forecast" not in state
     assert len(state["health"]["alerts"]) == 4
     assert b"features" not in encoded
     assert b"gemini" not in encoded
@@ -98,12 +98,11 @@ def test_live_publish_requires_explicit_future_activation() -> None:
         publish_live_state("secret", state, dry_run=False)
 
 
-@pytest.mark.parametrize("action", ["LONG", "SHORT", "WAIT"])
-def test_forecast_projection_matches_public_live_room_contract(action: str) -> None:
-    source = status()
-    source["research_forecast"]["recommended_action"] = action
-    state = public_live_state(source, sequence=1, source_revision="abc")
-    assert state["forecast"] == source["research_forecast"]
+@pytest.mark.parametrize("field", ["forecast", "research_forecast", "recent_decisions"])
+def test_retired_model_payload_is_rejected(field: str) -> None:
+    state = public_live_state(status(), sequence=1, source_revision="abc")
+    with pytest.raises(LiveBroadcastContractError, match="forbidden"):
+        validate_live_state({**state, field: {}})
 
 
 def test_continuous_publisher_recovers_sequence_across_restart(tmp_path) -> None:
@@ -117,7 +116,7 @@ def test_continuous_publisher_recovers_sequence_across_restart(tmp_path) -> None
     first = ContinuousLivePublisher(
         "secret", sequence_store,
         health_reader=lambda: {
-            "service": "aurum-live-broadcast", "schema_version": "PUBLIC_LIVE_V1",
+            "service": "aurum-live-broadcast", "schema_version": "PUBLIC_LIVE_V2",
             "binding_ready": True, "latest_sequence": 7,
         }, publisher=send,
     )
@@ -125,7 +124,7 @@ def test_continuous_publisher_recovers_sequence_across_restart(tmp_path) -> None
     restarted = ContinuousLivePublisher(
         "secret", sequence_store,
         health_reader=lambda: {
-            "service": "aurum-live-broadcast", "schema_version": "PUBLIC_LIVE_V1",
+            "service": "aurum-live-broadcast", "schema_version": "PUBLIC_LIVE_V2",
             "binding_ready": True, "latest_sequence": 8,
         }, publisher=send,
     )
@@ -150,7 +149,7 @@ def test_stale_sequence_rejection_repairs_only_sequence_and_retries(tmp_path) ->
     publisher = ContinuousLivePublisher(
         "secret", store,
         health_reader=lambda: {
-            "service": "aurum-live-broadcast", "schema_version": "PUBLIC_LIVE_V1",
+            "service": "aurum-live-broadcast", "schema_version": "PUBLIC_LIVE_V2",
             "binding_ready": True, "latest_sequence": 5,
         }, publisher=send,
     )
@@ -175,7 +174,7 @@ def test_failed_interval_reuses_unaccepted_sequence_without_false_gap(tmp_path) 
     publisher = ContinuousLivePublisher(
         "secret", store,
         health_reader=lambda: {
-            "service": "aurum-live-broadcast", "schema_version": "PUBLIC_LIVE_V1",
+            "service": "aurum-live-broadcast", "schema_version": "PUBLIC_LIVE_V2",
             "binding_ready": True, "latest_sequence": 5,
         }, publisher=send,
     )

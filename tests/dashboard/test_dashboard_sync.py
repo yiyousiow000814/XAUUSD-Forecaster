@@ -142,7 +142,7 @@ from xauusd_forecaster.dashboard import resource_contracts
 assert module.resource_contracts.remote_snapshot is resource_contracts.remote_snapshot
 assert module.resource_contracts.PayloadContractError is resource_contracts.PayloadContractError
 assert resource_contracts.remote_snapshot({})
-assert resource_contracts.learning_snapshot({})
+assert resource_contracts.audit_snapshot({})
 assert resource_contracts.market_chart_snapshot({})
 try:
     resource_contracts.audit_stories_snapshot({"storylines": "unavailable"})
@@ -167,14 +167,13 @@ def test_api_and_sync_share_the_pure_resource_owner() -> None:
     sync = _sync_module()
     api = _dashboard_module()
     api_names = (
-        "_learning_summary", "audit_briefs_snapshot", "audit_decisions_snapshot",
+        "audit_briefs_snapshot",
         "audit_snapshot", "audit_stories_snapshot", "market_chart_snapshot",
     )
     for name in api_names:
         assert getattr(api, name) is getattr(resource_contracts, name)
     for name in (*api_names, "PayloadContractError", "remote_snapshot",
-                 "learning_snapshot", "learning_history_records", "learning_history_batches",
-                 "_epoch", "_learning_record", "_json_hash", "_update_decision_overviews",
+                 "_epoch", "_json_hash",
                  "news_mirror_parts", "news_detail_batches", "news_index_batches"):
         assert getattr(sync, name) is getattr(resource_contracts, name)
 
@@ -267,11 +266,7 @@ def test_preview_bundle_uses_split_resources_with_narrow_legacy_fallback(
     monkeypatch.setattr(module, "_read_completed_news_index", lambda _url: {"items": []})
     bundle = module.build_bundle("https://example.test", "feature/test", "abc123")
 
-    assert len(bundle["status"]["recent_decisions"]) == 18
-    assert bundle["status"]["counts"]["live_oos_model_groups"] == 1
     resources = bundle["status"]["preview"]["resources"]
-    assert resources["recent_decisions"]["source_path"] == "/api/audit"
-    assert resources["recent_decisions"]["compatibility_fallback"] is True
     assert resources["audit_stories"]["availability"] == "AVAILABLE"
     assert bundle["audit_stories"]["storylines"] == legacy_audit["storylines"]
     assert bundle["audit"]["news_metrics"]["events"]["currently_model_eligible"] == 84
@@ -321,10 +316,9 @@ def test_preview_legacy_projection_is_not_coupled_to_sync_transport_limit(
 
     assert bundle["audit_briefs"]["daily_news_briefs"][0]["body"] == large
     assert bundle["audit_stories"]["storylines"][0]["body"] == large
-    assert bundle["audit_decisions"]["recent_decisions"][0]["reason"] == large
     assert all(
         bundle["status"]["preview"]["resources"][resource]["compatibility_fallback"]
-        for resource in ("audit_briefs", "audit_stories", "audit_decisions")
+        for resource in ("audit_briefs", "audit_stories")
     )
 
 
@@ -368,17 +362,14 @@ def test_preview_bundle_keeps_unavailable_distinct_from_real_zero(monkeypatch) -
 
     unavailable = build(modern_zero=False)
     unavailable_resources = unavailable["status"]["preview"]["resources"]
-    assert unavailable_resources["recent_decisions"]["availability"] == module.UNAVAILABLE_IN_BUILD_SNAPSHOT
     assert unavailable_resources["audit_stories"]["availability"] == module.UNAVAILABLE_IN_BUILD_SNAPSHOT
     assert unavailable["audit_stories"] is None
     assert "recent_decisions" not in unavailable["status"]
     assert "live_oos_model_groups" not in unavailable["status"]["counts"]
 
     zero = build(modern_zero=True)
-    assert zero["status"]["recent_decisions"] == []
     assert zero["audit_stories"]["storylines"] == []
     assert zero["audit_stories"]["storyline_summary"]["total"] == 0
-    assert zero["status"]["counts"]["live_oos_model_groups"] == 0
     assert zero["status"]["preview"]["resources"]["audit_stories"]["availability"] == "AVAILABLE"
 
 
@@ -978,7 +969,7 @@ def test_all_rejected_heartbeat_targets_preserve_structured_failures(
 
 
 
-def test_audit_sync_owns_four_independently_bounded_resources(monkeypatch) -> None:
+def test_audit_sync_owns_three_independently_bounded_resources(monkeypatch) -> None:
     from xauusd_forecaster.dashboard.sync import resources as module
     payload = {
         "generated_at": "2026-08-20T00:00:00+00:00",
@@ -1011,7 +1002,6 @@ def test_audit_sync_owns_four_independently_bounded_resources(monkeypatch) -> No
         resource_contracts.audit_snapshot(copy.deepcopy(payload)),
         resource_contracts.audit_briefs_snapshot(copy.deepcopy(payload), producer_revision),
         resource_contracts.audit_stories_snapshot(copy.deepcopy(payload), producer_revision),
-        resource_contracts.audit_decisions_snapshot(copy.deepcopy(payload), producer_revision),
     ]
     module._sync_audit(payload, {
         "remote_ingest_url": "https://worker.example/api/ingest",
@@ -1021,7 +1011,6 @@ def test_audit_sync_owns_four_independently_bounded_resources(monkeypatch) -> No
         "https://worker.example/api/audit",
         "https://worker.example/api/audit-briefs",
         "https://worker.example/api/audit-stories",
-        "https://worker.example/api/audit-decisions",
     ]
     decoded = [json.loads(body) for _url, body in writes]
     assert "daily_news_briefs" not in decoded[0]
@@ -1037,7 +1026,7 @@ def test_audit_sync_owns_four_independently_bounded_resources(monkeypatch) -> No
 
 @pytest.mark.parametrize("family,field", [
     ("briefs", "daily_news_briefs"), ("stories", "storylines"),
-    ("decisions", "recent_decisions"),
+
 ])
 @pytest.mark.parametrize("bad", [{}, None, "invalid", [None], []])
 def test_audit_sync_invalid_source_cannot_publish_false_empty(monkeypatch, family, field, bad):
@@ -1064,7 +1053,7 @@ def test_audit_sync_invalid_source_cannot_publish_false_empty(monkeypatch, famil
 
 @pytest.mark.parametrize("family,field", [
     ("briefs", "daily_news_briefs"), ("stories", "storylines"),
-    ("decisions", "recent_decisions"),
+
 ])
 def test_preview_http_200_ambiguous_detail_is_not_available(monkeypatch, family, field):
     module = _preview_module()
@@ -1081,55 +1070,8 @@ def test_preview_http_200_ambiguous_detail_is_not_available(monkeypatch, family,
     assert provenance["availability"] == "AVAILABLE"
 
 
-@pytest.mark.parametrize("ack", [{"accepted": 0}, {}, {"accepted": 1}])
-def test_chart_export_advances_only_after_exact_ack(monkeypatch, tmp_path, ack):
-    from xauusd_forecaster.dashboard.sync import resources as module
-    record = module.learning_history_records({"learning_curves": {"identity_curves": [{
-        "model_identity": "FULL", "points": [{"decision_time": "2026-08-01T00:00:00Z"}],
-    }]}})[0]
-    page = dict(contract="exact-chart-history-v1", records=[record],
-                cursor='[1,"curve-5m","key"]', complete=False,
-                source_revision=1, generated_at="2026-09-09T00:00:00Z", record_count=1)
-    monkeypatch.setattr(module, "_read_local_resource", lambda *_: page)
-    sent = []
-    def post(url, body, config):
-        sent.append(json.loads(body))
-        return ack
-    monkeypatch.setattr(module, "_post_json", post)
-    path = tmp_path / "history.json"
-    config = {"remote_ingest_url": "https://worker.example/api/ingest",
-              "learning_history_state_file": str(path), module.RUNTIME_STATE_ROOT_KEY: str(tmp_path)}
-    if ack.get("accepted") != 1:
-        with pytest.raises(ValueError, match="ACK"):
-            module._sync_learning_history({}, config)
-        assert not path.exists()
-    else:
-        module._sync_learning_history({}, config)
-        assert json.loads(path.read_text())["cursor"] == page["cursor"]
-    assert sent[0]["records"][0]["resource"] == "exact-curve-5m"
 
 
-def test_chart_completion_is_not_reposted_when_source_is_unchanged(monkeypatch, tmp_path):
-    from xauusd_forecaster.dashboard.sync import resources as module
-    page = dict(contract="exact-chart-history-v1", records=[], cursor='[-1,"",""]',
-                complete=True, source_revision=1, generated_at="2026-09-09T00:00:00Z", record_count=0)
-    monkeypatch.setattr(module, "_read_local_resource", lambda *_: page)
-    posted = []
-    def post(*args):
-        posted.append(args)
-        return {"status": "OK"}
-    monkeypatch.setattr(module, "_post_json", post)
-    path = tmp_path / "history.json"
-    path.write_text(json.dumps({"contract_version": "old", "hashes": {"old": "old"}}))
-    config = {"remote_ingest_url": "https://worker.example/api/ingest",
-              "learning_history_state_file": str(path), module.RUNTIME_STATE_ROOT_KEY: str(tmp_path)}
-    module._sync_learning_history({}, config)
-    module._sync_learning_history({}, config)
-    assert len(posted) == 1
-    assert "hashes" not in json.loads(path.read_text())
-    page["source_revision"] = 2
-    module._sync_learning_history({}, config)
-    assert len(posted) == 2
 
 
 def _projection_fixture(count: int = 10):
@@ -1443,7 +1385,6 @@ def test_deferred_heavy_turns_yield_to_due_resources_without_duplicate_owners(
                 "resource": "deferred_projection", "status": deferred_state}],
         )
     monkeypatch.setattr(module, "sync_deferred_projection_once", deferred)
-    monkeypatch.setattr(module, "_sync_learning_summary", lambda *_: calls.append("learning"))
     monkeypatch.setattr(module, "_sync_market", lambda *_: calls.append("market_chart"))
     monkeypatch.setattr(module, "_sync_news_evidence", lambda *_: pytest.fail("second News owner"))
     monkeypatch.setattr(module, "_sync_audit", lambda *_: pytest.fail("replayed accepted Audit"))
@@ -1451,7 +1392,7 @@ def test_deferred_heavy_turns_yield_to_due_resources_without_duplicate_owners(
         for turn in range(5):
             module._submit_resource_lane(executor, "heavy", [target], config,
                                          prefer_regular=bool(turn % 2)).result(timeout=5)
-    assert calls == ["deferred", "learning", "deferred", "market_chart", "deferred"]
+    assert calls == ["deferred", "market_chart", "deferred", "deferred", "deferred"]
 
 
 def test_news_evidence_python_bytes_worker_store_and_ack_consumer(monkeypatch):
@@ -2068,7 +2009,7 @@ def test_optional_growing_resource_failure_does_not_block_heartbeat(
         module, "_post_json", lambda url, body, _config: posted.append((url, body)),
     )
     for name in (
-        "_sync_audit", "_sync_learning", "_sync_market", "_sync_market_history",
+        "_sync_audit", "_sync_market", "_sync_market_history",
         "_sync_news", "_sync_news_questions", "_sync_operator_retries",
     ):
         monkeypatch.setattr(module, name, lambda *_a, **_k: None)
@@ -2186,11 +2127,11 @@ def test_sync_resource_budget_and_cadence_resume_from_durable_state(
     second = called.copy()
 
     assert first == ["operator_retries", "news_questions", "audit"]
-    assert second == ["learning"]
+    assert second == ["market_chart"]
     persisted = json.loads(schedule.read_text(encoding="utf-8"))
     assert persisted["schema_version"] == 1
     assert persisted["resources"]["audit"]["next_run_at"]
-    assert persisted["resources"]["learning"]["last_success_at"]
+    assert persisted["resources"]["market_chart"]["last_success_at"]
 
 
 @pytest.mark.parametrize("days", [1, 7])
@@ -2307,7 +2248,7 @@ def test_optional_failure_persists_backoff_without_same_cycle_retry(
     assert datetime.fromisoformat(audit["next_run_at"]) > datetime.now(timezone.utc)
 
 
-@pytest.mark.parametrize("failed_resource", ["audit", "learning", "market_chart"])
+@pytest.mark.parametrize("failed_resource", ["audit", "market_chart"])
 def test_optional_resource_families_degrade_only_their_owner(
     monkeypatch, tmp_path, failed_resource,
 ) -> None:
@@ -2344,8 +2285,6 @@ def test_optional_resource_families_degrade_only_their_owner(
     )
     operations = {
         "audit": "_sync_audit",
-        "learning": "_sync_learning_summary",
-        "learning_history": "_sync_learning_history",
         "market_chart": "_sync_market",
         "market_history": "_sync_market_history",
         "news": "_sync_news",
@@ -2716,7 +2655,7 @@ def test_remote_market_chart_is_split_from_status_and_keeps_recent_window() -> N
         "outcome_status": "VALID",
         "ev_long_u5": -0.2,
         "ev_short_u5": 0.1,
-    } for index in range(module.REMOTE_MARKET_DECISION_LIMIT + 20)]
+    } for index in range(1440 + 20)]
     payload = {
         "market_chart": {
             "decisions": list(reversed(decisions)),
@@ -2727,21 +2666,11 @@ def test_remote_market_chart_is_split_from_status_and_keeps_recent_window() -> N
         },
     }
     mirrored = json.loads(module.remote_snapshot(payload))
-    assert mirrored["market_chart"]["decisions"] == []
+    assert "decisions" not in mirrored["market_chart"]
     assert mirrored["market_chart_resource"] == "/api/market-chart"
 
     market = json.loads(module.market_chart_snapshot(payload))
-    retained = market["decisions"]
-    assert 0 < len(retained) <= module.REMOTE_MARKET_DECISION_LIMIT
-    assert retained[0]["source_decision_id"] == (
-        f"d-{len(decisions) - len(retained)}"
-    )
-    assert all(row["source_decision_id"] != "d-0" for row in retained)
-    assert retained[-1]["source_decision_id"] == f"d-{len(decisions) - 1}"
-    assert "exit_time" not in retained[1]
-    assert retained[1]["model_version"] == (
-        f"model-{len(decisions) - len(retained) + 1}"
-    )
+    assert "decisions" not in market
     assert len(market["candles"]) == 1
     assert market["candles"][0]["open"] == 1.123
     assert market["candles"][0]["time"] == "2026-08-05T00:00:00Z"
@@ -2785,8 +2714,7 @@ def test_seven_day_market_snapshot_is_recent_only_under_limit() -> None:
     assert len(encoded) <= module.MARKET_CHART_SNAPSHOT_LIMIT_BYTES
     assert len(market["candles"]) == module.REMOTE_MARKET_CANDLE_LIMIT
     assert 0 < len(market["overview_candles"]) <= 480
-    assert len(market["decisions"]) <= module.REMOTE_MARKET_DECISION_LIMIT
-    assert min(row["decision_time"] for row in market["decisions"]) > "2026-08-01T00:00:00Z"
+    assert "decisions" not in market
 
 
 def test_market_overview_downsampling_preserves_ohlc_extremes() -> None:
@@ -2823,7 +2751,7 @@ def test_market_history_ingest_batches_are_bounded_and_complete() -> None:
         "long_quote_return": 0.001, "short_quote_return": -0.001,
     } for index in range(120)]
 
-    payloads = module._market_history_payloads(candles, decisions)
+    payloads = module._market_history_payloads(candles)
     decoded = [json.loads(payload) for payload in payloads]
 
     assert all(len(payload) <= module.MARKET_HISTORY_BATCH_LIMIT_BYTES for payload in payloads)
@@ -2833,37 +2761,10 @@ def test_market_history_ingest_batches_are_bounded_and_complete() -> None:
         for row in decoded
     )
     assert sum(len(row.get("candles", [])) for row in decoded) == len(candles)
-    assert sum(len(row.get("decisions", [])) for row in decoded) == len(decisions)
+    assert all("decisions" not in row for row in decoded)
     assert module._overlap_cursor("2026-08-07T04:00:00Z") == "2026-08-07T02:00:00+00:00"
 
 
-def test_market_decision_overview_payload_is_bounded_and_keeps_edges() -> None:
-    from xauusd_forecaster.dashboard.sync import resources as module
-    decisions = [{
-        "source_decision_id": f"d-{index}",
-        "decision_time": f"2026-08-07T{index // 60:02d}:{index % 60:02d}:00+00:00",
-        "model_identity": "BROAD_FULL",
-        "recommended_action": "LONG",
-        "explanation": "x" * 2_000,
-    } for index in range(480)]
-    summary = {
-        "model_identity": "BROAD_FULL",
-        "frequency": "5m",
-        "source_decision_count": len(decisions),
-        "decision_count": len(decisions),
-        "decision_downsampled": False,
-        "decisions": decisions,
-    }
-
-    payload = module._market_decision_overview_payload(summary)
-    bounded = json.loads(payload)["decision_overviews"][0]
-
-    assert len(payload) <= module.MARKET_HISTORY_BATCH_LIMIT_BYTES
-    assert bounded["decisions"][0]["source_decision_id"] == "d-0"
-    assert bounded["decisions"][-1]["source_decision_id"] == "d-479"
-    assert bounded["source_decision_count"] == 480
-    assert bounded["decision_count"] == len(bounded["decisions"])
-    assert bounded["decision_downsampled"] is True
 
 
 def test_annotator_heartbeat_reports_idle_loop_as_healthy(tmp_path) -> None:
@@ -3134,7 +3035,7 @@ def test_continuous_heavy_owner_drains_overdue_queue_before_next_heartbeat(
     assert count == 2
     assert heartbeat_times == [0.0, 30.0]
     assert completed == [
-        "audit", "learning", "learning_history", "market_chart",
+        "audit", "market_chart",
         "market_history", "news", "news_evidence",
     ]
 
@@ -3246,7 +3147,7 @@ def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
                                    interval_seconds=30, stop_event=LogicalStop(), max_heartbeats=2)
         assert heartbeats == [(0.0, 0), (30.0, 2)]
         assert json.loads(Path(config["deferred_projection_receipt_file"]).read_text())["state"] == "COMPLETED"
-        assert len(writes) == 4
+        assert len(writes) == 3
         assert not module.sync_deferred_projection_once([target], config).resource_observations
         return
     completed = module.sync_deferred_projection_once([target], config)
@@ -3268,9 +3169,9 @@ def test_deferred_projection_uses_existing_owner_after_exact_fresh_boundary(
     repeated = module.sync_deferred_projection_once([target], config)
 
     assert pending.resource_observations == []
-    assert len(writes) == 4
+    assert len(writes) == 3
     assert [url.rsplit("/api/", 1)[-1] for url, _body in writes] == [
-        "audit", "audit-briefs", "audit-stories", "audit-decisions",
+        "audit", "audit-briefs", "audit-stories",
     ]
     assert repeated.resource_observations == []
     receipt = json.loads(Path(

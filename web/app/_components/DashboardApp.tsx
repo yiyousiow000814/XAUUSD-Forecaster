@@ -31,7 +31,7 @@ const AdminOverviewView = lazy(loadAdminOverviewView);
 const AuditView = lazy(loadAuditView);
 const AssistantView = lazy(loadAssistantView);
 
-const AUDIT_VIEWS = new Set<AuditViewName>(["briefs", "search", "news", "evidence", "stories", "decisions", "league", "coverage"]);
+const AUDIT_VIEWS = new Set<AuditViewName>(["briefs", "search", "news", "evidence", "stories", "coverage"]);
 
 function validAuditView(value: string | null | undefined): AuditViewName {
   if (value === "qa") return "briefs";

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import math
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
@@ -11,10 +10,10 @@ from typing import Any
 
 CRITICAL_STATUS_FIELDS = (
     "generated_at", "production_contract", "dashboard_sync", "forward_epoch",
-    "system", "operational_health", "latest", "research_forecast", "u5_context",
-    "counts", "outcome_summary", "news_metrics", "news_source_health",
-    "news_input_coverage", "annotation_queue", "gemini_quota", "gemini_31_quota",
-    "gemma_quota", "gemini_embedding_quota", "llm_routing", "training",
+    "system", "operational_health", "latest",
+    "counts", "news_metrics", "news_source_health",
+    "annotation_queue", "gemini_quota", "gemini_31_quota",
+    "gemma_quota", "gemini_embedding_quota", "llm_routing",
     "factor_coverage", "sources",
 )
 AUDIT_FIRST_PAGE_FIELDS = (
@@ -35,7 +34,6 @@ AUDIT_DETAIL_SOURCE_CONTRACT = "audit-detail-source-v1"
 AUDIT_DETAIL_ARRAYS = {
     "briefs": "daily_news_briefs",
     "stories": "storylines",
-    "decisions": "recent_decisions",
 }
 DAILY_BRIEF_SUMMARY_FIELDS = (
     "brief_date", "phase", "received_items", "reviewed_items", "pending_items",
@@ -51,27 +49,16 @@ def critical_status_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         for key in CRITICAL_STATUS_FIELDS
         if key in payload
     }
-    training = snapshot.get("training")
-    if isinstance(training, dict):
-        training.pop("models", None)  # Model details belong to /api/learning.
-    # The Live first paint owns one fixed 90-minute decision window.  Keep it
-    # on the bounded status contract while all older/detail history remains on
-    # the paged market/audit resources.
-    snapshot["recent_decisions"] = audit_decisions_payload(
-        payload, decision_limit=18, prediction_limit=8,
-    ).get("recent_decisions", [])
     snapshot.update({
-        "learning_resource": "/api/learning",
         "news_index_resource": "/api/news-index",
         "audit_resource": "/api/audit",
         "news_evidence_resource": "/api/news-evidence",
         "market_chart_resource": "/api/market-chart",
         "market_history_resource": "/api/market-history",
         "market_chart": {
-            "decision_resource": "/api/market-chart",
+            "resource": "/api/market-chart",
             "history_resource": "/api/market-history",
-            "candles": [], "overview_candles": [], "decisions": [],
-            "training_markers": [],
+            "candles": [], "overview_candles": [],
         },
         "mirror_window": {
             "bounded": True,
@@ -101,7 +88,6 @@ def audit_status_payload(
     snapshot["news_evidence_resource"] = "/api/news-evidence"
     snapshot["audit_briefs_resource"] = "/api/audit-briefs"
     snapshot["audit_stories_resource"] = "/api/audit-stories"
-    snapshot["audit_decisions_resource"] = "/api/audit-decisions"
     return snapshot
 
 
@@ -122,28 +108,6 @@ def audit_briefs_payload(
     }
 
 
-def audit_decisions_payload(
-    payload: Mapping[str, Any], *, decision_limit: int = 20,
-    prediction_limit: int = 8,
-) -> dict[str, Any]:
-    """Keep recent decision presentation evidence, excluding unused features."""
-    if not _audit_detail_source_present(payload, "decisions"):
-        return {"generated_at": payload.get("generated_at")}
-    rows = copy.deepcopy(payload["recent_decisions"])
-    compact = []
-    for row in rows[:decision_limit]:
-        if not isinstance(row, dict):
-            continue
-        row.pop("features", None)
-        predictions = row.get("predictions")
-        if isinstance(predictions, list):
-            row["predictions"] = predictions[:prediction_limit]
-        compact.append(row)
-    return {
-        "projection_contract": AUDIT_DETAIL_SOURCE_CONTRACT,
-        "generated_at": payload.get("generated_at"),
-        "recent_decisions": compact,
-    }
 
 
 def _audit_detail_source_present(payload: Mapping[str, Any], family: str) -> bool:
@@ -168,11 +132,6 @@ def _renderable_audit_row(row: dict, family: str) -> bool:
     def strings(value):
         return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
-    def numbers(source, fields):
-        return all(source.get(field) is None or (
-            type(source[field]) in (int, float) and math.isfinite(source[field])
-        ) for field in fields)
-
     if family == "briefs":
         brief = row.get("brief")
         return (isinstance(row.get("model_version"), str)
@@ -188,12 +147,7 @@ def _renderable_audit_row(row: dict, family: str) -> bool:
         return all(records(row.get(field)) for field in (
             "covered_roles", "missing_roles", "timeline", "market_reactions", "commentary", "background",
         ))
-    return (records(row.get("predictions"))
-            and numbers(row, ("bid", "ask", "long_return", "short_return"))
-            and (row.get("outcome_status") in (None, "VALID") or strings(row.get("outcome_reason_codes")))
-            and all(numbers(prediction, (
-                "predicted_direction_u5", "predicted_news_residual_u5", "ev_long_u5", "ev_short_u5", "uncertainty_u5",
-            )) for prediction in row["predictions"]))
+    return False
 
 
 def valid_audit_detail_payload(payload: Any, family: str, *, renderable: bool = False) -> bool:

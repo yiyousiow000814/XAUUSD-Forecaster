@@ -34,24 +34,6 @@ def test_runtime_inputs_are_bounded_and_service_scoped(tmp_path) -> None:
     assert module.runtime_heartbeat(heartbeat_path, service="annotator") == {}
 
 
-def test_latest_decision_uses_the_callers_snapshot(tmp_path) -> None:
-    database = tmp_path / "forward-evidence.sqlite3"
-    connection = sqlite3.connect(database)
-    connection.execute(
-        "CREATE TABLE dashboard_latest_activity_v1 "
-        "(activity_name TEXT PRIMARY KEY, activity_time TEXT NOT NULL)"
-    )
-    connection.execute(
-        "INSERT INTO dashboard_latest_activity_v1 VALUES (?, ?)",
-        ("decision_events", "2026-08-11T20:55:00+00:00"),
-    )
-    connection.commit()
-
-    assert module.latest_decision_created_at(
-        database, snapshot_connection=connection,
-    ) == "2026-08-11T20:55:00+00:00"
-    assert connection.execute("SELECT 1").fetchone()[0] == 1
-    connection.close()
 
 
 def test_dashboard_reads_only_fresh_ctrader_market_session(tmp_path) -> None:
@@ -110,3 +92,18 @@ def test_dashboard_distinguishes_weekly_close_from_missing_open_market_data() ->
     assert module.market_session_observed_at(
         {"observed_at": monday.isoformat()}, market_session="OPEN", now=monday,
     ) == monday.isoformat()
+
+
+def test_live_quote_uses_source_file_without_any_decision_database(tmp_path):
+    database = tmp_path / "never-created.sqlite3"
+    quotes = tmp_path / "quotes"
+    quotes.mkdir()
+    path = quotes / "xauusd-quotes-2026-09-26.jsonl"
+    path.write_text(json.dumps({"bid": 2600, "ask": 2600.5,
+        "received_time": "2026-09-26T00:00:00Z", "event_time": "2026-09-26T00:00:00Z"})
+         + '\n' + json.dumps({"bid":2601,"ask":2602,"received_time":"2026-09-26T00:01:00Z","event_time":"invalid"}) + '\n' + '{"bid": NaN, "ask": 2600.5}\n' + '{"partial":', encoding="utf-8")
+    latest = module.latest_quote(database)
+    assert latest["bid"] == 2600
+    assert latest["ask"] == 2600.5
+    assert latest["source_received_time"] == "2026-09-26T00:00:00+00:00"
+    assert not database.exists()

@@ -1107,7 +1107,7 @@ def test_current_news_worker_audit_view_keeps_independent_transports_and_dynamic
     assert 'activateNewsEvidenceSnapshot' in calls('web/app/api/news-evidence/route.ts::POST')
     snapshots = {row['target'] for row in edges if row['source'] == 'web/worker/api-router.ts::SNAPSHOT_ROUTES'
                  and row['kind'] == 'declares_member'}
-    assert {'/api/audit', '/api/audit-decisions', '/api/audit-briefs', '/api/audit-stories'} <= snapshots
+    assert {'/api/audit', '/api/audit-briefs', '/api/audit-stories'} <= snapshots
     assert not snapshots & {'/api/news-index', '/api/news-content', '/api/news-evidence'}
     assert {'snapshotRead', 'snapshotWrite', 'genericRoute'} <= calls('web/worker/api-router.ts::routeApiRequest')
     generic = [row for row in edges if row['source'] == 'web/worker/api-router.ts::genericRoute' and row['target'] in {'loader', 'handler'}]
@@ -1141,7 +1141,7 @@ def test_current_news_worker_audit_view_keeps_independent_transports_and_dynamic
             '_publish_news_evidence_snapshot'} <= calls(news + '_build_news_evidence_resource')
     assert {'temporary.write_text', 'temporary.replace'} <= calls(news + '_materialize_news_evidence_generation')
     assert {'_dashboard_payload', 'audit_snapshot', 'audit_briefs_snapshot',
-            'audit_stories_snapshot', 'audit_decisions_snapshot'} <= calls(status + '_optional_resource_payload')
+            'audit_stories_snapshot'} <= calls(status + '_optional_resource_payload')
     assert {'DashboardReadModelOwner', 'read_model_owner.start', 'ThreadingHTTPServer'} <= calls(api + 'main')
     scoped_ids = {row['id'] for row in index['observed']['symbols'] if row['path'] == 'scripts/runtime/run_dashboard_api.py'}
     selected = set(index['allowed']['source_symbols']['scripts/runtime/run_dashboard_api.py'])

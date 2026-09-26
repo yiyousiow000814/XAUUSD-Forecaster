@@ -99,10 +99,6 @@ def main() -> int:
     parser.add_argument(
         "--status-url", default="http://127.0.0.1:8765/api/critical-status",
     )
-    parser.add_argument(
-        "--allow-pending-generation-decision", action="store_true",
-        help="During post-reload observation, wait for the next live boundary.",
-    )
     args = parser.parse_args()
 
     status_port = _loopback_status_port(args.status_url)
@@ -123,7 +119,6 @@ def main() -> int:
     assert status is not None
     violations = production_shape_violations(
         status,
-        allow_pending_generation_decision=args.allow_pending_generation_decision,
     )
     print(json.dumps({
         "status": "PASS" if not violations else "FAIL",

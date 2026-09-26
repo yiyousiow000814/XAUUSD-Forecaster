@@ -33,7 +33,6 @@ from xauusd_forecaster.dashboard.sync.resources import (  # noqa: E402
     AUDIT_FIRST_PAGE_LIMIT_BYTES,
     REMOTE_PAYLOAD_LIMIT_BYTES,
     audit_briefs_snapshot,
-    audit_decisions_snapshot,
     audit_stories_snapshot,
     _deferred_projection_request_digest,
     NEWS_EVIDENCE_CONTRACT_VERSION,
@@ -48,7 +47,6 @@ if Path(_deferred_projection_request_digest.__code__.co_filename).resolve() != P
 BUILDERS = {
     "/api/audit-briefs": audit_briefs_snapshot,
     "/api/audit-stories": audit_stories_snapshot,
-    "/api/audit-decisions": audit_decisions_snapshot,
 }
 LOCAL_AUDIT_URL = "http://127.0.0.1:8765/api/audit"
 LOCAL_DATABASE = RUNTIME_ROOT / ".local" / "forward" / "forward-evidence.sqlite3"

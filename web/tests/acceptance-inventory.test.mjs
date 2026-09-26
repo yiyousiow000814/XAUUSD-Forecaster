@@ -146,7 +146,7 @@ test("every materialized resource has an explicit authority and consistency cont
 
 test("critical user-visible metrics have complete authority mappings", () => {
   uniqueKeys(inventory.metrics, row => row.id, "metrics");
-  const requiredFamilies = ["news.", "audit.", "learning.", "market.", "operations.", "health."];
+  const requiredFamilies = ["news.", "audit.", "market.", "operations.", "health."];
   for (const prefix of requiredFamilies) {
     assert.ok(inventory.metrics.some(metric => metric.id.startsWith(prefix)), `missing metric family: ${prefix}`);
   }
@@ -169,10 +169,7 @@ test("pagination siblings are classified and point to inventoried APIs", () => {
 });
 
 test("bounded-lag pagination carries an explicit walk watermark", () => {
-  const learning = inventory.pagination_families.find(row => row.id === "learning-history");
   const market = inventory.pagination_families.find(row => row.id === "market-history");
-  assert.match(learning.cursor, /watermark/);
-  assert.equal(learning.generation_transition, "EXPLICIT_WATERMARK_REQUIRED");
   assert.equal(market.cursor, "before");
   assert.equal(market.generation_transition, "ONE_WALK_ONE_WATERMARK");
 });

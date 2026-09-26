@@ -5,12 +5,6 @@ export type PreviewBundle = {
   audit?: Record<string, unknown>;
   audit_briefs?: Record<string, unknown> | null;
   audit_stories?: Record<string, unknown> | null;
-  audit_decisions?: Record<string, unknown> | null;
-  learning_summary?: Record<string, unknown>;
-  learning_history?: Array<{
-    resource: string; record_key: string; sort_epoch: number;
-    payload_hash: string; payload: Record<string, unknown>;
-  }>;
   market_chart: Record<string, unknown>;
   news_index: {
     items?: Array<Record<string, unknown>>;

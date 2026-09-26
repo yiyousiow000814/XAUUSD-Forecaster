@@ -35,10 +35,6 @@ from xauusd_forecaster.dashboard.read_models import read_dashboard_read_model
 from xauusd_forecaster.dashboard.summaries import DASHBOARD_COUNT_TABLES
 from xauusd_forecaster.dashboard.summaries import dashboard_news_source_summary
 from xauusd_forecaster.dashboard.summaries import install_dashboard_summary_schema
-from xauusd_forecaster.dashboard.learning_resources import (
-    LEARNING_REVISION_TABLES,
-    LearningSurfaceOwner,
-)
 from xauusd_forecaster.dashboard.deployment_provenance import (
     DeploymentProvenanceOwner,
     deployment_status,
@@ -371,7 +367,7 @@ def test_dashboard_reports_broker_close_and_reopen_time(tmp_path) -> None:
     assert payload["system"]["market_session"] == "CLOSED"
     assert payload["system"]["market_reopens_at"] == reopens_at.isoformat()
     expected_silence = {
-        "quote_bridge", "decision_collector", "outcome_settler",
+        "quote_bridge",
         "news_semantic_pipeline",
     }
     for component in expected_silence:
@@ -380,36 +376,6 @@ def test_dashboard_reports_broker_close_and_reopen_time(tmp_path) -> None:
     assert _component_alert_scopes(payload).isdisjoint(expected_silence)
 
 
-def test_dashboard_exposes_frozen_news_coverage_separately_from_current_health(
-    tmp_path, monkeypatch,
-) -> None:
-    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
-    database = tmp_path / "forward-evidence.sqlite3"
-    ForwardLedger(database, now=now).close()
-    _append_decision_at(database, now)
-    _append_semantic_snapshot(
-        database, observed_at=now,
-        reason_code="ACTIONABLE_NEWS_IMPACT_TERMINAL",
-    )
-    _append_news_input_coverage(database, now)
-    module = _dashboard_module()
-    from xauusd_forecaster.dashboard import status_resources
-    monkeypatch.setattr(status_resources, "news_semantic_pipeline_health", lambda *_args, **_kwargs: {
-        "observed_at": now.isoformat(),
-        "status": "HEALTHY",
-        "reason_codes": (),
-        "heartbeat_at": now.isoformat(),
-        "actionable_failure_counts": {},
-    })
-
-    payload = module._dashboard_payload(database, clock=lambda: now)
-
-    assert payload["news_input_coverage"]["state"] == "DEGRADED"
-    assert payload["news_input_coverage"]["usable_broad_event_count"] == 30
-    assert payload["news_input_coverage"]["recovering_count"] == 2
-    assert payload["system"]["components"]["news_semantic_pipeline"][
-        "status"
-    ] == "OK"
 
 
 def test_dashboard_samples_mutable_semantic_heartbeat_at_snapshot_boundary(
@@ -458,38 +424,6 @@ def test_dashboard_refreshes_clock_before_reading_live_broker_heartbeat(
     assert payload["system"]["market_session_observed_at"] == runtime_observed.isoformat()
 
 
-def test_dashboard_reopens_sqlite_for_decision_cadence_at_final_boundary(
-    tmp_path,
-) -> None:
-    query_started = datetime(2026, 8, 18, 11, 40, tzinfo=UTC)
-    runtime_observed = query_started + timedelta(minutes=20)
-    database = tmp_path / "forward-evidence.sqlite3"
-    ForwardLedger(database, now=query_started).close()
-    _write_market_session(tmp_path, observed_at=runtime_observed, is_open=True)
-    _write_quote(tmp_path, received_at=runtime_observed)
-    _write_collector_heartbeat(tmp_path, last_success=runtime_observed)
-    clock_calls = 0
-
-    def advancing_clock() -> datetime:
-        nonlocal clock_calls
-        clock_calls += 1
-        if clock_calls == 2:
-            _append_decision_at(database, runtime_observed)
-            return runtime_observed
-        return query_started
-
-    payload = _dashboard_module()._dashboard_payload(
-        database, clock=advancing_clock,
-    )
-
-    decision = payload["system"]["components"]["decision_collector"]
-    assert decision["status"] == "OK"
-    assert decision["latest_decision"] == runtime_observed.isoformat()
-    assert decision["decision_output_status"] == "CURRENT"
-    assert not any(
-        alert["code"] == "OPS_DECISION_OUTPUT_STALLED"
-        for alert in payload["operational_health"]["alerts"]
-    )
 
 
 def test_open_market_stale_quote_and_decision_remain_unhealthy(tmp_path) -> None:
@@ -504,176 +438,20 @@ def test_open_market_stale_quote_and_decision_remain_unhealthy(tmp_path) -> None
 
     assert payload["system"]["market_session"] == "DATA_UNAVAILABLE"
     assert payload["system"]["components"]["quote_bridge"]["status"] == "STALE"
-    assert payload["system"]["components"]["decision_collector"]["status"] == "STALE"
-    assert {"quote_bridge", "decision_collector"}.issubset(
+    assert payload["system"]["components"]["news_collector"]["status"] == "STALE"
+    assert {"quote_bridge", "news_collector"}.issubset(
         _component_alert_scopes(payload)
     )
 
 
-def test_healthy_collector_old_decision_reports_output_stall_not_collector_stale(
-    tmp_path,
-) -> None:
-    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
-    database = tmp_path / "forward-evidence.sqlite3"
-    ForwardLedger(database, now=now).close()
-    _write_market_session(tmp_path, observed_at=now, is_open=True)
-    _write_quote(tmp_path, received_at=now)
-    _write_collector_heartbeat(tmp_path, last_success=now)
-    _append_decision_at(database, now - timedelta(minutes=20))
-
-    payload = _dashboard_module()._dashboard_payload(
-        database, clock=lambda: now,
-    )
-
-    decision = payload["system"]["components"]["decision_collector"]
-    assert payload["system"]["online"] is True
-    assert payload["system"]["market_session"] == "OPEN"
-    assert decision["status"] == "OK"
-    assert decision["decision_output_status"] == "STALLED"
-    assert "decision_collector" not in _component_alert_scopes(payload)
-    stalled = next(
-        alert for alert in payload["operational_health"]["alerts"]
-        if alert["code"] == "OPS_DECISION_OUTPUT_STALLED"
-    )
-    assert stalled["scope"] == "decision_output"
-    assert stalled["blocking"] is True
-    assert stalled["evidence"]["age_seconds"] == 1200
 
 
-def test_broker_reopen_waits_for_first_quote_eligible_grid_before_stall(
-    tmp_path,
-) -> None:
-    reopened_at = datetime(2026, 8, 18, 10, 0, tzinfo=UTC)
-    first_quote = reopened_at + timedelta(seconds=1)
-    immediate = reopened_at + timedelta(seconds=10)
-    eligible_grid = reopened_at + timedelta(minutes=5)
-    stall_after = eligible_grid + timedelta(seconds=120)
-    database = tmp_path / "forward-evidence.sqlite3"
-    ForwardLedger(database, now=reopened_at - timedelta(hours=1)).close()
-    _append_decision_at(database, reopened_at - timedelta(minutes=20))
-
-    def payload_at(now: datetime) -> dict:
-        _write_market_session(
-            tmp_path,
-            observed_at=now,
-            is_open=True,
-            next_close_time=now + timedelta(hours=1),
-            opened_at=reopened_at,
-            first_quote_after_open_at=first_quote,
-        )
-        _write_quote(tmp_path, received_at=now)
-        _write_collector_heartbeat(tmp_path, last_success=now)
-        return _dashboard_module()._dashboard_payload(
-            database, clock=lambda: now,
-        )
-
-    waiting = payload_at(immediate)
-    waiting_decision = waiting["system"]["components"]["decision_collector"]
-    assert waiting_decision["decision_output_status"] == "NO_RECENT_DECISION"
-    assert waiting_decision["decision_output_eligible_grid"] == (
-        eligible_grid.isoformat()
-    )
-    assert waiting_decision["decision_output_stall_after"] == stall_after.isoformat()
-    assert not any(
-        alert["code"] == "OPS_DECISION_OUTPUT_STALLED"
-        for alert in waiting["operational_health"]["alerts"]
-    )
-
-    grace_boundary = payload_at(stall_after)
-    assert grace_boundary["system"]["components"]["decision_collector"][
-        "decision_output_status"
-    ] == "NO_RECENT_DECISION"
-
-    overdue = payload_at(stall_after + timedelta(seconds=1))
-    overdue_decision = overdue["system"]["components"]["decision_collector"]
-    assert overdue_decision["decision_output_status"] == "STALLED"
-    assert any(
-        alert["code"] == "OPS_DECISION_OUTPUT_STALLED"
-        for alert in overdue["operational_health"]["alerts"]
-    )
 
 
-def test_no_first_decision_stalls_after_forward_epoch_grace(tmp_path) -> None:
-    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
-    epoch = now - timedelta(seconds=421)
-    database = tmp_path / "forward-evidence.sqlite3"
-    ForwardLedger(database, now=epoch).close()
-    _write_market_session(tmp_path, observed_at=now, is_open=True)
-    _write_quote(tmp_path, received_at=now)
-    _write_collector_heartbeat(tmp_path, last_success=now)
-
-    payload = _dashboard_module()._dashboard_payload(
-        database, clock=lambda: now,
-    )
-
-    decision = payload["system"]["components"]["decision_collector"]
-    assert decision["status"] == "OK"
-    assert decision["latest_decision"] is None
-    assert decision["decision_age_seconds"] is None
-    assert decision["decision_observation_started_at"] == epoch.isoformat()
-    assert decision["decision_output_age_seconds"] == 421
-    assert decision["decision_output_status"] == "STALLED"
-    assert any(
-        alert["code"] == "OPS_DECISION_OUTPUT_STALLED"
-        for alert in payload["operational_health"]["alerts"]
-    )
 
 
-@pytest.mark.parametrize("state,heartbeat_age,expected_status", [
-    ("RUNNING", 301, "STALE"),
-    ("STOPPED", 1, "STALE"),
-])
-def test_collector_fault_suppresses_duplicate_decision_output_incident(
-    tmp_path, state: str, heartbeat_age: float, expected_status: str,
-) -> None:
-    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
-    database = tmp_path / "forward-evidence.sqlite3"
-    ForwardLedger(database, now=now - timedelta(hours=1)).close()
-    _write_market_session(tmp_path, observed_at=now, is_open=True)
-    _write_quote(tmp_path, received_at=now)
-    _write_collector_heartbeat(
-        tmp_path,
-        last_success=now - timedelta(seconds=heartbeat_age),
-        state=state,
-    )
-    _append_decision_at(database, now - timedelta(minutes=20))
-
-    payload = _dashboard_module()._dashboard_payload(
-        database, clock=lambda: now,
-    )
-
-    decision = payload["system"]["components"]["decision_collector"]
-    assert decision["status"] == expected_status
-    assert decision["decision_output_status"] == "STALLED"
-    assert "decision_collector" in _component_alert_scopes(payload)
-    assert not any(
-        alert["code"] == "OPS_DECISION_OUTPUT_STALLED"
-        for alert in payload["operational_health"]["alerts"]
-    )
 
 
-def test_healthy_collector_recent_decision_remains_current(tmp_path) -> None:
-    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
-    database = tmp_path / "forward-evidence.sqlite3"
-    ForwardLedger(database, now=now).close()
-    _write_market_session(tmp_path, observed_at=now, is_open=True)
-    _write_quote(tmp_path, received_at=now)
-    _write_collector_heartbeat(tmp_path, last_success=now)
-    _append_decision_at(database, now - timedelta(minutes=5))
-
-    payload = _dashboard_module()._dashboard_payload(
-        database, clock=lambda: now,
-    )
-
-    decision = payload["system"]["components"]["decision_collector"]
-    assert payload["system"]["online"] is True
-    assert decision["status"] == "OK"
-    assert decision["decision_output_status"] == "CURRENT"
-    assert "decision_collector" not in _component_alert_scopes(payload)
-    assert not any(
-        alert["code"] == "OPS_DECISION_OUTPUT_STALLED"
-        for alert in payload["operational_health"]["alerts"]
-    )
 
 
 def test_online_still_fails_closed_without_broker_session(tmp_path) -> None:
@@ -707,47 +485,17 @@ def test_starting_collector_does_not_claim_system_online(tmp_path) -> None:
         database, clock=lambda: now,
     )
 
-    decision = payload["system"]["components"]["decision_collector"]
+    decision = payload["system"]["components"]["news_collector"]
     assert payload["system"]["online"] is False
     assert decision["status"] == "WARN"
     alert = next(
         item for item in payload["operational_health"]["alerts"]
-        if item["scope"] == "decision_collector"
+        if item["scope"] == "news_collector"
     )
     assert alert["severity"] == "WARNING"
     assert alert["blocking"] is False
 
 
-def test_pre_close_horizon_is_expected_pause_not_incident(tmp_path) -> None:
-    now = datetime(2026, 8, 18, 20, 35, tzinfo=UTC)
-    database = tmp_path / "forward-evidence.sqlite3"
-    ForwardLedger(database, now=now).close()
-    _write_market_session(
-        tmp_path,
-        observed_at=now,
-        is_open=True,
-        next_close_time=now + timedelta(minutes=25),
-    )
-    _write_quote(tmp_path, received_at=now)
-    _write_collector_heartbeat(tmp_path, last_success=now)
-    _append_decision_at(database, now - timedelta(minutes=10))
-
-    payload = _dashboard_module()._dashboard_payload(
-        database, clock=lambda: now,
-    )
-
-    decision = payload["system"]["components"]["decision_collector"]
-    assert payload["system"]["online"] is True
-    assert payload["system"]["market_session"] == "OPEN"
-    assert decision["status"] == "OK"
-    assert decision["decision_output_status"] == "EXPECTED_PAUSE"
-    assert decision["decision_output_reason"] == (
-        "FIXED_HORIZON_CROSSES_BROKER_CLOSE"
-    )
-    assert decision["decision_output_message"] == (
-        "等待下一个完整 30 分钟决策窗口"
-    )
-    assert "decision_collector" not in _component_alert_scopes(payload)
 
 
 def test_weekend_fallback_suspends_only_expected_silence(tmp_path) -> None:
@@ -761,7 +509,7 @@ def test_weekend_fallback_suspends_only_expected_silence(tmp_path) -> None:
 
     assert payload["system"]["market_session"] == "WEEKLY_CLOSED"
     expected_silence = {
-        "quote_bridge", "decision_collector", "outcome_settler",
+        "quote_bridge",
         "news_semantic_pipeline",
     }
     assert _component_alert_scopes(payload).isdisjoint(expected_silence)
@@ -819,8 +567,8 @@ def test_broker_reopen_immediately_restores_freshness_enforcement(tmp_path) -> N
     assert closed["system"]["components"]["quote_bridge"]["status"] == "MARKET_CLOSED"
     assert reopened["system"]["market_session"] == "DATA_UNAVAILABLE"
     assert reopened["system"]["components"]["quote_bridge"]["status"] == "STALE"
-    assert reopened["system"]["components"]["decision_collector"]["status"] == "STALE"
-    assert {"quote_bridge", "decision_collector"}.issubset(
+    assert reopened["system"]["components"]["news_collector"]["status"] == "STALE"
+    assert {"quote_bridge", "news_collector"}.issubset(
         _component_alert_scopes(reopened)
     )
 
@@ -830,33 +578,9 @@ def test_broker_reopen_immediately_restores_freshness_enforcement(tmp_path) -> N
     live = module._dashboard_payload(database, clock=lambda: reopened_at)
     assert live["system"]["market_session"] == "OPEN"
     assert live["system"]["components"]["quote_bridge"]["status"] == "OK"
-    assert live["system"]["components"]["decision_collector"]["status"] == "OK"
+    assert live["system"]["components"]["news_collector"]["status"] == "OK"
 
 
-def test_outcome_settler_health_uses_successful_loop_heartbeat_not_output_age(
-    tmp_path,
-) -> None:
-    now = datetime(2026, 8, 19, 10, 0, tzinfo=UTC)
-    database = tmp_path / "forward-evidence.sqlite3"
-    ForwardLedger(database, now=now).close()
-    (tmp_path / "collector-status.json").write_text(json.dumps({
-        "service": "collector",
-        "state": "RUNNING",
-        "last_success": now.isoformat(),
-        "last_error": None,
-        "work_items": 0,
-    }), encoding="utf-8")
-
-    payload = _dashboard_module()._dashboard_payload(database, clock=lambda: now)
-
-    outcome = payload["system"]["components"]["outcome_settler"]
-    assert outcome["status"] == "OK"
-    assert outcome["last_success"] == now.isoformat()
-    assert not any(
-        alert["code"] == "OPS_COMPONENT_UNHEALTHY"
-        and alert["scope"] == "outcome_settler"
-        for alert in payload["operational_health"]["alerts"]
-    )
 
 
 def test_dashboard_exposes_only_runtime_update_failures(tmp_path) -> None:
@@ -1010,21 +734,10 @@ def test_dashboard_annotation_counts_match_current_worker_policy(tmp_path) -> No
     assert payload["annotation_queue"]["queued"] == 0
     assert payload["annotation_queue"]["contract_backfill_queued"] == 1
     assert payload["annotation_queue"]["unclassified_annotation_jobs"] == 0
-    active_identities = {
-        row["model_identity"]
-        for row in payload["learning_curves"]["models"]
-        if row["active_rank"] is not None
-    }
-    assert payload["counts"]["live_oos_model_groups"] == len(active_identities)
-    transition = payload["learning_curves"]["news_contract_transition"]
-    assert payload["news_evidence_summary"]["current_contract_exposed_rows"] == transition["current_contract_exposed_rows"]
-    assert payload["news_evidence_summary"]["current_contract_distinct_events"] == transition["current_contract_distinct_events"]
     metrics = payload["news_metrics"]
     assert metrics["schema_version"] == "news-metrics-v1"
     assert metrics["articles"]["stored_revisions"] == payload["counts"]["news_revisions"]
     assert metrics["articles"]["semantic_reviews_complete"] == payload["counts"]["parsed_news_items"]
-    assert metrics["training"]["current_contract_rows"] == transition["current_contract_exposed_rows"]
-    assert metrics["training"]["distinct_events"] == transition["current_contract_distinct_events"]
 
 
 def test_dashboard_quota_uses_scheduler_ledger(tmp_path, monkeypatch) -> None:
@@ -1276,7 +989,7 @@ def test_optional_api_producers_fail_independently(
     thread.start()
     try:
         for path, expected in (
-            ("/api/audit", "audit"), ("/api/learning", "learning"),
+            ("/api/audit", "audit"),
             ("/api/market-chart", "market_chart"),
         ):
             if expected == failed_resource:
@@ -1319,12 +1032,12 @@ def test_durable_optional_read_models_are_atomic_bounded_and_incremental(
         database, {resource: builder(resource) for resource in READ_MODEL_CONTRACTS},
     )
     assert owner.refresh_once() == {
-        "audit": 1, "learning": 1, "market_chart": 1,
+        "audit": 1, "market_chart": 1,
     }
     assert owner.refresh_once() == {
-        "audit": 0, "learning": 0, "market_chart": 0,
+        "audit": 0, "market_chart": 0,
     }
-    assert calls == {"audit": 1, "learning": 1, "market_chart": 1}
+    assert calls == {"audit": 1, "market_chart": 1}
 
     connection = sqlite3.connect(database)
     with connection:
@@ -1334,9 +1047,9 @@ def test_durable_optional_read_models_are_atomic_bounded_and_incremental(
         )
     connection.close()
     assert owner.refresh_once() == {
-        "audit": 1, "learning": 0, "market_chart": 0,
+        "audit": 1, "market_chart": 0,
     }
-    assert calls == {"audit": 2, "learning": 1, "market_chart": 1}
+    assert calls == {"audit": 2, "market_chart": 1}
 
     prior, _ = read_dashboard_read_model(database, "audit")
     monkeypatch.setattr(
@@ -1445,13 +1158,12 @@ def test_audit_source_build_http_sync_preserves_each_detail_once(monkeypatch, tm
             "local_status_url": f"http://127.0.0.1:{server.server_port}/api/status",
             "remote_ingest_url": "https://worker.invalid/api/ingest",
         })
-        assert len(posted) == 4
+        assert len(posted) == 3
         summary = json.loads(posted["https://worker.invalid/api/audit"])
         assert "detail_resources" not in summary
         assert "recent_decisions" not in summary
         for family, field, expected_count in (
             ("briefs", "daily_news_briefs", 8), ("stories", "storylines", 12),
-            ("decisions", "recent_decisions", 20),
         ):
             body = posted[f"https://worker.invalid/api/audit-{family}"]
             detail = json.loads(body)
@@ -1679,12 +1391,12 @@ def test_optional_read_model_validation_and_concurrent_reads(tmp_path) -> None:
     owner.refresh_once()
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         results = list(executor.map(
-            lambda _index: read_dashboard_read_model(database, "learning")[0],
+            lambda _index: read_dashboard_read_model(database, "audit")[0],
             range(24),
         ))
     assert len(set(results)) == 1
     _, stale = read_dashboard_read_model(
-        database, "learning",
+        database, "audit",
         now=datetime.now(UTC) + timedelta(days=1),
     )
     assert stale["state"] == "STALE"
@@ -1693,10 +1405,10 @@ def test_optional_read_model_validation_and_concurrent_reads(tmp_path) -> None:
     with connection:
         connection.execute(
             """UPDATE dashboard_optional_read_models_v1
-                  SET payload_hash='broken' WHERE resource='learning'"""
+                  SET payload_hash='broken' WHERE resource='audit'"""
         )
     with pytest.raises(DashboardReadModelUnavailable, match="corrupt"):
-        read_dashboard_read_model(database, "learning")
+        read_dashboard_read_model(database, "audit")
     with connection:
         connection.execute(
             """UPDATE dashboard_optional_read_models_v1
@@ -2003,13 +1715,8 @@ def test_critical_builder_uses_bounded_u5_window_and_materialized_counts(
     monkeypatch.setattr(module.sqlite3, "connect", tracked_connect)
     payload = module._dashboard_payload(database, clock=lambda: now, include_optional=False)
 
-    u5_query = next(
-        statement for statement in statements
-        if "select u5 from market_snapshots" in statement.lower()
-    )
-    assert f"LIMIT {module.U5_CONTEXT_SAMPLE_LIMIT}" in u5_query
-    assert payload["u5_context"]["sample_limit"] == module.U5_CONTEXT_SAMPLE_LIMIT
-    assert payload["u5_context"]["scope"] == "RECENT_READY_WINDOW"
+    assert "u5_context" not in payload
+    assert not any("select u5 from market_snapshots" in statement.lower() for statement in statements)
     assert any(
         "from dashboard_table_counts_v1" in statement.lower()
         for statement in statements
@@ -2050,100 +1757,8 @@ def test_critical_builder_uses_bounded_u5_window_and_materialized_counts(
     ), job_reads
 
 
-def test_critical_status_owns_bounded_recent_decisions_and_live_oos_count(
-    monkeypatch, tmp_path,
-) -> None:
-    module = _dashboard_module()
-    now = datetime(2026, 8, 23, 2, 0, tzinfo=UTC)
-    database = tmp_path / "forward.sqlite3"
-    ledger = ForwardLedger(database, now=now)
-    ledger.close()
-    for index in range(20):
-        _append_decision_at(
-            database, now - timedelta(minutes=5 * index), identifier=f"-{index}",
-        )
-
-    real_connect = module.sqlite3.connect
-    statements: list[str] = []
-
-    def tracked_connect(target, *args, **kwargs):
-        connection = real_connect(target, *args, **kwargs)
-        if str(database) in str(target):
-            connection.set_trace_callback(statements.append)
-        return connection
-
-    monkeypatch.setattr(module.sqlite3, "connect", tracked_connect)
-    payload = module._dashboard_payload(
-        database, clock=lambda: now, include_optional=False,
-    )
-    critical = module.critical_status_payload(payload)
-
-    assert len(critical["recent_decisions"]) == 18
-    assert [row["decision_id"] for row in critical["recent_decisions"][:2]] == [
-        "decision-0", "decision-1",
-    ]
-    assert all("features" not in row for row in critical["recent_decisions"])
-    assert all("predictions" not in row for row in critical["recent_decisions"])
-    assert critical["counts"]["live_oos_model_groups"] == 0
-    normalized = [" ".join(statement.lower().split()) for statement in statements]
-    decision_reads = [
-        statement for statement in statements
-        if "from decision_events d join market_snapshots"
-        in " ".join(statement.lower().split())
-    ]
-    bounded_decision_reads = [
-        statement for statement in decision_reads if "limit 18" in statement.lower()
-    ]
-    assert bounded_decision_reads
-    assert not any("features_json" in statement for statement in bounded_decision_reads)
-    assert not any("row_number() over" in statement for statement in normalized)
-    with real_connect(database) as connection:
-        plan = [
-            str(row[3]) for row in connection.execute(
-                "EXPLAIN QUERY PLAN " + bounded_decision_reads[0]
-            )
-        ]
-    assert any("source_decision_id=?" in step for step in plan)
-    assert not any("prediction_v2_time" in step for step in plan)
-    statements.clear()
-    module._dashboard_payload(
-        database, clock=lambda: now, optional_resources=frozenset({"audit"}),
-    )
-    audit_reads = [sql for sql in statements if "LIMIT 30" in sql and
-                   "FROM decision_events d" in sql]
-    assert audit_reads
-    with real_connect(database) as connection:
-        for sql in audit_reads:
-            plan = [str(row[3]) for row in connection.execute("EXPLAIN QUERY PLAN " + sql)]
-            assert any("source_decision_id=?" in step for step in plan)
-            assert not any("prediction_v2_time" in step for step in plan)
 
 
-def test_critical_status_returns_every_available_decision_below_window(tmp_path) -> None:
-    module = _dashboard_module()
-    now = datetime(2026, 8, 23, 2, 0, tzinfo=UTC)
-    database = tmp_path / "forward.sqlite3"
-    ledger = ForwardLedger(database, now=now)
-    ledger.close()
-    for index in range(2):
-        _append_decision_at(
-            database, now - timedelta(minutes=5 * index), identifier=f"-{index}",
-        )
-
-    payload = module._dashboard_payload(
-        database, clock=lambda: now, include_optional=False,
-    )
-    critical = module.critical_status_payload(payload)
-
-    assert [row["decision_id"] for row in critical["recent_decisions"]] == [
-        "decision-0", "decision-1",
-    ]
-    assert critical["mirror_window"] == {
-        "bounded": True,
-        "critical_only": True,
-        "audit_embedded": False,
-        "growing_collections_embedded": False,
-    }
 
 
 def test_forward_ledger_adds_dashboard_news_lookup_indexes(tmp_path) -> None:
@@ -3148,30 +2763,6 @@ def test_dashboard_clears_historical_gdelt_429_after_successful_gkg_poll(
     assert "429" in gdelt["last_error"]
 
 
-def test_learning_surfaces_rebuild_only_when_source_counts_change() -> None:
-    connection = sqlite3.connect(":memory:")
-    for table in LEARNING_REVISION_TABLES:
-        connection.execute(f"CREATE TABLE {table} (id INTEGER)")
-    calls = {"learning": 0}
-
-    def learning(_connection):
-        calls["learning"] += 1
-        return {"generation": calls["learning"]}
-
-    owner = LearningSurfaceOwner(
-        learning_builder=learning,
-    )
-
-    first = owner.surfaces(connection)
-    second = owner.surfaces(connection)
-    assert first == second
-    assert calls == {"learning": 1}
-
-    connection.execute("INSERT INTO derived_outcomes VALUES (1)")
-    third = owner.surfaces(connection)
-    assert third != second
-    assert calls == {"learning": 2}
-    connection.close()
 
 
 @pytest.mark.parametrize("tight_envelope", [False, True])
@@ -3268,7 +2859,7 @@ def test_optional_resource_round_releases_readers_for_wal_recovery(tmp_path, mon
     owner._stop = MaintenanceWindow()
     try:
         assert all(value >= 1 for value in owner.refresh_once().values())
-        expected = 1 if stop_after_first else 3
+        expected = 1 if stop_after_first else len(READ_MODEL_CONTRACTS)
         assert pauses == [6] * expected
         assert writer.execute("SELECT count(*) FROM pressure_fixture").fetchone()[0] == expected
     finally:

@@ -341,22 +341,22 @@ def test_real_entrypoint_owns_http_identity_for_all_deferred_routes(monkeypatch)
     )
 
     assert result["state"] == "PASSED"
-    assert [urlsplit(request.full_url).path for request in requests[1:4]] == list(module.BUILDERS)
-    assert [urlsplit(request.full_url).path for request in requests[4:]] == list(
+    assert [urlsplit(request.full_url).path for request in requests[1:3]] == list(module.BUILDERS)
+    assert [urlsplit(request.full_url).path for request in requests[3:]] == list(
         module.BUILDERS
     )
     assert all(
         request.get_header("User-agent") == module.RELEASE_CONTROL_USER_AGENT
         for request in requests
     )
-    assert all(request.get_header("Cloudflare-workers-version-overrides") is None for request in requests[:4])
+    assert all(request.get_header("Cloudflare-workers-version-overrides") is None for request in requests[:3])
     assert all(
         request.get_header("Cloudflare-workers-version-overrides")
         == f'{module.WORKER_NAME}="{version}"'
-        for request in requests[4:]
+        for request in requests[3:]
     )
-    assert all(request.get_header("Cache-control") == "no-cache" for request in requests[4:])
-    assert all(request.get_header("Pragma") == "no-cache" for request in requests[4:])
+    assert all(request.get_header("Cache-control") == "no-cache" for request in requests[3:])
+    assert all(request.get_header("Pragma") == "no-cache" for request in requests[3:])
 
 
 def test_remote_403_remains_pending(monkeypatch) -> None:
@@ -389,7 +389,7 @@ def test_http_200_with_wrong_candidate_identity_fails_closed(monkeypatch) -> Non
     revision = "b" * 40
     generated = datetime.now(UTC)
     authority = _authority(generated.isoformat())
-    route = "/api/audit-decisions"
+    route = "/api/audit-briefs"
 
     def urlopen(request, *, timeout):
         local = _local_http_response(module, authority, request)

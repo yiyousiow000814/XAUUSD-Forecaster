@@ -14,30 +14,19 @@ type Candle = {
   time: string; open: number; high: number; low: number; close: number;
   ticks?: number; source_candles?: number;
 };
-type Decision = {
-  source_decision_id: string; decision_time: string; model_identity: string;
-  [key: string]: unknown;
-};
 type MarketSnapshot = {
-  candles?: Candle[]; overview_candles?: Candle[]; decisions?: Decision[];
-  training_markers?: Array<Record<string, unknown>>;
+  candles?: Candle[]; overview_candles?: Candle[];
   history_start?: string | null; history_end?: string | null;
-  source_candle_count?: number; prediction_history_start?: Record<string, string>;
+  source_candle_count?: number;
 };
 type MaterializedOverview = {
   candles: Candle[]; source_candle_count: number;
   history_start: string | null; history_end: string | null;
 };
-type MaterializedDecisionOverview = {
-  model_identity: string; frequency: "5m" | "30m";
-  decisions: Decision[]; source_decision_count: number;
-  decision_count: number; decision_downsampled: boolean;
-};
 
 const MAX_INGEST_BYTES = 400_000;
 const MAX_BATCH_STATEMENTS = 50;
 const OVERVIEW_POINTS = 480;
-const OVERVIEW_DECISIONS = 480;
 const RANGE_SECONDS: Record<string, number> = {
   "3": 3 * 3_600, "6": 6 * 3_600, "12": 12 * 3_600,
   "24": 24 * 3_600, "168": 7 * 86_400,
@@ -80,32 +69,17 @@ function downsample(rows: Candle[], limit = OVERVIEW_POINTS): Candle[] {
   return result;
 }
 
-function sampleDecisions(rows: Decision[], limit = OVERVIEW_DECISIONS): Decision[] {
-  if (rows.length <= limit) return rows;
-  const stride = Math.ceil(rows.length / limit);
-  return rows.filter((_, index) => index % stride === 0).slice(0, limit);
-}
 
 function previewHistory(request: Request) {
   const source = previewBundle!.market_chart as MarketSnapshot;
   const url = new URL(request.url);
   const range = url.searchParams.get("range") ?? "24";
-  const identity = url.searchParams.get("identity") ?? "BROAD_FULL";
-  const frequency = url.searchParams.get("frequency") === "5m" ? "5m" : "30m";
   const detail = source.candles ?? [];
   if (range === "all") {
     const candles = source.overview_candles?.length
       ? source.overview_candles : downsample(detail);
-    const allDecisions = (source.decisions ?? []).filter(row => {
-      const minute = new Date(row.decision_time).getUTCMinutes();
-      return row.model_identity === identity
-        && (frequency === "5m" || minute % 30 === 0);
-    });
     return previewJson({
       ...source, candles, overview_candles: [],
-      decisions: sampleDecisions(allDecisions),
-      source_decision_count: allDecisions.length,
-      decision_downsampled: allDecisions.length > OVERVIEW_DECISIONS,
       mode: "overview",
       page: { has_earlier: false, has_later: false }, preview_limited: true,
     });
@@ -125,14 +99,8 @@ function previewHistory(request: Request) {
     const epoch = Date.parse(row.time) / 1_000;
     return epoch >= start && epoch < end;
   });
-  const decisions = (source.decisions ?? []).filter(row => {
-    const epoch = Date.parse(row.decision_time) / 1_000;
-    const minute = new Date(row.decision_time).getUTCMinutes();
-    return row.model_identity === identity && epoch >= start && epoch < end
-      && (frequency === "5m" || minute % 30 === 0);
-  });
   return previewJson({
-    ...source, candles, overview_candles: [], decisions, mode: "detail",
+    ...source, candles, overview_candles: [], mode: "detail",
     page: {
       start: candles[0]?.time ?? new Date(start * 1_000).toISOString(),
       end: candles.at(-1)?.time ?? new Date(end * 1_000).toISOString(),
@@ -163,23 +131,6 @@ async function materializedMarketOverview(binding: D1Database) {
   return payload;
 }
 
-async function materializedDecisionOverview(
-  binding: D1Database, identity: string, frequency: "5m" | "30m",
-) {
-  const key = `${identity}\u0000${frequency}`;
-  const row = await binding.prepare(
-    `SELECT payload FROM market_decision_overviews WHERE overview_key=?`,
-  ).bind(key).first<{ payload: string }>();
-  if (!row) throw new Error("decision overview not materialized");
-  const payload = JSON.parse(row.payload) as MaterializedDecisionOverview;
-  if (!Array.isArray(payload.decisions)
-      || payload.decisions.length > OVERVIEW_DECISIONS
-      || payload.model_identity !== identity
-      || payload.frequency !== frequency) {
-    throw new Error("invalid materialized decision overview");
-  }
-  return payload;
-}
 
 export async function GET(request: Request) {
   if (previewBundle) return previewHistory(request);
@@ -187,8 +138,6 @@ export async function GET(request: Request) {
   if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   const url = new URL(request.url);
   const range = url.searchParams.get("range") ?? "24";
-  const identity = url.searchParams.get("identity") ?? "BROAD_FULL";
-  const frequency = url.searchParams.get("frequency") === "5m" ? "5m" : "30m";
   if (!(range in RANGE_SECONDS) && range !== "all") {
     return NextResponse.json({ error: "invalid range" }, { status: 400 });
   }
@@ -202,13 +151,8 @@ export async function GET(request: Request) {
     const historyStart = new Date(startEpoch * 1_000).toISOString();
     const historyEnd = new Date(endEpoch * 1_000).toISOString();
     if (range === "all") {
-      const decisionOverview = await materializedDecisionOverview(binding, identity, frequency);
       return NextResponse.json({
         candles: marketOverview.candles,
-        decisions: decisionOverview.decisions,
-        source_decision_count: decisionOverview.source_decision_count,
-        decision_downsampled: decisionOverview.decision_downsampled,
-        training_markers: [],
         mode: "overview", history_start: marketOverview.history_start ?? historyStart,
         history_end: marketOverview.history_end ?? historyEnd,
         source_candle_count: marketOverview.source_candle_count,
@@ -240,17 +184,10 @@ export async function GET(request: Request) {
         close_milli: number; ticks: number;
       }>();
     }
-    const decisionSql = `SELECT payload FROM market_decisions
-      WHERE model_identity=? AND decision_epoch>=? AND decision_epoch<?
-      ${frequency === "30m" ? "AND decision_epoch % 1800 = 0" : ""}
-      ORDER BY decision_epoch,decision_key`;
-    const decisionsResult = await binding.prepare(decisionSql)
-      .bind(identity, start, end).all<{ payload: string }>();
     const candles = candlesResult.results.map(compactCandle);
     return NextResponse.json({
       candles,
-      decisions: decisionsResult.results.map(row => JSON.parse(row.payload)),
-      training_markers: [], mode: "detail",
+      mode: "detail",
       history_start: historyStart, history_end: historyEnd,
       source_candle_count: marketOverview.source_candle_count,
       page: {
@@ -281,15 +218,10 @@ export async function POST(request: Request) {
   if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   try {
     const body = JSON.parse(serialized) as {
-      candles?: Candle[]; decisions?: Decision[]; overview?: MaterializedOverview;
-      decision_overviews?: MaterializedDecisionOverview[];
+      candles?: Candle[]; overview?: MaterializedOverview;
     };
     const candles = Array.isArray(body.candles) ? body.candles : [];
-    const decisions = Array.isArray(body.decisions) ? body.decisions : [];
-    const decisionOverviews = Array.isArray(body.decision_overviews)
-      ? body.decision_overviews : [];
-    if (candles.length > 500 || decisions.length > 2_500
-        || decisionOverviews.length > 2) throw new Error("batch too large");
+    if (candles.length > 500) throw new Error("batch too large");
     const receivedAt = new Date().toISOString();
     const statements: D1PreparedStatement[] = [];
     if (body.overview) {
@@ -307,29 +239,6 @@ export async function POST(request: Request) {
            payload=excluded.payload,received_at=excluded.received_at
          WHERE market_history_overview.payload IS NOT excluded.payload`,
       ).bind(JSON.stringify(overview), receivedAt));
-    }
-    for (const summary of decisionOverviews) {
-      if (!summary.model_identity
-          || !["5m", "30m"].includes(summary.frequency)
-          || !Array.isArray(summary.decisions)
-          || summary.decisions.length > OVERVIEW_DECISIONS
-          || !Number.isSafeInteger(summary.source_decision_count)
-          || summary.source_decision_count < summary.decisions.length
-          || summary.decisions.some(row => row.model_identity !== summary.model_identity)) {
-        throw new Error("invalid decision overview");
-      }
-      const key = `${summary.model_identity}\u0000${summary.frequency}`;
-      statements.push(binding.prepare(
-        `INSERT INTO market_decision_overviews
-           (overview_key,model_identity,frequency,payload,received_at)
-         VALUES (?,?,?,?,?) ON CONFLICT(overview_key) DO UPDATE SET
-           model_identity=excluded.model_identity,frequency=excluded.frequency,
-           payload=excluded.payload,received_at=excluded.received_at
-         WHERE market_decision_overviews.model_identity IS NOT excluded.model_identity
-            OR market_decision_overviews.frequency IS NOT excluded.frequency
-            OR market_decision_overviews.payload IS NOT excluded.payload`,
-      ).bind(key, summary.model_identity, summary.frequency,
-        JSON.stringify(summary), receivedAt));
     }
     for (const row of candles) {
       const epoch = asEpoch(row.time);
@@ -352,33 +261,14 @@ export async function POST(request: Request) {
       ).bind(epoch, row.time, Math.round(row.open * 1_000), Math.round(row.high * 1_000),
         Math.round(row.low * 1_000), Math.round(row.close * 1_000), row.ticks ?? 0, receivedAt));
     }
-    for (const row of decisions) {
-      const epoch = asEpoch(row.decision_time);
-      if (epoch === null || !row.source_decision_id || !row.model_identity) {
-        throw new Error("invalid decision");
-      }
-      const key = `${row.source_decision_id}\u0000${row.model_identity}`;
-      statements.push(binding.prepare(
-        `INSERT INTO market_decisions
-           (decision_key,decision_epoch,decision_time,model_identity,payload,received_at)
-         VALUES (?,?,?,?,?,?) ON CONFLICT(decision_key) DO UPDATE SET
-           decision_epoch=excluded.decision_epoch,decision_time=excluded.decision_time,
-           model_identity=excluded.model_identity,payload=excluded.payload,
-           received_at=excluded.received_at
-         WHERE market_decisions.decision_epoch IS NOT excluded.decision_epoch
-            OR market_decisions.decision_time IS NOT excluded.decision_time
-            OR market_decisions.model_identity IS NOT excluded.model_identity
-            OR market_decisions.payload IS NOT excluded.payload`,
-      ).bind(key, epoch, row.decision_time, row.model_identity, JSON.stringify(row), receivedAt));
-    }
     if (isReleaseValidationContext(validation)) {
       if (!await validateJsonWithD1(binding, serialized)) {
         throw new Error("invalid JSON");
       }
       return releaseValidationResponse(validation, {
         body: "bounded-read", json: "parsed+d1-json1",
-        transformed: { candles: candles.length, decisions: decisions.length,
-          overview: Boolean(body.overview), decision_overviews: decisionOverviews.length,
+        transformed: { candles: candles.length,
+          overview: Boolean(body.overview),
           prepared_statements: statements.length },
         mutation_boundary: "schema-and-history-batch",
       });
@@ -389,8 +279,8 @@ export async function POST(request: Request) {
       written += results.reduce((total, result) => total + Number(result.meta?.changes ?? 0), 0);
     }
     return NextResponse.json({
-      status: "OK", candles: candles.length, decisions: decisions.length,
-      overview: Boolean(body.overview), decision_overviews: decisionOverviews.length,
+      status: "OK", candles: candles.length,
+      overview: Boolean(body.overview),
       accepted: statements.length, written,
     });
   } catch {

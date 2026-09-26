@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.training.runtime import (
+from xauusd_forecaster.runtime.process_identity import (
     _process_identity_alive,
     _process_start_token,
 )

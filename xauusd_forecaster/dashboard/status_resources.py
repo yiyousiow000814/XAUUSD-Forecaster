@@ -38,8 +38,6 @@ from xauusd_forecaster.dashboard.news_resources import (
 
 from xauusd_forecaster.dashboard.health_projection import (
     collector_component as _collector_component,
-    decision_collector_component as _decision_collector_component,
-    materialized_semantic_health as _materialized_semantic_health,
     semantic_pipeline_component as _semantic_pipeline_component,
 )
 
@@ -53,8 +51,8 @@ from xauusd_forecaster.dashboard.market_resources import (
 
 from xauusd_forecaster.dashboard.runtime_status import (
     broker_market_session as _broker_market_session,
-    latest_decision_created_at as _latest_decision_created_at,
     latest_quote_received as _latest_quote_received,
+    latest_quote,
     market_session_observed_at as _market_session_observed_at,
     market_session_status as _market_session_status,
     runtime_heartbeat as _runtime_heartbeat,
@@ -66,7 +64,6 @@ from xauusd_forecaster.dashboard.news_source_health import (
 )
 
 
-from xauusd_forecaster.dashboard.learning_resources import LearningSurfaceOwner
 
 
 from xauusd_forecaster.dashboard.deployment_provenance import DeploymentProvenanceOwner
@@ -102,13 +99,10 @@ from xauusd_forecaster.dashboard.summaries import dashboard_table_counts
 from xauusd_forecaster.dashboard.summaries import dashboard_total_brief_days
 
 
-from xauusd_forecaster.dashboard.summaries import dashboard_valid_outcome_summary
 
 
 from xauusd_forecaster.dashboard.resource_contracts import (
-    _learning_summary,
     audit_briefs_snapshot,
-    audit_decisions_snapshot,
     audit_snapshot,
     audit_stories_snapshot,
     market_chart_snapshot,
@@ -245,7 +239,6 @@ DEPLOYMENT_PROVENANCE = _DEPLOYMENT_PROVENANCE_OWNER.provenance(
 )
 
 
-_LEARNING_SURFACE_OWNER = LearningSurfaceOwner()
 
 
 def _dashboard_payload(
@@ -261,7 +254,6 @@ def _dashboard_payload(
         )
 
     include_audit = wants("audit")
-    include_learning = wants("learning") or include_audit
     include_market_chart = wants("market_chart")
     include_news_evidence = wants("news_evidence") or include_audit
     credentials = configured_api_credentials()
@@ -278,150 +270,11 @@ def _dashboard_payload(
     if owns_connection:
         connection.execute("BEGIN")
     try:
-        latest = connection.execute(
-            """SELECT d.decision_id, d.decision_time, d.effective_action, d.data_health,
-                      d.reason_codes_json, s.source_event_time,
-                      s.source_received_time, s.bid, s.ask, s.spread,
-                      s.features_json, s.u5, s.u5_status
-               FROM decision_events d
-               JOIN market_snapshots s USING(snapshot_id)
-               ORDER BY d.decision_time DESC LIMIT 1"""
-        ).fetchone()
-        # The annotator heartbeat is a mutable runtime file outside this
-        # SQLite snapshot. Sample semantic health at the same boundary as the
-        # fixed observation clock, before optional evidence aggregation can
-        # make a later heartbeat look like future-dated evidence.
-        current_semantic_health = (
-            news_semantic_pipeline_health(
-                SimpleNamespace(connection=connection, path=database),
-                observed_at=now,
-            )
-            if include_optional else _materialized_semantic_health(
-                connection, str(latest["decision_id"]) if latest else None,
-            )
-        )
-        latest_prediction = None
-        latest_news_input_coverage = None
-        if latest:
-            latest_prediction = connection.execute(
-                """SELECT p.model_identity,p.model_version,p.recommended_action,
-                          p.prediction_status,p.ev_long_u5,p.ev_short_u5,
-                          p.interval_width,p.decision_time
-                   FROM predictions_v2 p
-                   JOIN model_updates_v2 u USING(model_version)
-                   WHERE p.source_decision_id=?
-                     AND p.model_identity IN ('BROAD_FULL','FULL','MARKET_ONLY')
-                   ORDER BY CASE p.model_identity
-                              WHEN 'BROAD_FULL' THEN 0 WHEN 'FULL' THEN 1 ELSE 2 END,
-                            u.created_at DESC
-                   LIMIT 1""",
-                (latest["decision_id"],),
-            ).fetchone()
-            coverage_table = connection.execute(
-                """SELECT 1 FROM sqlite_master
-                   WHERE type='table' AND name='news_input_coverage_snapshots_v1'"""
-            ).fetchone()
-            if coverage_table is not None:
-                latest_news_input_coverage = connection.execute(
-                    """SELECT state,usable_core_event_count,
-                              usable_broad_event_count,
-                              unresolved_annotation_count,
-                              unresolved_impact_count,recovering_count,
-                              terminal_or_overdue_count,
-                              operational_reason_codes_json,
-                              coverage_reason_codes_json,
-                              source_observability_json,source_evidence_hash,
-                              snapshot_hash,observed_at
-                       FROM news_input_coverage_snapshots_v1
-                       WHERE source_decision_id=?""",
-                    (latest["decision_id"],),
-                ).fetchone()
-        u5_rows = connection.execute(
-            """SELECT u5 FROM market_snapshots
-               WHERE u5_status='READY' AND u5 IS NOT NULL
-               ORDER BY decision_time DESC LIMIT ?""",
-            (U5_CONTEXT_SAMPLE_LIMIT,),
-        ).fetchall()
-        recent = connection.execute(
-            """SELECT d.decision_id, d.decision_time, d.effective_action, d.data_health,
-                      s.bid, s.ask, s.spread,
-                      o.outcome_status,
-                      o.reason_codes_json AS outcome_reason_codes_json,
-                      o.long_return, o.short_return,
-                      (SELECT p.recommended_action FROM predictions_v2 p
-                       JOIN model_updates_v2 u USING(model_version)
-                       WHERE p.source_decision_id=d.decision_id
-                         -- Prevent the low-cardinality identity/time index from
-                         -- turning this fixed 18-row lookup into a historical
-                         -- BROAD_FULL scan. The primary key owns decision-local
-                         -- prediction lookup; identity remains a filter.
-                         AND +p.model_identity='BROAD_FULL'
-                       ORDER BY u.created_at DESC LIMIT 1) AS research_action,
-                      (SELECT p.prediction_status FROM predictions_v2 p
-                       JOIN model_updates_v2 u USING(model_version)
-                       WHERE p.source_decision_id=d.decision_id
-                         AND +p.model_identity='BROAD_FULL'
-                       ORDER BY u.created_at DESC LIMIT 1) AS research_status
-               FROM decision_events d
-               JOIN market_snapshots s USING(snapshot_id)
-               LEFT JOIN outcomes o USING(decision_id)
-               ORDER BY d.decision_time DESC LIMIT 18"""
-        ).fetchall() if not include_audit else connection.execute(
-            """SELECT d.decision_id, d.decision_time, d.effective_action, d.data_health,
-                      s.bid, s.ask, s.spread, s.features_json,
-                      o.outcome_status,
-                      o.reason_codes_json AS outcome_reason_codes_json,
-                      o.long_return, o.short_return,
-                      o.long_mfe, o.long_mae, o.short_mfe, o.short_mae,
-                      o.maximum_spread,
-                      (SELECT p.recommended_action FROM predictions_v2 p
-                       JOIN model_updates_v2 u USING(model_version)
-                       WHERE p.source_decision_id=d.decision_id
-                         AND +p.model_identity='BROAD_FULL'
-                       ORDER BY u.created_at DESC LIMIT 1) AS research_action,
-                      (SELECT p.prediction_status FROM predictions_v2 p
-                       JOIN model_updates_v2 u USING(model_version)
-                       WHERE p.source_decision_id=d.decision_id
-                         AND +p.model_identity='BROAD_FULL'
-                       ORDER BY u.created_at DESC LIMIT 1) AS research_status
-               FROM decision_events d
-               JOIN market_snapshots s USING(snapshot_id)
-               LEFT JOIN outcomes o USING(decision_id)
-               ORDER BY d.decision_time DESC LIMIT 30"""
-        ).fetchall()
+        latest = latest_quote(database)
+        current_semantic_health = news_semantic_pipeline_health(
+            SimpleNamespace(connection=connection, path=database), observed_at=now,
+        ) if include_optional else None
         counts = dashboard_table_counts(connection)
-        decision_ids = [row["decision_id"] for row in recent] if include_audit else []
-        predictions_by_decision: dict[str, list[dict]] = {key: [] for key in decision_ids}
-        if decision_ids:
-            placeholders = ",".join("?" for _ in decision_ids)
-            prediction_rows = connection.execute(
-                f"""WITH ranked AS (
-                       SELECT p.source_decision_id AS decision_id,
-                              p.model_identity,p.model_version,
-                              p.predicted_direction_u5,p.predicted_news_residual_u5,
-                              p.ev_long_u5,p.ev_short_u5,
-                              p.interval_width AS uncertainty_u5,
-                              p.recommended_action,p.effective_action,p.prediction_status,
-                              row_number() OVER (
-                                PARTITION BY p.source_decision_id,p.model_identity
-                                ORDER BY u.created_at DESC,u.model_version DESC
-                              ) AS version_rank
-                       FROM predictions_v2 p
-                       JOIN model_updates_v2 u USING(model_version)
-                       WHERE p.source_decision_id IN ({placeholders})
-                         AND p.decision_time>u.created_at
-                     )
-                     SELECT decision_id,model_identity,model_version,
-                            predicted_direction_u5,predicted_news_residual_u5,
-                            ev_long_u5,ev_short_u5,uncertainty_u5,
-                            recommended_action,effective_action,prediction_status
-                     FROM ranked WHERE version_rank=1
-                     ORDER BY decision_id,model_identity""",
-                decision_ids,
-            ).fetchall()
-            for prediction in prediction_rows:
-                item = dict(prediction)
-                predictions_by_decision[item.pop("decision_id")].append(item)
         news_rows = connection.execute(
                 f"""SELECT n.source, n.source_item_id, n.revision_number,
                        n.source_published_time, n.collector_first_seen_time,
@@ -606,13 +459,6 @@ def _dashboard_payload(
             }
         else:
             claimable_annotation_keys = set()
-        model_rows = connection.execute(
-            """SELECT model_identity, model_version, created_at,
-                      training_cutoff, hyperparameters_json, artifact_hash
-               FROM model_updates ORDER BY training_cutoff DESC,
-                                           model_identity"""
-        ).fetchall() if include_learning else []
-        valid = dashboard_valid_outcome_summary(connection)
         epoch = connection.execute(
             "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
         ).fetchone()[0]
@@ -622,58 +468,14 @@ def _dashboard_payload(
         collected_news_sources = dashboard_collected_news_sources(
             connection, tuple(sorted(FACTOR_COVERAGE_NEWS_SOURCES)),
         )
-        if include_learning:
-            learning = _LEARNING_SURFACE_OWNER.surfaces(connection)
-            counts["live_oos_model_groups"] = len({
-                str(row.get("model_identity") or "")
-                for row in learning.get("models", [])
-                if row.get("active_rank") is not None and row.get("model_identity")
-            })
-        else:
-            active_generation = connection.execute(
-                """SELECT generation_id
-                   FROM news_model_generation_activations_v1
-                   ORDER BY activated_at DESC,activation_id DESC LIMIT 1"""
-            ).fetchone()
-            if active_generation is not None:
-                counts["live_oos_model_groups"] = int(connection.execute(
-                    """SELECT count(DISTINCT model_identity) FROM (
-                         SELECT model_identity
-                         FROM news_model_generation_members_v1
-                         WHERE generation_id=?
-                         UNION ALL
-                         SELECT model_identity
-                         FROM news_model_generation_aux_members_v1
-                         WHERE generation_id=?
-                       )""",
-                    (active_generation["generation_id"], active_generation["generation_id"]),
-                ).fetchone()[0])
-            else:
-                counts["live_oos_model_groups"] = int(connection.execute(
-                    "SELECT count(DISTINCT model_identity) FROM model_updates_v2"
-                ).fetchone()[0])
-            complete = int(counts["training_eligibility_v2"])
-            learning = {
-                "models": [],
-                "next_training_threshold": (
-                    96 if complete < 96 else 200 if complete < 200
-                    else ((complete // 50) + 1) * 50
-                ),
-                "news_contract_transition": {},
-            }
         market_chart = (
             _recent_market_chart(database, connection, now)
             if include_market_chart else {}
         )
         latest_activity = dashboard_latest_activity(connection)
         latest_news_poll = latest_activity.get("source_polls")
-        latest_decision_time = latest_activity.get("decision_events")
         component_times = {
             "quote_bridge": _latest_quote_received(database),
-            # The collector invokes the settler on every successful loop. No
-            # newly appended outcome is expected until a decision reaches its
-            # 30-minute horizon, so output recency is not worker health.
-            "outcome_settler": latest_activity.get("outcomes"),
             "news_collector": None,
             "gemini_annotator": latest_activity.get("news_annotations"),
         }
@@ -742,8 +544,6 @@ def _dashboard_payload(
             account_ids=frozenset(
                 credential.account_id for credential in credentials
             ),
-            materialized_latest_decision_time=latest_activity.get("decision_time"),
-            use_materialized_latest_decision=True,
         )
         operational_health = scheduler_health_snapshot(connection, now=now)
     finally:
@@ -751,51 +551,7 @@ def _dashboard_payload(
             connection.rollback()
             connection.close()
 
-    latest_data = dict(latest) if latest else None
-    if latest_data:
-        latest_data.pop("decision_id", None)
-    research_forecast = dict(latest_prediction) if latest_prediction else None
-    if research_forecast is not None:
-        research_forecast["signal_expiry_seconds"] = 20
-        research_forecast["forecast_horizon_seconds"] = 30 * 60
-        ev_long = research_forecast.get("ev_long_u5")
-        ev_short = research_forecast.get("ev_short_u5")
-        research_forecast["directional_bias"] = (
-            "LONG" if ev_long is not None and ev_short is not None and ev_long > ev_short
-            else "SHORT" if ev_long is not None and ev_short is not None and ev_short > ev_long
-            else "NEUTRAL"
-        )
-        research_forecast["frozen_record"] = True
-    news_input_coverage = (
-        dict(latest_news_input_coverage)
-        if latest_news_input_coverage is not None else None
-    )
-    if news_input_coverage is not None:
-        for field in (
-            "operational_reason_codes_json", "coverage_reason_codes_json",
-            "source_observability_json",
-        ):
-            value = news_input_coverage.pop(field)
-            news_input_coverage[field.removesuffix("_json")] = json.loads(value)
-    u5_values = sorted(float(row["u5"]) for row in u5_rows)
-    current_u5 = float(latest["u5"]) if latest and latest["u5"] is not None else None
-    u5_percentile = None
-    if current_u5 is not None and u5_values:
-        u5_percentile = round(
-            100.0 * sum(value <= current_u5 for value in u5_values) / len(u5_values), 1
-        )
-    u5_context = {
-        "percentile": u5_percentile,
-        "samples": len(u5_values),
-        "sample_limit": U5_CONTEXT_SAMPLE_LIMIT,
-        "scope": "RECENT_READY_WINDOW",
-        "label": (
-            "高波动" if u5_percentile is not None and u5_percentile >= 85 else
-            "偏高" if u5_percentile is not None and u5_percentile >= 60 else
-            "一般" if u5_percentile is not None and u5_percentile >= 25 else
-            "低波动" if u5_percentile is not None else "等待样本"
-        ),
-    }
+    latest_data = latest
     # Snapshot construction performs bounded but potentially blocking SQLite
     # and evidence work. Refresh the wall clock before validating continuously
     # published runtime heartbeats so a current broker receipt cannot appear to
@@ -809,14 +565,7 @@ def _dashboard_payload(
         database.parent / "collector-status.json", service="collector",
     )
     component_times["quote_bridge"] = _latest_quote_received(database)
-    latest_decision_time = _latest_decision_created_at(
-        database, snapshot_connection,
-    )
     component_times["news_collector"] = collector_heartbeat.get("last_success")
-    component_times["outcome_settler"] = (
-        collector_heartbeat.get("last_success")
-        or component_times["outcome_settler"]
-    )
     age_seconds = None
     if component_times["quote_bridge"]:
         age_seconds = max(
@@ -824,18 +573,9 @@ def _dashboard_payload(
             (now - datetime.fromisoformat(component_times["quote_bridge"])).total_seconds(),
         )
     broker_session = _broker_market_session(database, now)
-    decision_component = _decision_collector_component(
-        collector_heartbeat,
-        latest_decision=latest_decision_time,
-        decision_observation_start=epoch,
-        broker_session=broker_session,
-        quote_current=age_seconds is not None and age_seconds <= 30,
-        now=now,
-    )
-    collector_available = (
-        collector_heartbeat.get("state") == "RUNNING"
-        and decision_component["status"] in {"OK", "WARN"}
-    )
+    collector_available = collector_heartbeat.get("state") == "RUNNING" and _collector_component(
+        collector_heartbeat, latest_poll=latest_news_poll, now=now,
+    )["status"] in {"OK", "WARN"}
     online = bool(
         age_seconds is not None
         and age_seconds <= 30
@@ -905,7 +645,7 @@ def _dashboard_payload(
     sites_sync_component["news_projection_state"] = news_checkpoint.get("projection_state", "UNKNOWN")
     sites_sync_component["news_last_verified_at"] = news_checkpoint.get("last_success")
     semantic_pipeline_component = _semantic_pipeline_component(
-        current_semantic_health, now=now, decision_component=decision_component,
+        current_semantic_health, now=now,
     )
     degraded_resources = sync_status.get("degraded_resources") or []
     if (
@@ -918,17 +658,6 @@ def _dashboard_payload(
             for row in degraded_resources
             if isinstance(row, dict)
         )[:500]
-
-    def serialize_row(row: sqlite3.Row) -> dict:
-        item = dict(row)
-        if "features_json" in item:
-            item["features"] = json.loads(item.pop("features_json"))
-        item["outcome_reason_codes"] = json.loads(
-            item.pop("outcome_reason_codes_json") or "[]"
-        )
-        if include_audit:
-            item["predictions"] = predictions_by_decision.get(item["decision_id"], [])
-        return item
 
     # The status snapshot remains a small recent page. The complete bounded
     # reader archive is exposed separately by /api/news-archive.
@@ -944,14 +673,8 @@ def _dashboard_payload(
         counts["model_candidate_news_items"] = sum(
             1 for item in news if item.get("model_visibility") == "MODEL_VISIBLE"
         )
-    models = []
-    for row in model_rows:
-        item = dict(row)
-        item["hyperparameters"] = json.loads(item.pop("hyperparameters_json"))
-        models.append(item)
-    if latest_data:
-        latest_data["features"] = json.loads(latest_data.pop("features_json"))
-        latest_data["reason_codes"] = json.loads(latest_data.pop("reason_codes_json"))
+
+
     if scheduler_quotas is not None:
         gemini_quota = scheduler_quotas["gemini_quota"]
         gemini_31_quota = scheduler_quotas["gemini_31_quota"]
@@ -985,10 +708,6 @@ def _dashboard_payload(
         GEMINI_DAILY_PRIORITY_RESERVE, int(gemini_quota["total_remaining"])
     )
     quote_component = component("quote_bridge", 30)
-    outcome_component = component(
-        "outcome_settler", 420,
-        str(collector_heartbeat.get("last_error") or "") or None,
-    )
     runtime_update_failure = None
     runtime_update_path = database.parent / "main-runtime-status.json"
     if runtime_update_path.exists():
@@ -1031,13 +750,11 @@ def _dashboard_payload(
                 else "尚无报价时钟样本"
             ),
         },
-        "decision_collector": decision_component,
-        "outcome_settler": outcome_component,
         "news_collector": _collector_component(
             collector_heartbeat, latest_poll=latest_news_poll, now=now,
         ),
         "gemini_annotator": component("gemini_annotator", 900),
-        "news_semantic_pipeline": semantic_pipeline_component,
+        **({"news_semantic_pipeline": semantic_pipeline_component} if current_semantic_health is not None else {}),
         "sites_synchronizer": sites_sync_component,
         "sqlite_backup": component("sqlite_backup", 172800),
         # Daily online backups are published only after the complete SQLite
@@ -1049,10 +766,10 @@ def _dashboard_payload(
     if market_session in {"CLOSED", "WEEKLY_CLOSED"}:
         for component_name in (
             "quote_bridge",
-            "decision_collector",
-            "outcome_settler",
             "news_semantic_pipeline",
         ):
+            if component_name not in system_components:
+                continue
             system_components[component_name]["status"] = "MARKET_CLOSED"
             system_components[component_name]["last_error"] = None
     operational_health = extend_with_component_alerts(
@@ -1110,11 +827,7 @@ def _dashboard_payload(
         },
         "operational_health": operational_health,
         "latest": latest_data,
-        "research_forecast": research_forecast,
-        "u5_context": u5_context,
         "counts": counts,
-        "outcome_summary": dict(valid),
-        "recent_decisions": [serialize_row(row) for row in recent],
         "recent_news": news if include_audit else [],
         "daily_news_briefs": daily_news_briefs,
         "daily_news_brief_summary": daily_news_brief_summary,
@@ -1160,7 +873,7 @@ def _dashboard_payload(
             all_news_evidence=all_news_evidence,
             auditable_events=auditable_news_events,
             decision_event_exposures=decision_event_exposures,
-            learning=learning,
+            learning={},
         ),
         "news_evidence_summary": {
             "policy_version": EVIDENCE_POLICY_VERSION,
@@ -1181,30 +894,15 @@ def _dashboard_payload(
             "frozen_model_uses": sum(
                 int(row["frozen_model_uses"]) for row in auditable_news_events
             ),
-            # Reuse the learning contract's sole row/event calculation. These
-            # compact fields survive the PR preview bundle even when the heavy
-            # learning-curve payload is intentionally removed.
-            "current_contract_exposed_rows": int(
-                learning.get("news_contract_transition", {}).get(
-                    "current_contract_exposed_rows", 0
-                )
-            ),
-            "current_contract_distinct_events": int(
-                learning.get("news_contract_transition", {}).get(
-                    "current_contract_distinct_events", 0
-                )
-            ),
             "grades": dict(evidence_grades),
             "topics": dict(evidence_topics),
         },
         "news_feature_policy": {
             "maximum_current_age_hours": 72,
             "freshness_half_life_hours": 6,
-            "historical_training_rows_retained": True,
             "point_in_time_cutoff": True,
         },
         "news_source_health": news_source_health,
-        "news_input_coverage": news_input_coverage,
         "annotation_queue": {
             "ready": int(annotation_queue["ready"]),
             "semantic_pending": int(annotation_queue["semantic_pending"]),
@@ -1274,20 +972,6 @@ def _dashboard_payload(
                 "reason": "每日额度仅 100，不用于批量新闻流水线",
             },
         },
-        "training": {
-            "automatic": True,
-            "label": "LEARNING PROGRESS",
-            "preview_rows": 96,
-            "minimum_rows": 200,
-            "retrain_interval": 50,
-            "legacy_eligible_rows": counts["training_eligibility"],
-            "eligible_rows": counts["training_eligibility_v2"],
-            "complete_rows": counts["training_eligibility_v2"],
-            "next_training_at": learning["next_training_threshold"],
-            "champion_auto_promotion": False,
-            "models": learning["models"],
-        },
-        "learning_curves": learning,
         "market_chart": market_chart,
         "factor_coverage": factor_coverage(
             latest_macro, collected_news_sources, monitored_news_sources,
@@ -1316,24 +1000,7 @@ def _optional_resource_payload(
         summary["detail_resources"] = {
             "audit-briefs": json.loads(audit_briefs_snapshot(payload)),
             "audit-stories": json.loads(audit_stories_snapshot(payload)),
-            "audit-decisions": json.loads(audit_decisions_snapshot(payload)),
         }
-        return summary
-    if resource == "learning":
-        summary = {
-            key: payload[key] for key in (
-                "generated_at", "counts", "training",
-            ) if key in payload
-        }
-        if isinstance(summary.get("training"), dict):
-            summary["training"] = {
-                key: value for key, value in summary["training"].items()
-                if key != "models"
-            }
-        from xauusd_forecaster.dashboard.resource_contracts import learning_history_records
-        records = learning_history_records(payload)
-        summary.update(_learning_summary(payload, record_total=len(records)))
-        summary["_chart_records"] = records
         return summary
     if resource == "market_chart":
         return {

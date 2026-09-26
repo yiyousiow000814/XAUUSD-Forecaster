@@ -6,7 +6,6 @@ import { resolve } from "node:path";
 import { vinextRootAssets } from "./build/vinext-root-assets.mjs";
 import { projectCurrentSource, readCurrentSourceIndex } from "./build/architecture-current-source.mjs";
 import {
-  compactPreviewLearning,
   compactPreviewNewsIndex,
   compactPreviewAudit,
   compactPreviewAuditDetail,
@@ -56,17 +55,13 @@ export default defineConfig(async () => {
     if (previewBundle && typeof previewBundle === "object") {
       const bundle = previewBundle as Record<string, unknown>;
       admitPreviewAuditDetails(bundle);
-      if (bundle.learning && typeof bundle.learning === "object") {
-        bundle.learning_summary = compactPreviewLearning(bundle.learning as Record<string, unknown>);
-        delete bundle.learning;
-      }
       if (bundle.status && typeof bundle.status === "object") {
         bundle.status = compactPreviewStatus(bundle.status as Record<string, unknown>);
       }
       if (bundle.audit && typeof bundle.audit === "object") {
         bundle.audit = compactPreviewAudit(bundle.audit as Record<string, unknown>);
       }
-      for (const key of ["audit_briefs", "audit_stories", "audit_decisions"]) {
+      for (const key of ["audit_briefs", "audit_stories"]) {
         if (bundle[key] && typeof bundle[key] === "object") {
           bundle[key] = compactPreviewAuditDetail(bundle[key] as Record<string, unknown>);
         }

@@ -5,7 +5,6 @@ export const AUDIT_SNAPSHOT_IDS = Object.freeze({
   // Keep the split summary isolated from the legacy full audit snapshot (id 4)
   // until the candidate is explicitly promoted with its matching sync owner.
   summary: 9,
-  decisions: 6,
   briefs: 7,
   stories: 8,
 });
@@ -19,7 +18,6 @@ import {
 function auditDetailResource(snapshotId: number): AuditDetailResource | null {
   if (snapshotId === AUDIT_SNAPSHOT_IDS.briefs) return "briefs";
   if (snapshotId === AUDIT_SNAPSHOT_IDS.stories) return "stories";
-  if (snapshotId === AUDIT_SNAPSHOT_IDS.decisions) return "decisions";
   return null;
 }
 
@@ -48,15 +46,12 @@ export function auditDetailPayloadSql(snapshotId: number, payload = "payload"): 
   const optional = (value: string, path: string, valid: string) => (
     `(json_type(${value}, '$.${path}') IS NULL OR json_type(${value}, '$.${path}') = 'null' OR ${valid})`
   );
-  const numeric = (value: string, path: string) => optional(
-    value, path, `json_type(${value}, '$.${path}') IN ('integer','real')`,
-  );
   const storyRow = (value: string) => [
     "covered_roles", "missing_roles", "timeline", "market_reactions", "commentary", "background",
   ].map(path => array(value, path)).join(" AND ");
   const row = "detail.value";
   const rowValid = resource === "stories" ? storyRow(row)
-    : resource === "briefs" ? `json_type(${row}, '$.model_version') = 'text'
+    : `json_type(${row}, '$.model_version') = 'text'
       AND ${optional(row, "phase", `json_type(${row}, '$.phase') = 'text'`)}
       AND json_type(${row}, '$.brief') = 'object'
       AND ${array(row, "brief.items")}
@@ -65,12 +60,7 @@ export function auditDetailPayloadSql(snapshotId: number, payload = "payload"): 
           AND json_type(brief_item.value, '$.summary') = 'text'
           AND ${array("brief_item.value", "evidence_ids", "text")}), 0) ELSE 0 END)
       AND ${optional(row, "brief.drivers", array(row, "brief.drivers", "text"))}
-      AND ${["brief.overview", "brief.watch_next"].map(path => optional(row, path, `json_type(${row}, '$.${path}') = 'text'`)).join(" AND ")}`
-    : `${array(row, "predictions")}
-      AND ${["bid", "ask", "long_return", "short_return"].map(path => numeric(row, path)).join(" AND ")}
-      AND ${optional(row, "outcome_status", `(json_extract(${row}, '$.outcome_status') = 'VALID' OR ${array(row, "outcome_reason_codes", "text")})`)}
-      AND NOT EXISTS (SELECT 1 FROM json_each(${row}, '$.predictions') prediction
-        WHERE NOT CASE WHEN prediction.type = 'object' THEN coalesce((${["predicted_direction_u5", "predicted_news_residual_u5", "ev_long_u5", "ev_short_u5", "uncertainty_u5"].map(path => numeric("prediction.value", path)).join(" AND ")}), 0) ELSE 0 END)`;
+      AND ${["brief.overview", "brief.watch_next"].map(path => optional(row, path, `json_type(${row}, '$.${path}') = 'text'`)).join(" AND ")}`;
   const siblings = resource === "stories" ? auditStorySiblingArrays.map(path => (
     `(json_type(${payload}, '$.${path}') IS NULL OR ${array(payload, path)})`
   )).join(" AND ") + ` AND NOT EXISTS (
@@ -108,7 +98,7 @@ const snapshotUpsertSql = (valid: string) => `WITH incoming(payload) AS (SELECT 
      WHERE dashboard_snapshots.payload IS NOT excluded.payload`;
 
 const auditDetailWriteStatements = new Map<number, {validation: string; upsert: string}>([
-  AUDIT_SNAPSHOT_IDS.briefs, AUDIT_SNAPSHOT_IDS.stories, AUDIT_SNAPSHOT_IDS.decisions,
+  AUDIT_SNAPSHOT_IDS.briefs, AUDIT_SNAPSHOT_IDS.stories,
 ].map(id => {
   const valid = auditDetailPayloadSql(id);
   return [id, {

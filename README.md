@@ -1,21 +1,19 @@
 # XAUUSD Forecaster
 
-A research system that estimates the direction of XAUUSD over the next 30
-minutes.
-
-Every five minutes, it records a `LONG`, `SHORT`, or `WAIT` forecast. After 30
-minutes, it records the executable Bid/Ask outcome and uses only matured results
-to train the next model group.
+A dashboard for XAUUSD quotes, curated news events, source evidence, daily
+briefs, and event storylines. Live OOS forecasting and its prediction, scoring,
+and decision history have been retired from this source revision.
 
 **It does not place orders or connect to a trading account.**
 
 ## Open-source boundary
 
-The source code is available under the [MIT License](LICENSE). Training data,
-runtime databases, market quotes, news archives, trained model artifacts,
+The source code is available under the [MIT License](LICENSE). Training data
+and trained model artifacts from retired experiments, runtime
+databases, market quotes, news archives,
 credentials, and production configuration are not published. A user of this
-repository must provide lawful data sources and train their own models; cloning
-the repository does not reproduce the deployed forecasts.
+repository must provide lawful data sources; cloning does not reproduce
+the deployed data.
 
 This is a personal, owner-maintained repository published to support its CI
 workflow. External contributions, issues, feature requests, and support requests
@@ -23,10 +21,9 @@ are not accepted.
 
 ## What you can see
 
-- the latest 30-minute forecast;
-- the observed outcome of each forecast;
-- results from price-only and news-assisted models;
-- the news evidence available before each decision;
+- current quotes and market availability;
+- curated current news events and their source evidence;
+- daily briefs and event storylines;
 - data-source, component, and synchronization health.
 
 ## How it works
@@ -36,22 +33,18 @@ cTrader Bid/Ask + timestamped news
                  ↓
        Collector / Annotator
                  ↓
-        Frozen Shadow models
+      Curated news / event evidence
                  ↓
-   Record the outcome after 30 minutes
+        Dashboard publication
 ```
 
-Each forecast is frozen before its outcome exists. Late news cannot rewrite a
-past decision, and new data cannot alter an old model version.
+Source timestamps, annotation evidence, and event identity remain traceable.
 
 ## Research boundaries
 
 - XAUUSD only;
-- one forecast every five minutes;
-- one fixed 30-minute horizon;
 - executable Bid/Ask prices and traceable news timestamps;
-- Shadow research only, with no order authority;
-- model promotion requires manual owner approval.
+- observation only, with no order authority.
 
 ## Run locally
 

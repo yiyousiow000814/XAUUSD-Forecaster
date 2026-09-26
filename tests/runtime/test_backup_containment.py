@@ -12,7 +12,7 @@ import pytest
 
 from xauusd_forecaster import maintenance
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.training.runtime import _process_start_token
+from xauusd_forecaster.runtime.process_identity import _process_start_token
 from scripts.runtime import run_forward_collector as collector
 from scripts.runtime import run_dashboard_api as dashboard_api
 
@@ -554,7 +554,7 @@ def test_collector_backup_is_eligible_only_after_generation_and_heartbeat() -> N
         Path(__file__).resolve().parents[2]
         / "scripts" / "runtime" / "run_forward_collector.py"
     ).read_text(encoding="utf-8")
-    viability = source.index("startup_plan = startup_reconciliation_plan")
+    viability = source.index("news_status = (")
     running = source.index(
         'write_runtime_heartbeat(status_file, service="collector")'
     )
@@ -579,12 +579,12 @@ def test_real_collector_viability_failure_never_enters_backup_boundary(
         raise AssertionError("backup ran before viability")
 
     monkeypatch.setattr(
-        collector.ForwardEngine, "collect_news", lambda *_args, **_kwargs: [],
+        collector, "collect_official_news", lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr(
-        collector, "reconcile_news_contract",
+        collector, "collect_official_news",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("active generation invalid")
+            RuntimeError("news startup failed")
         ),
     )
     monkeypatch.setattr(collector, "ensure_daily_forward_backup", backup)
@@ -596,6 +596,6 @@ def test_real_collector_viability_failure_never_enters_backup_boundary(
         str(tmp_path / "production-runtime" / ".local" / "forward"), "--once",
     ])
 
-    with pytest.raises(RuntimeError, match="active generation invalid"):
+    with pytest.raises(RuntimeError, match="news startup failed"):
         collector.main()
     assert backup_called is False

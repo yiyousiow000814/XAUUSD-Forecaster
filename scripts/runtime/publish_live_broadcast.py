@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Explicit, inactive-by-default PUBLIC_LIVE_V1 publisher rehearsal."""
+"""Explicit, inactive-by-default PUBLIC_LIVE_V2 publisher rehearsal."""
 
 from __future__ import annotations
 

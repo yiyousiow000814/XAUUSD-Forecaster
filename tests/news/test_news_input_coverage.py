@@ -4,8 +4,6 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-import xauusd_forecaster.decision.inference as inference_v2
-import xauusd_forecaster.training.generation as training_v2
 from xauusd_forecaster.news.semantics.input_coverage import classify_news_input_coverage
 from xauusd_forecaster.news.semantics.input_coverage import news_source_observability_summary
 from xauusd_forecaster.evidence.ledger import ForwardLedger
@@ -94,15 +92,6 @@ def test_current_two_impact_recovering_shape_keeps_inference_open() -> None:
         "ACTIONABLE_NEWS_IMPACT_PENDING",
         "ACTIONABLE_NEWS_IMPACT_RECOVERING",
     )
-    for identity in inference_v2.NEWS_MODEL_IDENTITIES:
-        assert inference_v2._runtime_gate_status(
-            identity, market_healthy=True,
-            news_input_state=coverage["state"],
-        ) is None
-    assert inference_v2._runtime_gate_status(
-        "MARKET_ONLY", market_healthy=True,
-        news_input_state=coverage["state"],
-    ) is None
 
 
 def test_zero_news_with_two_recovering_items_remains_degraded_and_learnable() -> None:
@@ -119,14 +108,6 @@ def test_zero_news_with_two_recovering_items_remains_degraded_and_learnable() ->
 
     assert coverage["state"] == "DEGRADED"
     assert coverage["usable_broad_event_count"] == 0
-    assert training_v2.news_input_state_is_training_eligible(
-        coverage["state"]
-    ) is True
-    for identity in inference_v2.NEWS_MODEL_IDENTITIES:
-        assert inference_v2._runtime_gate_status(
-            identity, market_healthy=True,
-            news_input_state=coverage["state"],
-        ) is None
 
 
 def test_partial_source_failure_with_usable_news_is_degraded() -> None:
@@ -170,18 +151,6 @@ def test_old_usable_event_during_total_source_outage_is_unavailable() -> None:
 
     assert coverage["state"] == "UNAVAILABLE"
     assert coverage["usable_broad_event_count"] == 1
-    assert training_v2.news_input_state_is_training_eligible(
-        coverage["state"]
-    ) is False
-    for identity in inference_v2.NEWS_MODEL_IDENTITIES:
-        assert inference_v2._runtime_gate_status(
-            identity, market_healthy=True,
-            news_input_state=coverage["state"],
-        ) == "NEWS_INPUT_UNAVAILABLE"
-    assert inference_v2._runtime_gate_status(
-        "MARKET_ONLY", market_healthy=True,
-        news_input_state=coverage["state"],
-    ) is None
 
 
 def test_terminal_item_does_not_hide_other_usable_evidence() -> None:

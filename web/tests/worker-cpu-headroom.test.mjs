@@ -49,9 +49,9 @@ const briefDetailRow = fields => ({model_version: "fixture", brief: {items: []},
 
 const mixedReadRoutes = [
   "/api/status", "/api/audit", "/api/audit-briefs", "/api/audit-stories",
-  "/api/audit-decisions", "/api/learning", "/api/market-chart",
+  "/api/market-chart",
 ];
-const auditDetailFamilies = new Map(["briefs", "stories", "decisions"].map(
+const auditDetailFamilies = new Map(["briefs", "stories"].map(
   family => [`/api/audit-${family}`, family],
 ));
 
@@ -126,8 +126,7 @@ async function compileAuditPreviewRoutes(preview = true) {
     define:{__AURUM_PREVIEW_BUNDLE__:preview ? "globalThis.__AURUM_AUDIT_CONTRACT_PREVIEW" : "null"},
     stdin:{resolveDir:fileURLToPath(new URL("..",import.meta.url)),loader:"ts",contents:
       `export * as briefs from './app/api/audit-briefs/route.ts';
-       export * as stories from './app/api/audit-stories/route.ts';
-       export * as decisions from './app/api/audit-decisions/route.ts';`},
+       export * as stories from './app/api/audit-stories/route.ts';`},
   });
   // Each isolated bundle must capture its own frozen input, not a prior test's
   // module-cache instance of the same compiled route bytes.
@@ -336,7 +335,7 @@ test("serves canonical public shells and favicon as static assets before Worker 
   const config = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
   const redirects = readFileSync(new URL("../dist/client/_redirects", import.meta.url), "utf8");
   const staticPages = [
-    ["index.html", "最近90分钟"],
+    ["index.html", "当前可用新闻事件"],
     ["health.html", "系统健康状态"],
     ["audit.html", "证据台页面"],
   ];
@@ -411,9 +410,6 @@ test("replays the production read route family through bounded API modules", asy
     ["/api/audit", 200],
     ["/api/audit-briefs", 200],
     ["/api/audit-stories", 200],
-    ["/api/audit-decisions", 200],
-    ["/api/learning", 200],
-    ["/api/learning-history?resource=model&limit=6", 200],
     ["/api/market-chart", 200],
     ["/api/market-history?range=24&identity=BROAD_FULL&frequency=30m", 200],
     ["/api/news-evidence?mode=all&page=1&limit=20", 200],
@@ -458,33 +454,6 @@ test("selects the freshest valid status snapshot and strips private legacy field
   insertSnapshot(1, "{invalid", "2026-08-20T00:00:03Z");
   payload = await (await invoke("/api/status")).json();
   assert.equal(payload.source, "older-public");
-});
-
-test("backfills the bounded Live ledger from the authoritative transition snapshot", async () => {
-  if (isPreviewBuild) return;
-  const decisions = Array.from({ length: 20 }, (_, index) => ({
-    decision_id: `legacy-${index}`,
-    features: { unused: index },
-    predictions: Array.from({ length: 12 }, (_, prediction) => ({ prediction })),
-  }));
-  insertSnapshot(4, JSON.stringify({
-    generated_at: "2026-08-20T00:00:00Z",
-    recent_decisions: decisions,
-  }), "2026-08-20T00:00:01Z");
-  insertSnapshot(1, JSON.stringify({
-    generated_at: "2026-08-20T00:00:01Z",
-    system: { online: false, quote_age_seconds: 1 },
-  }), "2026-08-20T00:00:02Z");
-  insertSnapshot(5, JSON.stringify({
-    generated_at: "2026-08-20T00:00:03Z",
-    system: { online: false, quote_age_seconds: 1 },
-  }), "2026-08-20T00:00:04Z");
-
-  const payload = await (await invoke("/api/status")).json();
-  assert.equal(payload.recent_decisions.length, 18);
-  assert.equal(payload.recent_decisions[0].decision_id, "legacy-0");
-  assert.equal(payload.recent_decisions[0].features, undefined);
-  assert.equal(payload.recent_decisions[0].predictions.length, 8);
 });
 
 test("backfills fixed Live news metrics during the single-owner handover", async () => {
@@ -535,17 +504,12 @@ test("uses the freshest compatible audit source during split-snapshot transition
   }), newer);
 
   assert.equal((await (await invoke("/api/audit")).json()).news_metrics.source, "legacy");
-  const decisions = await (await invoke("/api/audit-decisions")).json();
-  assert.equal(decisions.recent_decisions[0].decision_id, "legacy");
-  assert.equal(decisions.recent_decisions[0].features, undefined);
-  assert.equal(decisions.recent_decisions[0].predictions.length, 8);
   const briefs = await (await invoke("/api/audit-briefs")).json();
   assert.equal(briefs.daily_news_briefs[0].brief_date, "legacy");
   assert.equal(briefs.daily_news_briefs[0].brief_json, undefined);
   assert.equal((await (await invoke("/api/audit-stories")).json()).storylines[0].storyline_id, "legacy");
 
   insertSnapshot(4, "{invalid", "2026-08-20T00:00:03Z");
-  assert.equal((await (await invoke("/api/audit-decisions")).json()).recent_decisions[0].decision_id, "split");
 });
 
 test("oversized fresh legacy stories stay ahead of stale split validation data after bounded projection", async () => {
@@ -586,7 +550,6 @@ test("audit detail selection skips ambiguous or malformed split data without rel
   const older = "2026-08-20T00:00:01Z";
   const newer = "2026-08-20T00:00:02Z";
   for (const [view, id, field, row] of [
-    ["decisions", 6, "recent_decisions", {decision_id:"legacy", predictions:[]}],
     ["briefs", 7, "daily_news_briefs", briefDetailRow({brief_date:"legacy"})],
     ["stories", 8, "storylines", storyDetailRow({storyline_id:"legacy"})],
   ]) {
@@ -616,7 +579,7 @@ test("audit detail selection skips ambiguous or malformed split data without rel
 
 test("audit detail real and dry-run writes reject incomplete sources without replacing accepted bytes", async () => {
   if (isPreviewBuild) return;
-  for (const [view, id, field] of [["decisions",6,"recent_decisions"], ["briefs",7,"daily_news_briefs"], ["stories",8,"storylines"]]) {
+  for (const [view, id, field] of [["briefs",7,"daily_news_briefs"], ["stories",8,"storylines"]]) {
     const accepted = JSON.stringify(knownEmptyDetail({generated_at:"2026-09-06T11:00:00Z", [field]:[]}));
     insertSnapshot(id, accepted);
     for (const invalid of ["{invalid", JSON.stringify({[field]:[]}), JSON.stringify({[field]:[{}]}), JSON.stringify(knownEmptyDetail({[field]:["invalid"]}))]) {
@@ -707,10 +670,10 @@ test("storage sync families accept identical payloads without repeating physical
     candles: [candle], decisions: [decision],
   };
   const marketFirst = await post("/api/market-history", marketPayload);
-  assert.equal(marketFirst.accepted, 4);
-  assert.equal(marketFirst.written, 4);
+  assert.equal(marketFirst.accepted, 2);
+  assert.equal(marketFirst.written, 2);
   const marketReplay = await post("/api/market-history", marketPayload);
-  assert.equal(marketReplay.accepted, 4);
+  assert.equal(marketReplay.accepted, 2);
   assert.equal(marketReplay.written, 0);
   const marketChanged = await post("/api/market-history", {
     candles: [{ ...candle, close: 3381.5 }],
@@ -718,24 +681,7 @@ test("storage sync families accept identical payloads without repeating physical
   assert.equal(marketChanged.accepted, 1);
   assert.equal(marketChanged.written, 1);
 
-  const learningRecord = {
-    resource: "model", record_key: "write-contract-model", sort_epoch: 1,
-    payload_hash: "a".repeat(64), payload: { model_identity: "WRITE_CONTRACT" },
-  };
-  const learningFirst = await post("/api/learning-history", { records: [learningRecord] });
-  assert.equal(learningFirst.accepted, 1);
-  assert.equal(learningFirst.written, 1);
-  const learningReplay = await post("/api/learning-history", { records: [learningRecord] });
-  assert.equal(learningReplay.accepted, 1);
-  assert.equal(learningReplay.written, 0);
-  const learningChanged = await post("/api/learning-history", {
-    records: [{
-      ...learningRecord, sort_epoch: 2, payload_hash: "b".repeat(64),
-      payload: { model_identity: "WRITE_CONTRACT_V2" },
-    }],
-  });
-  assert.equal(learningChanged.accepted, 1);
-  assert.equal(learningChanged.written, 1);
+
 });
 
 test("bounds empty, oversized, maximum legal, and concurrent snapshot writes", async () => {
@@ -768,7 +714,6 @@ test("bounds empty, oversized, maximum legal, and concurrent snapshot writes", a
     ["/api/audit", 16_000, { news_metrics: {} }],
     ["/api/audit-briefs", 120_000, knownEmptyDetail({ daily_news_briefs: [] })],
     ["/api/audit-stories", 120_000, knownEmptyDetail({ storylines: [] })],
-    ["/api/audit-decisions", 120_000, knownEmptyDetail({ recent_decisions: [] })],
   ]) {
     const bounded = await invoke(path, {
       method: "POST", headers, body: jsonOfBytes(limit, fields),
@@ -785,10 +730,9 @@ test("bounds empty, oversized, maximum legal, and concurrent snapshot writes", a
   const concurrent = await Promise.all([
     ["/api/ingest", jsonOfBytes(300_000, { generated_at: new Date().toISOString(), system: {} })],
     ["/api/audit", jsonOfBytes(16_000, { news_metrics: {} })],
-    ["/api/learning", jsonOfBytes(300_000, { models: [] })],
     ["/api/market-chart", jsonOfBytes(300_000, { candles: [] })],
   ].map(([path, body]) => invoke(path, { method: "POST", headers, body })));
-  assert.deepEqual(concurrent.map(response => response.status), [200, 200, 200, 200]);
+  assert.deepEqual(concurrent.map(response => response.status), [200, 200, 200]);
 });
 
 test("production-shaped writes honor authenticated release dry-run without mutation", async () => {
@@ -804,8 +748,6 @@ test("production-shaped writes honor authenticated release dry-run without mutat
     ["/api/audit", "audit-write", { news_metrics: {} }, "1"],
     ["/api/audit-briefs", "audit-briefs-write", knownEmptyDetail({ daily_news_briefs: [] }), "1"],
     ["/api/audit-stories", "audit-stories-write", knownEmptyDetail({ storylines: [] }), "1"],
-    ["/api/audit-decisions", "audit-decisions-write", knownEmptyDetail({ recent_decisions: [] }), "1"],
-    ["/api/learning", "learning-write", { models: [] }, "1"],
     ["/api/market-chart", "market-chart-write", { candles: [] }, "1"],
     ["/api/news-index", "news-index-write", {
       action: "prepare", generation_id: "1".repeat(64), manifest: {
@@ -936,17 +878,14 @@ test(releaseFixtureContractTestName, async () => {
         });
       }
     }
-    assert.equal(exactWrites.length, 19);
+    assert.equal(exactWrites.length, 16);
     assert.deepEqual(new Set(exactWrites.map(row => row.family)), new Set([
       "status-ingest",
       "audit-write",
       "audit-briefs-write",
       "audit-stories-write",
-      "audit-decisions-write",
-      "learning-write",
       "market-chart-write",
       "market-history-write",
-      "learning-history-write",
       "news-evidence-write",
       "news-index-write",
       "news-content-write",
@@ -987,7 +926,7 @@ test(releaseFixtureContractTestName, async () => {
       assert.equal(payload.mutated, false, route.fixture);
     }
     assert.equal(state(), before);
-    for (const [view, id] of [["briefs",7], ["stories",8], ["decisions",6]]) {
+    for (const [view, id] of [["briefs",7], ["stories",8]]) {
       const exactBytes = readFileSync(join(preparedFixtures.fixtureRoot, `audit-${view}-write.json`));
       insertSnapshot(id, exactBytes.toString("utf8"), "2099-01-01T00:00:00Z");
       const read = await invoke(`/api/audit-${view}`);
@@ -1010,7 +949,7 @@ test("exact Python-built Audit fixtures cross real Preview routes with source id
   });
   try {
     const routes = await compileAuditPreviewRoutes();
-    for (const [view,field] of [["briefs","daily_news_briefs"],["stories","storylines"],["decisions","recent_decisions"]]) {
+    for (const [view,field] of [["briefs","daily_news_briefs"],["stories","storylines"]]) {
       const exactBytes = readFileSync(join(preparedFixtures.fixtureRoot,`audit-${view}-write.json`));
       const source = JSON.parse(exactBytes.toString("utf8"));
       bundle[`audit_${view}`] = source;
@@ -1049,7 +988,7 @@ test("actual Audit Next read handlers reject malformed and oversized split snaps
   globalThis.__AURUM_TEST_WORKER_ENV = {DB:local};
   try {
     const routes = await compileAuditPreviewRoutes(false);
-    for (const [view,id,field] of [["briefs",7,"daily_news_briefs"],["stories",8,"storylines"],["decisions",6,"recent_decisions"]]) {
+    for (const [view,id,field] of [["briefs",7,"daily_news_briefs"],["stories",8,"storylines"]]) {
       const bounded = jsonOfBytes(120_000,knownEmptyDetail({generated_at:"2026-09-06T11:00:00Z",[field]:[]}));
       const set = value => local.database.prepare("INSERT OR REPLACE INTO dashboard_snapshots VALUES(?,?,?)").run(id,value,"2026-09-06T11:00:00Z");
       set(bounded);
@@ -1221,8 +1160,8 @@ test("turns a temporary D1 failure into a bounded resource-owned 503", async () 
   };
   for (const path of [
     "/api/status", "/api/audit", "/api/audit-briefs",
-    "/api/audit-stories", "/api/audit-decisions",
-    "/api/learning", "/api/market-chart",
+    "/api/audit-stories",
+    "/api/market-chart",
   ]) {
     const response = await invoke(path, {}, failingEnv);
     assert.equal(response.status, 503, path);
@@ -1349,4 +1288,31 @@ test("built news route carries cursor bindings through forward, reverse and filt
     globalThis.__AURUM_TEST_WORKER_ENV = previousEnvironment;
     local.database.close();
   }
+});
+
+
+test("retired model routes cannot read or ingest history", async () => {
+  for (const path of ["/api/learning", "/api/learning-history", "/api/chart", "/api/audit-decisions"]) {
+    for (const method of ["GET", "POST"]) {
+      const response = await invoke(path, {method, headers: {Authorization: `Bearer ${token}`},
+        ...(method === "POST" ? {body: "{}"} : {})});
+      assert.equal(response.status, 404, `${method} ${path}`);
+    }
+  }
+});
+
+test("retired D1 cleanup is repeatable and preserves news and candle data", () => {
+  const isolated = new D1TestDatabase(migrations);
+  try {
+    const retained = JSON.stringify({news_metrics:{events:7}, recent_decisions:[{decision_id:"retired"}]});
+    isolated.database.prepare("INSERT INTO dashboard_snapshots VALUES (?,?,?)").run(9, retained, "2026-09-26T00:00:00Z");
+    isolated.database.prepare("INSERT INTO dashboard_snapshots VALUES (?,?,?)").run(3, '{"models":[1]}', "2026-09-26T00:00:00Z");
+    isolated.database.prepare("INSERT INTO market_candles VALUES (?,?,?,?,?,?,?,?)").run(1,"2026-09-26T00:00:00Z",100,110,90,105,2,"retained");
+    const sql = readFileSync(new URL("../../scripts/maintenance/purge_live_oos_d1.sql",import.meta.url),"utf8");
+    isolated.database.exec(sql);
+    isolated.database.exec(sql);
+    assert.deepEqual(JSON.parse(isolated.row(9,"dashboard_snapshots").payload),{news_metrics:{events:7}});
+    assert.equal(isolated.row(3,"dashboard_snapshots"),undefined);
+    assert.equal(isolated.database.prepare("SELECT count(*) AS n FROM market_candles").get().n,1);
+  } finally { isolated.database.close(); }
 });

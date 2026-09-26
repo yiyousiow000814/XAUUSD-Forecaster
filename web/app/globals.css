@@ -809,10 +809,10 @@ body.modal-open { overflow:hidden; }
 .component-technical-details dt { color:var(--muted); font-size:12px; font-weight:800; }
 .component-technical-details dd { margin:0; font-size:12px; overflow-wrap:anywhere; }
 .component-technical-details code { font-size:11px; overflow-wrap:anywhere; word-break:break-word; }
-.audit-tabs { grid-template-columns:repeat(4,minmax(0,1fr)); gap:0; padding:0; background:var(--paper); }
+.audit-tabs { grid-template-columns:repeat(3,minmax(0,1fr)); gap:0; padding:0; background:var(--paper); }
 .audit-tabs a { border:0; background:var(--paper); }
-.audit-tabs a:not(:nth-child(4n+1)) { border-left:1px solid var(--ink); }
-.audit-tabs a:nth-child(n+5) { border-top:1px solid var(--ink); }
+.audit-tabs a:not(:nth-child(3n+1)) { border-left:1px solid var(--ink); }
+.audit-tabs a:nth-child(n+4) { border-top:1px solid var(--ink); }
 .audit-tabs a.active { background:#d9d2c1; color:var(--ink); box-shadow:inset 0 5px var(--acid); }
 .audit-tabs a:hover,.audit-tabs a:focus-visible { background:#ded9ca; }
 .audit-main.audit-view-briefs .audit-intro { grid-template-columns:minmax(0,1fr) minmax(300px,.45fr); gap:28px; padding:22px 0 18px; }

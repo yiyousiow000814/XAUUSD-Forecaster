@@ -32,7 +32,6 @@ from xauusd_forecaster.dashboard.sync.resources import (
     MARKET_HISTORY_BATCH_LIMIT_BYTES,
     MARKET_HISTORY_BATCH_ITEMS,
     _RESOURCE_SCHEDULE_LOCK,
-    _learning_record_identity,
     _projection_producer_revision,
     _post_json,
     _sync_operator_retry_mirror,
@@ -41,12 +40,8 @@ from xauusd_forecaster.dashboard.sync.resources import (
     _sync_news_questions,
     _read_news_sync_state,
     _write_news_sync_state,
-    _sync_learning_history,
-    _sync_learning_summary,
-    _sync_learning,
     _sync_market,
     _market_history_payloads,
-    _market_decision_overview_payload,
     _overlap_cursor,
     _sync_market_history,
     _verify_news_projection_state,
@@ -71,12 +66,7 @@ HEAVY_RESOURCES_PER_CYCLE = 1
 
 from xauusd_forecaster.dashboard.resource_contracts import (
     REMOTE_PAYLOAD_LIMIT_BYTES,
-    REMOTE_DECISION_LIMIT,
     REMOTE_DAILY_BRIEF_LIMIT,
-    LEARNING_HISTORY_CONTRACT_VERSION,
-    LEARNING_HISTORY_BATCH_LIMIT_BYTES,
-    MARKET_OVERVIEW_DECISIONS_PER_SERIES,
-    REMOTE_MARKET_DECISION_LIMIT,
     REMOTE_MARKET_CANDLE_LIMIT,
     MARKET_CHART_SNAPSHOT_LIMIT_BYTES,
     AUDIT_DETAIL_LIMIT_BYTES,
@@ -86,18 +76,11 @@ from xauusd_forecaster.dashboard.resource_contracts import (
     news_detail_batches,
     news_index_batches,
     _epoch,
-    _learning_record,
-    _update_decision_overviews,
-    learning_history_records,
-    learning_history_batches,
-    _learning_summary,
     _downsample_market_overview,
     market_chart_snapshot,
-    learning_snapshot,
     remote_snapshot,
     audit_snapshot,
     audit_briefs_snapshot,
-    audit_decisions_snapshot,
     audit_stories_snapshot,
 )
 from xauusd_forecaster.dashboard.payloads import (
@@ -279,8 +262,6 @@ RESOURCE_POLICIES = (
     ("news_questions", "_sync_news_questions", 300, False),
     # At most one of these accumulated resources runs in a sync cycle.
     ("audit", "_sync_audit", 300, True),
-    ("learning", "_sync_learning_summary", 300, True),
-    ("learning_history", "_sync_learning_history", 300, True),
     ("market_chart", "_sync_market", 60, True),
     ("market_history", "_sync_market_history", 120, True),
     ("news", "_sync_news", 60, True),
@@ -414,9 +395,7 @@ def sync_resource_lane(
                         and _read_news_sync_state(Path(target["news_state_file"])).get(
                             "projection_state"
                         ) == "REPLAYING"
-                        or resource == "learning_history"
-                        and bool(target.get("learning_history_state_file"))
-                        and bool(_read_news_sync_state(Path(target["learning_history_state_file"])).get("pending_record_count"))
+
                         or resource == "news_evidence"
                         and bool(evidence_state.get("staging_snapshot_id")
                                  or evidence_state.get("cleanup_pending"))
