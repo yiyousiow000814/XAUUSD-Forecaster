@@ -17,7 +17,7 @@ def test_runtime_inputs_are_bounded_and_service_scoped(tmp_path) -> None:
     quote_path = quotes / "xauusd-20260811.jsonl"
     quote_path.write_text(
         "not-json\n"
-        + json.dumps({"received_time": "2026-08-11T20:59:59Z"})
+        + json.dumps({"received_time": "2026-08-11T20:59:59Z", "event_time": "2026-08-11T20:59:59Z", "bid": 2600, "ask": 2601})
         + "\n",
         encoding="utf-8",
     )
@@ -107,3 +107,41 @@ def test_live_quote_uses_source_file_without_any_decision_database(tmp_path):
     assert latest["ask"] == 2600.5
     assert latest["source_received_time"] == "2026-09-26T00:00:00+00:00"
     assert not database.exists()
+
+
+def test_quote_survives_empty_rollover_archive_and_resumes(tmp_path):
+    import gzip
+    database = tmp_path / "evidence.sqlite3"
+    root = tmp_path / "quotes"
+    root.mkdir()
+    previous = root / "xauusd-quotes-20260925.jsonl"
+    row = {"bid": 2600, "ask": 2601, "received_time": "2026-09-25T20:59:59Z", "event_time": "2026-09-25T20:59:59Z"}
+    previous.write_text(json.dumps(row) + "\n")
+    current = root / "xauusd-quotes-20260926.jsonl"
+    current.touch()
+    # An archived empty weekend day must not hide the last trading day either.
+    with gzip.open(root / "xauusd-quotes-20260925z.jsonl.gz", "wb") as handle:
+        handle.write(b"")
+    for archived in (False, True):
+        if archived:
+            with gzip.open(str(previous) + ".gz", "wt") as handle:
+                handle.write(previous.read_text())
+            previous.unlink()
+        assert module.latest_quote(database)["bid"] == 2600
+        assert module.latest_quote_received(database) == "2026-09-25T20:59:59+00:00"
+    current.write_text('{"partial":')
+    assert module.latest_quote(database)["bid"] == 2600
+    row.update(bid=2602, ask=2603, received_time="2026-09-26T01:00:00Z", event_time="2026-09-26T01:00:00Z")
+    current.write_text(json.dumps(row) + "\n")
+    assert module.latest_quote(database)["bid"] == 2602
+    assert module.latest_quote_received(database) == "2026-09-26T01:00:00+00:00"
+
+
+def test_quote_archive_inflation_is_bounded(tmp_path, monkeypatch):
+    import gzip
+    root = tmp_path / "quotes"
+    root.mkdir()
+    with gzip.open(root / "xauusd-quotes-20260925.jsonl.gz", "wb") as handle:
+        handle.write(b"x" * 200)
+    monkeypatch.setattr(module, "QUOTE_ARCHIVE_BYTES", 100)
+    assert module.latest_quote(tmp_path / "evidence.sqlite3") is None

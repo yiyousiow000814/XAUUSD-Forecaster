@@ -5,8 +5,8 @@ import OperationalAlertBanner from "./_components/OperationalAlertBanner";
 import PreviewBanner from "./_components/PreviewBanner";
 
 export const metadata: Metadata = {
-  title: "Aurum Signal Room",
-  description: "XAUUSD Forward-only shadow intelligence dashboard",
+  title: "黄金资讯",
+  description: "黄金行情、新闻与事件",
   icons: { icon: "/favicon.svg", shortcut: "/favicon.svg" },
 };
 

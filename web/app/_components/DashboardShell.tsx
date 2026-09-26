@@ -51,10 +51,9 @@ type ShellStatusPayload = {
 
 function DashboardBrand() {
   return <DashboardLink ariaLabel="打开总览" className="dashboard-brand brand brand-button" href="/" replace>
-    <span className="brand-mark">AU</span>
     <span>
-      <strong>Aurum Signal Room</strong>
-      <small>XAUUSD · Forward-only intelligence</small>
+      <strong>黄金资讯</strong>
+      <small>行情与新闻</small>
     </span>
   </DashboardLink>;
 }

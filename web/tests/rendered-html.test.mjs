@@ -539,8 +539,8 @@ test("renders the live room inside the canonical product shell", async () => {
   const response = await render("/");
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /Aurum Signal Room/);
-  assert.match(html, /XAUUSD · Forward-only intelligence/);
+  assert.match(html, /黄金资讯/);
+  assert.match(html, /行情与新闻/);
   assert.match(html, /新闻与事件/);
   assert.match(html, /<a[^>]*aria-current="page"[^>]*>总览<\/a>/);
   assert.doesNotMatch(html, /返回实时室|新闻 \/ 结果/);
@@ -567,8 +567,8 @@ test("keeps global shell ownership centralized and prevents view-level design dr
 
   assert.match(app, /<DashboardShell location=\{location\}>/);
   assert.match(shell, /<header className="dashboard-header topbar">/);
-  assert.match(shell, /Aurum Signal Room/);
-  assert.match(shell, /XAUUSD · Forward-only intelligence/);
+  assert.match(shell, /黄金资讯/);
+  assert.match(shell, /行情与新闻/);
   assert.match(shell, /DASHBOARD_GLOBAL_DESTINATIONS\.map/);
   assert.match(shell, /DASHBOARD_ADMIN_DESTINATIONS\.map/);
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
@@ -586,7 +586,7 @@ test("keeps global shell ownership centralized and prevents view-level design dr
   for (const path of views) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
     assert.doesNotMatch(source, /<header className="topbar|MobileDashboardNav|SystemStatePill/);
-    assert.doesNotMatch(source, /Aurum Signal Room|XAUUSD · Forward-only intelligence/);
+    assert.doesNotMatch(source, /黄金资讯|行情与新闻/);
     assert.doesNotMatch(source, /Aurum System Status|Aurum System Health|Aurum Evidence Desk|Aurum Assistant/);
     assert.doesNotMatch(source, /返回实时室/);
   }
@@ -611,9 +611,9 @@ test("renders static public shell and path-specific admin shells with one invari
     assert.equal(html.match(/class="dashboard-header topbar"/g)?.length, 1, path);
     const header = html.match(/<header class="dashboard-header topbar">[\s\S]*?<\/header>/)?.[0];
     assert.ok(header, path);
-    assert.match(header, /<span class="brand-mark">AU<\/span>/, path);
-    assert.match(header, /<strong>Aurum Signal Room<\/strong>/, path);
-    assert.match(header, /<small>XAUUSD · Forward-only intelligence<\/small>/, path);
+    assert.doesNotMatch(header, /class="brand-mark"/, path);
+    assert.match(header, /<strong>黄金资讯<\/strong>/, path);
+    assert.match(header, /<small>行情与新闻<\/small>/, path);
     assert.equal(header.match(/aria-current="page"/g)?.length, 1, path);
     if (path === "/health") assert.match(header, /aria-current="page"[^>]*aria-label="查看系统运行状态"[^>]*href="\/health"/, path);
     else assert.match(header, new RegExp(`aria-current="page"[^>]*>(?:<span[^>]*></span>)?${activeLabel}</(?:a|button)>`), path);
@@ -1178,7 +1178,7 @@ test("a shared polling lease cannot leave another visible tab permanently stale"
 test("renders static Preview shells with embedded resources for client-side rooms", async () => {
   if (!process.env.WORKERS_CI_BRANCH || process.env.WORKERS_CI_BRANCH === "main") return;
   for (const [path, marker] of [
-    ["/", /Aurum Signal Room/],
+    ["/", /黄金资讯/],
     ["/health", /系统健康状态/],
     ["/audit?view=news", /证据台页面/],
     ["/admin", /管理后台/],
@@ -1194,7 +1194,7 @@ test("renders static Preview shells with embedded resources for client-side room
     assert.equal(response.status, 200, view);
     const html = await response.text();
     assert.doesNotMatch(html, /正在同步页面当前指标/, view);
-    assert.match(html, /<title>证据台页面 \| Aurum Signal Room<\/title>/, view);
+    assert.match(html, /<title>证据台页面 \| 黄金资讯<\/title>/, view);
     assert.match(html, /<noscript><main><h1>证据台页面<\/h1>/, view);
   }
   for (const view of ["briefs", "search"]) {
@@ -1585,8 +1585,8 @@ test("renders the news and decision audit route", async () => {
   const response = await render("/audit?view=news");
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /Aurum Signal Room/);
-  assert.match(html, /XAUUSD · Forward-only intelligence/);
+  assert.match(html, /黄金资讯/);
+  assert.match(html, /行情与新闻/);
   assert.match(html, /新闻与事件/);
   const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   assert.match(source, />新闻 <b>/);

@@ -4,7 +4,7 @@ import { previewResources } from "../_lib/preview-resources";
 
 export const dynamic = "force-static";
 export const metadata: Metadata = {
-  title: "系统健康状态 | Aurum Signal Room",
+  title: "系统健康状态 | 黄金资讯",
 };
 
 export default function HealthPage() {

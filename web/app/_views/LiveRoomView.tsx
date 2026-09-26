@@ -114,17 +114,17 @@ export default function LiveRoomView() {
     <main>
       <section className="hero">
         <div className="hero-copy">
-          <p className="eyebrow">CURRENT MARKET / CTRADER BID—ASK</p>
+          <p className="eyebrow">{marketClosed ? "休市 · 最近报价" : online ? "黄金实时行情" : "黄金行情 · 最近报价"}</p>
           <div className="price-line">
             <span className="symbol">XAU</span>
             <strong>{fmt(mid)}</strong>
             <span className="currency">USD</span>
           </div>
           <div className="quote-strip">
-            <span>BID <b>{fmt(latest?.bid)}</b></span>
-            <span>ASK <b>{fmt(latest?.ask)}</b></span>
-            <span>SPREAD <b>{fmt(latest?.spread, 3)}</b></span>
-            <span>AGE <b>{fmt(quoteAgeSeconds, 1)}s</b></span>
+            <span>买价 <b>{fmt(latest?.bid)}</b></span>
+            <span>卖价 <b>{fmt(latest?.ask)}</b></span>
+            <span>点差 <b>{fmt(latest?.spread, 3)}</b></span>
+            <span>距今 <b>{fmt(quoteAgeSeconds, 1)}s</b></span>
           </div>
         </div>
 
