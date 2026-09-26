@@ -43,15 +43,32 @@ assert resources.MODULE_ROOT == pathlib.Path(sys.argv[1]).resolve()
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize('entry', [
-    service['script'].replace('\\', '/')
+@pytest.mark.parametrize('service', [
+    service
     for service in json.loads((ROOT / 'scripts/windows-service-launch-contract.json').read_text())['services']
     if service['kind'] == 'Python'
 ])
-def test_production_entrypoint_resolves_canonical_owners_before_work(tmp_path, entry):
-    result = subprocess.run([sys.executable, str(ROOT / entry), '--help'],
+def test_production_entrypoint_resolves_canonical_owners_before_work(tmp_path, service):
+    # Parse the owner's real launch arguments. --help exits before argparse
+    # rejects stale options, so it cannot prove production launch compatibility.
+    source = r'''
+import argparse, runpy, sys
+parse = argparse.ArgumentParser.parse_args
+def verify(self, *args, **kwargs):
+    parse(self, *args, **kwargs)
+    print("PRODUCTION_ARGUMENTS_ACCEPTED")
+    raise SystemExit(0)
+argparse.ArgumentParser.parse_args = verify
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+'''
+    arguments = [value.replace('{runtime_forward_root}', str(tmp_path / 'forward'))
+                 .replace('{repository_config_root}', str(tmp_path / 'config'))
+                 for value in service['arguments']]
+    entry = ROOT / service['script'].replace('\\', '/')
+    result = subprocess.run([sys.executable, '-c', source, str(entry), *arguments],
                             cwd=tmp_path, capture_output=True, text=True, timeout=20,
                             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
     assert result.returncode == 0, result.stderr
-    assert 'usage:' in result.stdout
+    assert 'PRODUCTION_ARGUMENTS_ACCEPTED' in result.stdout
     assert list(tmp_path.iterdir()) == []
