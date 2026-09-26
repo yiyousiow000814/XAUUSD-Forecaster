@@ -2947,3 +2947,10 @@ test('architecture route renders meaningful drill targets inside the shared shel
   assert.doesNotMatch(page.html, /DECLARED SOURCE SELECTIONS|UNRESOLVED|证据待确认|Explorer experience mode/);
   assert.match(page.html, /aria-label="查看系统运行状态"[^>]*href="\/health"/);
 });
+
+
+test("standalone mobile audit notices have a top edge while stacked notices share it", () => {
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /@media \(max-width:850px\)\{[^}]*[\s\S]*?\.audit-main > \.current-data-notice \{ border-top:1px solid var\(--ink\); \}/);
+  assert.match(css, /\.audit-main > \.current-data-notice \+ \.current-data-notice \{ border-top:0; \}/);
+});

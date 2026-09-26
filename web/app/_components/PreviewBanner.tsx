@@ -17,11 +17,16 @@ export default function PreviewBanner() {
     const payload = readDashboardResource<{ preview?: PreviewInfo }>("/api/status");
     return payload?.preview?.is_preview ? payload.preview : null;
   };
-  const [preview, setPreview] = useState<PreviewInfo | null>(readPreview);
+  const [preview, setPreview] = useState<PreviewInfo | null>(null);
 
-  useEffect(() => subscribeDashboardResource(
-    "/api/status", () => setPreview(readPreview()),
-  ), []);
+  useEffect(() => {
+    // The server resource cache may already be primed by another route. Start
+    // hydration empty on both sides, then read this browser's shared baseline.
+    const refresh = () => setPreview(readPreview());
+    const unsubscribe = subscribeDashboardResource("/api/status", refresh);
+    refresh();
+    return unsubscribe;
+  }, []);
 
   if (!preview) return null;
   return <aside className="preview-banner" role="status">

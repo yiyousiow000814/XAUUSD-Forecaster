@@ -1442,6 +1442,8 @@ body.modal-open { overflow:hidden; }
   .mobile-dashboard-nav { gap:10px; }
 
   .audit-main .audit-intro { display:none; }
+  .audit-main > .current-data-notice { border-top:1px solid var(--ink); }
+  .audit-main > .current-data-notice + .current-data-notice { border-top:0; }
   .audit-view-picker { position:relative; margin:0 0 22px; border-color:rgba(17,17,15,.55); background:var(--paper); box-shadow:none; }
   .audit-view-picker>span { color:var(--muted); border-right:1px solid rgba(17,17,15,.3); background:var(--paper); }
 

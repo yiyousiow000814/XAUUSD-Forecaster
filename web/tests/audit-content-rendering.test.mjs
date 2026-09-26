@@ -26,9 +26,11 @@ const built = await build({
     contents: `import React from 'react';
       import {renderToStaticMarkup} from 'react-dom/server';
       import AuditView, {NewsRow} from ${JSON.stringify(viewPath)};
+      import PreviewBanner from ${JSON.stringify(fileURLToPath(new URL("../app/_components/PreviewBanner.tsx", import.meta.url)))};
       import LiveRoomView from ${JSON.stringify(fileURLToPath(new URL('../app/_views/LiveRoomView.tsx', import.meta.url)))};
       import StatusView from ${JSON.stringify(fileURLToPath(new URL("../app/_views/StatusView.tsx", import.meta.url)))};
       import {clearDashboardResource,updateDashboardResource} from ${JSON.stringify(resourcesPath)};
+      export function renderPreview(payload) { updateDashboardResource("/api/status",()=>payload); return renderToStaticMarkup(React.createElement(PreviewBanner)); }
       export function renderLive(payload) { updateDashboardResource("/api/status",()=>payload); return renderToStaticMarkup(React.createElement(LiveRoomView)); }
       export function renderNews(row) { return renderToStaticMarkup(React.createElement(NewsRow,{row})); }
       export function renderStatus(payload) { return renderToStaticMarkup(React.createElement(StatusView,{initialPayload:payload})); }
@@ -41,7 +43,7 @@ const built = await build({
 });
 const renderedModule = join(temporaryRoot, "audit.mjs");
 writeFileSync(renderedModule, built.outputFiles[0].contents);
-const { render, renderNews, renderStatus, renderLive } = await import(pathToFileURL(renderedModule).href);
+const { render, renderNews, renderStatus, renderLive, renderPreview } = await import(pathToFileURL(renderedModule).href);
 
 test("article row expands publisher provenance with one coherent public label", () => {
   const row = {headline: "政策会议展望", emerging_topic_zh: "政策会议展望", event_type: "macro_preview",
@@ -295,4 +297,11 @@ test("overview links to current events without asserting omitted status counts",
   assert.match(html, /href="\/audit\?view=evidence"/);
   assert.match(html, /<strong>新闻事件<\/strong>/);
   assert.doesNotMatch(html, /0.*个独立事件/);
+});
+
+
+test("preview hydration starts identically even after another server route primes status", () => {
+  assert.equal(renderPreview({}), "");
+  assert.equal(renderPreview({preview:{is_preview:true,branch:"review",commit_sha:"abc12345"}}), "");
+  assert.equal(renderPreview({}), "");
 });
