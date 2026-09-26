@@ -8,9 +8,11 @@ events, source evidence, daily briefs, storylines, quotes and market candles.
 
 1. Merge and deploy the reviewed retirement revision through protected main.
    Verify both the local runtime and Worker identities. A branch is insufficient.
-2. Deploy the isolated broadcast V2 receiver before its matching publisher,
-   following the [broadcast contract](../contracts/LIVE_BROADCAST.md). Verify
-   that a fresh V2 quote-only publish replaced the stored model payload.
+2. If the optional isolated broadcaster is enabled, deploy its V2 receiver before
+   its matching publisher, following the
+   [broadcast contract](../contracts/LIVE_BROADCAST.md). Verify that a fresh V2
+   quote-only publish replaced the stored model payload. If it is disabled or
+   deleted, leave it disabled; retirement does not require recreating it.
    Confirm the collector has no training/prediction/settlement owner and Sync no
    longer schedules learning resources. Keep the existing pause control until
    this is verified. Stop local database writers for offline cleanup using the

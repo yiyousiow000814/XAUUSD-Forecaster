@@ -105,8 +105,9 @@ working tree remains uncommitted on retire-live-oos; source-index digest is
 No PR, branch Preview, merge, deployment, publisher activation, or production
 cleanup was performed. Responsive Preview checks at desktop, 390x844 and
 360x800 remain pending. No browser sessions were opened (task session count 0).
-The isolated broadcast receiver must precede publisher activation; verify a
-fresh V2 payload replaces the old Durable Object state. Runtime and Worker
+When the optional broadcaster is enabled, its receiver must precede publisher
+activation; verify a fresh V2 payload replaces the old Durable Object state.
+Leave the previously deleted production broadcaster disabled. Runtime and Worker
 identities must be verified on main before the cleanup runbook is applied.
 Old writers continuing after cleanup would repopulate retired data, so release
 and stopped-writer checks are required before physical production deletion.
@@ -122,3 +123,14 @@ The clean Linux checkout also exposed an obsolete package-ownership test that
 still imported removed decision/training packages; local ignored bytecode
 directories had made those imports appear as namespace packages. The owner
 inventory now tests only retained runtime packages.
+
+Final merge review also corrected the cleanup activation instructions: the
+optional broadcaster was deleted from production and must not be recreated for
+retirement. Its V2 ordering applies only to installations that enable it.
+The final application revision `3cab6d68` passed all 28 CI checks, 395 web tests
+(6 skipped), and desktop plus 390x844 and 360x800 checks on immutable Preview
+`https://470626ae-aurum-signal-room.yiyousiow1234.workers.dev`.
+Preview showed one banner after hydration/navigation, complete notice borders,
+and no horizontal overflow. All task browser sessions were closed (0 remaining).
+These results supersede the initial local-only acceptance status above; main
+activation and physical production data cleanup still require runtime evidence.
