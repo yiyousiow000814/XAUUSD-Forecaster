@@ -65,9 +65,7 @@ from xauusd_forecaster.dashboard.summaries import (
     dashboard_table_counts,
 )
 from xauusd_forecaster.dashboard.resource_contracts import (
-    _learning_summary,
     audit_briefs_snapshot,
-    audit_decisions_snapshot,
     audit_snapshot,
     audit_stories_snapshot,
     market_chart_snapshot,
@@ -125,7 +123,6 @@ class Handler(BaseHTTPRequestHandler):
     status_cache = StatusSnapshotCache()
     critical_status_cache = StatusSnapshotCache()
     audit_cache = StatusSnapshotCache()
-    learning_cache = StatusSnapshotCache()
     market_chart_cache = StatusSnapshotCache()
     news_evidence_cache = StatusSnapshotCache()
 
@@ -177,19 +174,6 @@ class Handler(BaseHTTPRequestHandler):
             }
             body = json.dumps(payload, separators=(",", ":")).encode()
             self._write_json(status, body)
-            return
-        if path == "/api/chart-history":
-            from xauusd_forecaster.dashboard.chart_history import chart_history_page
-            query = urllib.parse.parse_qs(parsed.query)
-            try:
-                connection = sqlite3.connect(f"file:{self.database}?mode=ro", uri=True, timeout=5)
-                try:
-                    payload = chart_history_page(connection, (query.get("cursor") or [None])[0])
-                finally:
-                    connection.close()
-                self._write_json(200, json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8"))
-            except (sqlite3.Error, ValueError, TypeError) as error:
-                self._write_json(503, json.dumps({"error": str(error)[:300]}).encode("utf-8"))
             return
         if path == "/api/market-history":
             query = urllib.parse.parse_qs(parsed.query)
@@ -304,8 +288,6 @@ class Handler(BaseHTTPRequestHandler):
             "/api/audit": "audit",
             "/api/audit-briefs": "audit",
             "/api/audit-stories": "audit",
-            "/api/audit-decisions": "audit",
-            "/api/learning": "learning",
             "/api/market-chart": "market_chart",
         }
         if path in read_model_resources:
@@ -436,7 +418,7 @@ def main() -> int:
                     snapshot, resource,
                 )
             )
-            for resource in ("audit", "learning", "market_chart")
+            for resource in ("audit", "market_chart")
         },
     )
     read_model_owner.start()

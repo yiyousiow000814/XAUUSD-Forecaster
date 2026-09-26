@@ -10,7 +10,6 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from ..execution_costs import net_shadow_log_return
 
 
 UTC = timezone.utc
@@ -212,89 +211,6 @@ def _market_history_candles(
     )
 
 
-def _market_decisions(
-    connection: sqlite3.Connection, start_time: str, end_time: str | None = None,
-) -> list[dict]:
-    end_clause = " AND p.decision_time<?" if end_time else ""
-    parameters: tuple[str, ...] = (
-        (start_time, end_time) if end_time else (start_time,)
-    )
-    decision_rows = connection.execute(
-        f"""WITH ranked AS (
-             SELECT p.source_decision_id,p.decision_time,p.model_identity,
-                    p.model_version,p.recommended_action,p.effective_action,
-                    p.prediction_status,p.predicted_direction_u5,
-                    p.ev_long_u5,p.ev_short_u5,p.lcb_long_u5,p.lcb_short_u5,
-                    s.value_quote_return,
-                    o.long_quote_return,o.short_quote_return,o.outcome_status,
-                    o.reason_codes_json AS outcome_reason_codes_json,
-                    row_number() OVER (
-                      PARTITION BY p.source_decision_id,p.model_identity
-                      ORDER BY u.created_at DESC,u.model_version DESC
-                    ) AS version_rank
-             FROM predictions_v2 p
-             JOIN model_updates_v2 u USING(model_version)
-             LEFT JOIN prediction_scores_v2 s
-               USING(source_decision_id,model_version)
-             LEFT JOIN derived_outcomes o
-               ON o.source_decision_id=p.source_decision_id
-             WHERE p.decision_time>=?{end_clause} AND p.decision_time>u.created_at
-           )
-           SELECT * FROM ranked WHERE version_rank=1
-           ORDER BY decision_time,model_identity""",
-        parameters,
-    ).fetchall()
-    decisions = []
-    for row in decision_rows:
-        recorded = row["recommended_action"]
-        row_payload = {
-            key: value for key, value in dict(row).items()
-            if key != "outcome_reason_codes_json"
-        }
-        for key in ("long_quote_return", "short_quote_return"):
-            gross = row_payload.get(key)
-            row_payload[f"gross_{key}"] = gross
-            if gross is not None:
-                row_payload[key] = net_shadow_log_return(gross)
-        gross_score = row_payload.get("value_quote_return")
-        row_payload["gross_value_quote_return"] = gross_score
-        if gross_score is not None:
-            row_payload["value_quote_return"] = (
-                0.0 if recorded == "WAIT" else net_shadow_log_return(gross_score)
-            )
-        ev_long = row["ev_long_u5"]
-        ev_short = row["ev_short_u5"]
-        lcb_long = row["lcb_long_u5"]
-        lcb_short = row["lcb_short_u5"]
-        expected = "WAIT"
-        legacy_lcb_policy = row["prediction_status"] == "PROVISIONAL_LCB_GATED"
-        if legacy_lcb_policy and lcb_long is not None and lcb_short is not None:
-            if lcb_long > lcb_short and lcb_long > 0:
-                expected = "LONG"
-            elif lcb_short > lcb_long and lcb_short > 0:
-                expected = "SHORT"
-        elif not legacy_lcb_policy and ev_long is not None and ev_short is not None:
-            if ev_long > ev_short and ev_long > 0:
-                expected = "LONG"
-            elif ev_short > ev_long and ev_short > 0:
-                expected = "SHORT"
-        decisions.append({
-            **row_payload,
-            "outcome_reason_codes": json.loads(row["outcome_reason_codes_json"] or "[]"),
-            "exit_time": (
-                datetime.fromisoformat(row["decision_time"]) + timedelta(minutes=30)
-            ).isoformat(),
-            "outcome_status": row["outcome_status"] or "PENDING",
-            "policy_expected_action": expected,
-            "policy_consistent": recorded == expected,
-            "action_policy": (
-                "POSITIVE_LCB_V1" if legacy_lcb_policy else "POSITIVE_POST_COST_EV_V2"
-            ),
-            "frozen_record": True,
-        })
-    return decisions
-
-
 def _market_history_page(
     database: Path, connection: sqlite3.Connection, after: str | None, limit: int,
 ) -> dict:
@@ -303,12 +219,9 @@ def _market_history_page(
         database, after, limit,
     )
     if not candles:
-        return {"candles": [], "decisions": [], "next_cursor": after, "has_more": False}
+        return {"candles": [], "next_cursor": after, "has_more": False}
     return {
         "candles": candles,
-        "decisions": _market_decisions(
-            connection, candles[0]["time"], next_time,
-        ),
         "next_cursor": candles[-1]["time"],
         "has_more": next_time is not None,
         "history_start": history_start,
@@ -326,29 +239,6 @@ def _recent_market_chart(
         _downsample_candles(history, MARKET_OVERVIEW_CANDLE_LIMIT)
         if len(history) > len(candles) else []
     )
-    first_time = candles[0]["time"] if candles else now.isoformat()
-    decisions = _market_decisions(connection, first_time)
-    marker_rows = connection.execute(
-        """WITH grouped AS (
-             SELECT model_identity,training_dataset_hash,min(created_at) created_at,
-                    min(training_rows) training_rows,min(training_cutoff) training_cutoff,
-                    count(*) artifact_count
-             FROM model_updates_v2
-             GROUP BY model_identity,training_dataset_hash
-           )
-           SELECT * FROM grouped WHERE created_at>=?
-           ORDER BY created_at,model_identity""",
-        (first_time,),
-    ).fetchall()
-    prediction_history_start: dict[str, str] = {}
-    for row in decisions:
-        identity = str(row.get("model_identity") or "")
-        decision_time = str(row.get("decision_time") or "")
-        if identity and decision_time and (
-            identity not in prediction_history_start
-            or decision_time < prediction_history_start[identity]
-        ):
-            prediction_history_start[identity] = decision_time
     return {
         "window_hours": None,
         "candle_minutes": 5,
@@ -359,8 +249,5 @@ def _recent_market_chart(
         "detail_start": candles[0]["time"] if candles else None,
         "source_candle_count": len(history),
         "overview_downsampled": bool(overview_candles),
-        "prediction_history_start": prediction_history_start,
         "history_resource": "/api/market-history",
-        "decisions": [dict(row) for row in decisions],
-        "training_markers": [dict(row) for row in marker_rows],
     }

@@ -16,7 +16,7 @@ import importlib, json, pathlib, pkgutil, sys
 sys.path.insert(0, sys.argv[1])
 import xauusd_forecaster
 before = set(pathlib.Path.cwd().iterdir())
-for area in ("ai", "assistant", "dashboard", "decision", "evidence", "news", "runtime", "training"):
+for area in ("ai", "assistant", "dashboard", "evidence", "news", "runtime"):
     package = importlib.import_module("xauusd_forecaster." + area)
     for item in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
         importlib.import_module(item.name)

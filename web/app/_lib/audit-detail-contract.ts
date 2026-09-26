@@ -1,11 +1,10 @@
-export type AuditDetailResource = "briefs" | "stories" | "decisions";
+export type AuditDetailResource = "briefs" | "stories";
 
 export const AUDIT_DETAIL_PROJECTION_CONTRACT = "audit-detail-source-v1";
 
 export const auditDetailRequiredArray = {
   briefs: "daily_news_briefs",
   stories: "storylines",
-  decisions: "recent_decisions",
 } as const;
 
 export const auditStorySiblingArrays = [
@@ -36,13 +35,7 @@ function validRow(view: AuditDetailResource, row: Record<string, unknown>): bool
     return ["covered_roles", "missing_roles", "timeline", "market_reactions", "commentary", "background"]
       .every(field => records(row[field]));
   }
-  return records(row.predictions)
-    && [row.bid, row.ask, row.long_return, row.short_return].every(value => value == null || typeof value === "number")
-    && (row.outcome_status == null || row.outcome_status === "VALID" || strings(row.outcome_reason_codes))
-    && row.predictions.every(prediction => (
-      ["predicted_direction_u5", "predicted_news_residual_u5", "ev_long_u5", "ev_short_u5", "uncertainty_u5"]
-        .every(field => prediction[field] == null || typeof prediction[field] === "number")
-    ));
+  return false;
 }
 
 export function validAuditDetailPayload(view: AuditDetailResource, value: unknown): boolean {

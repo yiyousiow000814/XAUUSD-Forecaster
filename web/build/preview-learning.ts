@@ -13,7 +13,7 @@ export function admitPreviewAuditDetails(bundle: JsonObject): void {
   const status = bundle.status as JsonObject | undefined;
   const preview = status?.preview as JsonObject | undefined;
   const resources = preview?.resources as JsonObject | undefined;
-  for (const family of ["briefs", "stories", "decisions"] as const) {
+  for (const family of ["briefs", "stories"] as const) {
     const key = `audit_${family}`;
     if (validAuditDetailPayload(family, bundle[key])) continue;
     bundle[key] = null;
@@ -37,7 +37,6 @@ const PREVIEW_AUDIT_ARRAY_LIMITS: Record<string, number> = {
   market_reaction_streams: 5,
   theme_streams: 5,
   unassigned_story_events: 10,
-  recent_decisions: 12,
 };
 
 /** Keep Worker startup memory independent of the growing audit snapshot. */
@@ -48,15 +47,7 @@ export function compactPreviewStatus(status: JsonObject): JsonObject {
   };
   for (const key of PREVIEW_STATUS_INLINE_KEYS) {
     const value = status[key];
-    if (key === "recent_decisions" && Array.isArray(value)) {
-      result[key] = value.slice(0, 18).map(row => {
-        if (!row || typeof row !== "object") return row;
-        const { features: _features, predictions: _predictions, ...bounded } = row as JsonObject;
-        return bounded;
-      });
-    } else {
-      result[key] = value;
-    }
+    result[key] = value;
   }
   const market = status.market_chart && typeof status.market_chart === "object"
     ? status.market_chart as JsonObject
@@ -67,9 +58,6 @@ export function compactPreviewStatus(status: JsonObject): JsonObject {
   result.market_chart = {
     history_resource: market.history_resource ?? PREVIEW_RESOURCES.marketHistory,
     candles: [],
-    decisions: [],
-    training_markers: market.training_markers ?? [],
-    prediction_history_start: market.prediction_history_start ?? {},
   };
   return result;
 }
@@ -106,32 +94,5 @@ export function compactPreviewNewsIndex(index: JsonObject): JsonObject {
     // The embedded page remains useful while D1 loads, but its build-time
     // aggregates must never masquerade as the current 60-day archive total.
     totals_scope: "BUILD_SNAPSHOT",
-  };
-}
-
-/** Keep first paint useful without compiling the complete learning ledger. */
-export function compactPreviewLearning(learning: JsonObject): JsonObject {
-  const curves = (learning.learning_curves ?? {}) as JsonObject;
-  const models = Array.isArray(curves.models) ? curves.models : [];
-  const versionGroups = Array.isArray(curves.version_groups) ? curves.version_groups : [];
-  return {
-    learning_preview_summary: true,
-    learning_history_resource: PREVIEW_RESOURCES.learningHistory,
-    generated_at: learning.generated_at,
-    learning_curves: {
-      collection_epoch: curves.collection_epoch,
-      evaluation_epoch_v2: curves.evaluation_epoch_v2,
-      learning_stage: curves.learning_stage,
-      models: models.filter(row => (
-        row && typeof row === "object" && (row as JsonObject).active_rank !== null
-      )),
-      version_groups: versionGroups.filter(row => (
-        row && typeof row === "object" && (row as JsonObject).lifecycle_status === "LATEST"
-      )),
-      rolling_processes: curves.rolling_processes,
-      // Complete curves are loaded from D1 when the league is visible. Keeping
-      // them in the Worker module caused 1102 isolate OOMs.
-      identity_curves: [],
-    },
   };
 }

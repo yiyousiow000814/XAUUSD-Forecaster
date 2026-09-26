@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Independent, inactive-by-default Windows PUBLIC_LIVE_V1 publisher owner."""
+"""Independent, inactive-by-default Windows PUBLIC_LIVE_V2 publisher owner."""
 
 from __future__ import annotations
 

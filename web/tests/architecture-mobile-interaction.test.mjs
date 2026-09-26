@@ -349,7 +349,7 @@ test("mobile 29: Reference exposes all views and reference-only controls", () =>
 });
 
 test("mobile 30: selected-node dock reaches subsystem drill-down", () => {
-  const decision = manifest.nodes.find(node => node.id === "slice:clock-transaction"); assert.ok(decision.subsystem_view);
+  const decision = manifest.nodes.find(node => node.id === "slice:source-first-ack"); assert.ok(decision.subsystem_view);
   const state = step(initial, { type: "NODE_TAP", nodeId: decision.id }, { type: "OPEN_SUBSYSTEM" }); assert.deepEqual(state, initial);
   assert.match(viewSource, /className=\{styles\.selectedDock\}[\s\S]*打开子系统/);
 });

@@ -6,7 +6,6 @@ import sqlite3
 from datetime import UTC, datetime
 
 from xauusd_forecaster.ai.provider_registry import AI_QUOTA_SURFACES
-from xauusd_forecaster.decision.inference import MODEL_IDENTITIES
 from xauusd_forecaster.news.scheduler.state import quota_day
 from xauusd_forecaster.news.collection.source_registry import NEWS_SOURCE_REGISTRY
 
@@ -29,86 +28,25 @@ def _utc_instant(value: object) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
-def _model_mapping(rows: list[sqlite3.Row] | list[tuple]) -> dict[str, str]:
-    return {str(row[0]): str(row[1]) for row in rows}
-
-
-def _duplicate_identities(rows: list[list[str]] | list[tuple]) -> list[str]:
-    seen: set[str] = set()
-    duplicates: set[str] = set()
-    for row in rows:
-        identity = str(row[0])
-        if identity in seen:
-            duplicates.add(identity)
-        seen.add(identity)
-    return sorted(duplicates)
-
-
 def production_contract_snapshot(
     connection: sqlite3.Connection,
     *,
     now: datetime | None = None,
     account_ids: frozenset[str] | None = None,
-    materialized_latest_decision_time: str | None = None,
-    use_materialized_latest_decision: bool = False,
 ) -> dict:
     """Capture all database facts at one SQLite read boundary."""
     instant = now or datetime.now(UTC)
     snapshot: dict = {
         "observed_at": instant.isoformat(),
-        "active_generation": None,
         "scheduler_usage_available": False,
         "scheduler_usage": {},
         "registered_sources": [spec.source for spec in NEWS_SOURCE_REGISTRY],
         "latest_source_status": {},
-        "latest_decision_time": None,
     }
     owns_transaction = not connection.in_transaction
     if owns_transaction:
         connection.execute("BEGIN")
     try:
-        activation = connection.execute(
-            """SELECT generation_id,activated_at
-               FROM news_model_generation_activations_v1
-               WHERE activated_at<?
-               ORDER BY activated_at DESC,activation_id DESC LIMIT 1""",
-            (instant.isoformat(),),
-        ).fetchone()
-        if activation is not None:
-            generation_id, activated_at = str(activation[0]), str(activation[1])
-            expected_rows = connection.execute(
-                """SELECT model_identity,model_version
-                   FROM news_model_generation_members_v1 WHERE generation_id=?
-                   UNION ALL
-                   SELECT model_identity,model_version
-                   FROM news_model_generation_aux_members_v1 WHERE generation_id=?""",
-                (generation_id, generation_id),
-            ).fetchall()
-            expected = _model_mapping(expected_rows)
-            decision = connection.execute(
-                """SELECT decision_id FROM decision_events WHERE decision_time>=?
-                   ORDER BY decision_time DESC LIMIT 1""",
-                (activated_at,),
-            ).fetchone()
-            actual = None
-            if decision is not None:
-                actual_rows = connection.execute(
-                    """SELECT model_identity,model_version FROM predictions_v2
-                       WHERE source_decision_id=?""",
-                    (str(decision[0]),),
-                ).fetchall()
-                actual = _model_mapping(actual_rows)
-            snapshot["active_generation"] = {
-                "generation_id": generation_id,
-                "activated_at": activated_at,
-                "expected_models": expected,
-                "duplicate_expected_identities": _duplicate_identities(expected_rows),
-                "latest_decision_models": actual,
-                "duplicate_prediction_identities": (
-                    _duplicate_identities(actual_rows) if decision is not None else []
-                ),
-            }
-
         scheduler_table = connection.execute(
             """SELECT 1 FROM sqlite_master WHERE type='table'
                AND name='news_ai_account_daily_usage_v1'"""
@@ -145,12 +83,6 @@ def production_contract_snapshot(
             snapshot["latest_source_status"][spec.source] = (
                 str(row[0]) if row is not None else None
             )
-        snapshot["latest_decision_time"] = (
-            materialized_latest_decision_time
-            if use_materialized_latest_decision else connection.execute(
-                "SELECT max(decision_time) FROM decision_events"
-            ).fetchone()[0]
-        )
     finally:
         if owns_transaction:
             connection.rollback()
@@ -158,64 +90,13 @@ def production_contract_snapshot(
 
 
 def production_shape_violations(
-    status: dict, *, allow_pending_generation_decision: bool = False,
+    status: dict,
 ) -> list[str]:
     """Validate externally meaningful contracts within one status snapshot."""
     violations: list[str] = []
     contract = status.get("production_contract")
     if not isinstance(contract, dict):
         return ["production status does not include a contract snapshot"]
-
-    generation = contract.get("active_generation")
-    if not isinstance(generation, dict):
-        violations.append("production has no active model generation")
-    else:
-        expected = generation.get("expected_models") or {}
-        required = set(MODEL_IDENTITIES)
-        missing_members = sorted(required - set(expected))
-        if missing_members:
-            violations.append(
-                "active generation is incomplete: " + ", ".join(missing_members)
-            )
-        unexpected_members = sorted(set(expected) - required)
-        if unexpected_members:
-            violations.append(
-                "active generation has unexpected models: "
-                + ", ".join(unexpected_members)
-            )
-        duplicate_expected = generation.get("duplicate_expected_identities") or []
-        if duplicate_expected:
-            violations.append(
-                "active generation has duplicate model identities: "
-                + ", ".join(sorted(map(str, duplicate_expected)))
-            )
-        actual = generation.get("latest_decision_models")
-        if actual is None and not allow_pending_generation_decision:
-            violations.append("active generation has no subsequent live decision")
-        elif actual is not None:
-            missing_predictions = sorted(required - set(actual))
-            if missing_predictions and not allow_pending_generation_decision:
-                violations.append(
-                    "latest decision is missing models: "
-                    + ", ".join(missing_predictions)
-                )
-            mismatched = sorted(
-                identity for identity in required & set(expected) & set(actual)
-                if actual[identity] != expected[identity]
-            )
-            if mismatched:
-                violations.append(
-                    "latest decision does not use active generation versions: "
-                    + ", ".join(mismatched)
-                )
-            duplicate_predictions = (
-                generation.get("duplicate_prediction_identities") or []
-            )
-            if duplicate_predictions:
-                violations.append(
-                    "latest decision has duplicate model identities: "
-                    + ", ".join(sorted(map(str, duplicate_predictions)))
-                )
 
     scheduler_usage = contract.get("scheduler_usage") or {}
     if contract.get("scheduler_usage_available") is not True:
@@ -276,15 +157,9 @@ def production_shape_violations(
         violations.append("broker market session status is unavailable")
     if market_session in {"CLOSED", "WEEKLY_CLOSED"}:
         observed_at = system.get("market_session_observed_at")
-        latest_decision = contract.get("latest_decision_time")
         observed_instant = _utc_instant(observed_at)
-        decision_instant = _utc_instant(latest_decision)
         if observed_instant is None:
             violations.append("broker market-close observation time is invalid")
-        elif latest_decision is not None and decision_instant is None:
-            violations.append("latest decision time is invalid")
-        elif decision_instant is not None and decision_instant > observed_instant:
-            violations.append("decision was appended after broker-confirmed market close")
 
     sync_status = status.get("dashboard_sync")
     if not isinstance(sync_status, dict) or sync_status.get("status") not in {

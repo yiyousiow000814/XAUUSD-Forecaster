@@ -124,9 +124,7 @@ def test_every_runtime_writer_crosses_shared_wal_policy_boundary() -> None:
         "xauusd_forecaster/evidence/ledger.py": "open_forward_writer_connection",
         "xauusd_forecaster/news/collection/pruning.py": "open_forward_writer_connection",
         "xauusd_forecaster/news/retrieval/search.py": "open_forward_writer_connection",
-        "xauusd_forecaster/training/runtime.py": "open_forward_writer_connection",
         "xauusd_forecaster/dashboard/operator_bridge.py": "open_forward_writer_connection",
-        "scripts/maintenance/migrate_runtime_artifact_paths.py": "open_forward_writer_connection",
     }
     for relative, boundary in owners.items():
         assert boundary in (root / relative).read_text(encoding="utf-8"), relative

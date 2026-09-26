@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +11,9 @@ from pathlib import Path
 from xauusd_forecaster.market_session import expected_weekly_closure
 
 
-def latest_quote_received(database: Path) -> str | None:
+from xauusd_forecaster.market import parse_quote_line
+
+def latest_quote(database: Path) -> dict | None:
     sources = sorted((database.parent / "quotes").glob("*.jsonl"))
     if not sources:
         return None
@@ -21,28 +24,35 @@ def latest_quote_received(database: Path) -> str | None:
         lines = handle.read().splitlines()
     for line in reversed(lines):
         try:
-            return str(json.loads(line)["received_time"]).replace("Z", "+00:00")
-        except (KeyError, ValueError, json.JSONDecodeError):
+            quote = parse_quote_line(line, sources[-1])
+            if not math.isfinite(quote.bid) or not math.isfinite(quote.ask):
+                continue
+            return {
+                "bid": quote.bid, "ask": quote.ask, "spread": quote.ask - quote.bid,
+                "source_received_time": quote.received_time.isoformat(),
+                "source_event_time": quote.event_time.isoformat(),
+            }
+        except (KeyError, AttributeError, TypeError, ValueError):
             continue
     return None
 
 
-def latest_decision_created_at(
-    database: Path, snapshot_connection: sqlite3.Connection | None = None,
-) -> str | None:
-    """Read cadence from the caller's snapshot when one owns the build."""
-    owns_connection = snapshot_connection is None
-    connection = snapshot_connection or sqlite3.connect(
-        f"file:{database}?mode=ro", uri=True, timeout=5,
-    )
-    try:
-        return connection.execute(
-            """SELECT activity_time FROM dashboard_latest_activity_v1
-               WHERE activity_name='decision_events'"""
-        ).fetchone()[0]
-    finally:
-        if owns_connection:
-            connection.close()
+def latest_quote_received(database: Path) -> str | None:
+    sources = sorted((database.parent / "quotes").glob("*.jsonl"))
+    if not sources:
+        return None
+    with sources[-1].open("rb") as handle:
+        handle.seek(0, 2)
+        handle.seek(max(0, handle.tell() - 65_536))
+        lines = handle.read().splitlines()
+    for line in reversed(lines):
+        try:
+            return str(json.loads(line)["received_time"]).replace("Z", "+00:00")
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
+
+
 
 
 def runtime_heartbeat(path: Path, *, service: str) -> dict[str, object]:

@@ -264,7 +264,7 @@ test("retains last-good private and public snapshots after service failures", as
 });
 
 test("audit resource family rejects malformed success envelopes and preserves accepted work for retry", async () => {
-  for (const [view, field] of [["briefs", "daily_news_briefs"], ["stories", "storylines"], ["decisions", "recent_decisions"]]) {
+  for (const [view, field] of [["briefs", "daily_news_briefs"], ["stories", "storylines"]]) {
     const url = `/api/audit-${view}?resource-test=accepted-envelope`;
     const accepted = {projection_contract: AUDIT_DETAIL_PROJECTION_CONTRACT, generated_at: "2026-09-06T11:00:00Z", [field]: []};
     const validate = body => validAuditDetailPayload(view, body);
@@ -293,7 +293,6 @@ test("Audit UI and the actual D1 writer agree on explicit source and nested row 
     for (const [view,id,field,row] of [
       ["briefs",7,"daily_news_briefs",{model_version:"v",brief:{items:[{headline:"headline",summary:"summary",evidence_ids:["e1"]}]}}],
       ["stories",8,"storylines",{covered_roles:[],missing_roles:[],timeline:[],market_reactions:[],commentary:[],background:[]}],
-      ["decisions",6,"recent_decisions",{predictions:[{ev_long_u5:0.1}],bid:5000,ask:5001}],
     ]) {
       const baseline = {projection_contract:AUDIT_DETAIL_PROJECTION_CONTRACT,generated_at:"2026-09-06T11:00:00Z",[field]:[row]};
       const bytes = new TextEncoder().encode(JSON.stringify(baseline));
@@ -335,7 +334,6 @@ test("Preview build admission preserves source time and fallback provenance only
   for (const [view,field,row] of [
     ["briefs","daily_news_briefs",{model_version:"v",brief:{items:[]}}],
     ["stories","storylines",{covered_roles:[],missing_roles:[],timeline:[],market_reactions:[],commentary:[],background:[]}],
-    ["decisions","recent_decisions",{predictions:[]}],
   ]) {
     const key = `audit_${view}`;
     const provenance = {availability:"AVAILABLE",source_path:"/api/audit",compatibility_fallback:true};

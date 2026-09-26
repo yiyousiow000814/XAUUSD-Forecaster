@@ -5,22 +5,14 @@ import { MAX_LIVE_BYTES, validateLiveState } from "../src/contract.js";
 
 function state(sequence = 1, overrides = {}) {
   return {
-    schema_version: "PUBLIC_LIVE_V1",
+    schema_version: "PUBLIC_LIVE_V2",
     sequence,
     generated_at: "2026-08-23T05:00:00.000Z",
     source_revision: "73e1d6518ac6ab540c012dd4e5f863fef41593a3",
     market_session: "OPEN",
     freshness: { online: true, state: "FRESH" },
     quote: { bid: 3370.1, ask: 3370.3, spread: 0.2, source_received_time: "2026-08-23T05:00:00.000Z" },
-    forecast: {
-      model_identity: "FULL", model_version: "v18", recommended_action: "WAIT",
-      prediction_status: "READY", ev_long_u5: 0.1, ev_short_u5: -0.1,
-      interval_width: 0.2, decision_time: "2026-08-23T05:00:00.000Z",
-      signal_expiry_seconds: 20, forecast_horizon_seconds: 1800,
-      directional_bias: "NEUTRAL", frozen_record: true,
-    },
     health: { status: "HEALTHY", alerts: [] },
-    recent_decisions: [{ decision_time: "2026-08-23T05:00:00.000Z", action: "WAIT" }],
     ...overrides,
   };
 }
@@ -70,7 +62,7 @@ test("the public contract is small and rejects private or malformed evidence", (
   assert.ok(Buffer.byteLength(JSON.stringify(state())) < MAX_LIVE_BYTES);
   assert.throws(() => validateLiveState(state(1, { gemini_quota: {} })), /private/);
   assert.throws(() => validateLiveState(state(1, { quote: { bid: 2, ask: 1, spread: -1, source_received_time: "x" } })), /quote spread|crossed/);
-  assert.throws(() => validateLiveState(state(1, { recent_decisions: Array(19).fill({}) })), /bounded/);
+  assert.throws(() => validateLiveState(state(1, { recent_decisions: Array(19).fill({}) })), /forbidden/);
 });
 
 test("publisher auth happens before parsing and dry-run has no Durable Object effects", async () => {
@@ -150,7 +142,7 @@ test("health exposes code identity and binding readiness without secrets", async
   assert.equal(response.status, 200);
   const health = await response.json();
   assert.equal(health.code_revision, "candidate-sha");
-  assert.equal(health.schema_version, "PUBLIC_LIVE_V1");
+  assert.equal(health.schema_version, "PUBLIC_LIVE_V2");
   assert.equal(health.binding_ready, true);
   assert.equal(health.latest_sequence, 4);
   assert.equal(health.latest_source_revision, state().source_revision);
@@ -158,7 +150,7 @@ test("health exposes code identity and binding readiness without secrets", async
   assert.ok(!JSON.stringify(health).includes("publish-secret"));
 });
 
-test("unchanged recent decisions are omitted from deterministic updates", async () => {
+test("quote updates remain complete and exclude retired model data", async () => {
   const ctx = context(1);
   const hub = new LiveHub(ctx, {});
   await publish(hub, state(1));
@@ -174,4 +166,18 @@ test("subscriber application messages are read-only", () => {
   new LiveHub(ctx, {}).webSocketMessage(ctx.sockets[0], "{\"sequence\":99}");
   assert.equal(ctx.sockets[0].closed, true);
   assert.equal(ctx.values.size, 0);
+});
+
+test("upgrade never delivers persisted model state and recovers with a full quote state", async () => {
+  const ctx = context();
+  ctx.values.set("latest-state", { ...state(8), schema_version: "PUBLIC_LIVE_V1", forecast: { recommended_action: "WAIT" } });
+  const server = { messages: [], send(value) { this.messages.push(JSON.parse(value)); }, close() {} };
+  await acceptSubscriber(ctx, () => ({ client: {}, server }));
+  assert.equal(server.messages.length, 0);
+  const hub = new LiveHub(ctx, {});
+  assert.equal((await publish(hub, state(8))).status, 409);
+  assert.equal((await publish(hub, state(9))).status, 200);
+  assert.equal(server.messages[0].type, "FULL_STATE");
+  assert.ok(!("forecast" in server.messages[0].state));
+  assert.equal(ctx.values.get("latest-state").schema_version, "PUBLIC_LIVE_V2");
 });

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const {
-  LiveBroadcastTransport, effectiveQuoteAgeSeconds, mergeRecentDecisions,
+  LiveBroadcastTransport, effectiveQuoteAgeSeconds,
 } = await import("../app/_lib/live-broadcast.ts");
 const {
   readDashboardResource, updateDashboardResource,
@@ -26,23 +26,13 @@ class FakeSocket {
   close() { this.closed = true; this.emit("close"); }
 }
 
-function forecast(action = "WAIT") {
+function fullState(sequence = 1) {
   return {
-    model_identity: "FULL", model_version: "v18", recommended_action: action,
-    prediction_status: "READY", ev_long_u5: 0.2, ev_short_u5: -0.1,
-    interval_width: 0.3, decision_time: "2026-08-23T05:00:00.000Z",
-    signal_expiry_seconds: 20, forecast_horizon_seconds: 1800,
-    directional_bias: action === "WAIT" ? "NEUTRAL" : action, frozen_record: true,
-  };
-}
-
-function fullState(sequence = 1, action = "WAIT") {
-  return {
-    schema_version: "PUBLIC_LIVE_V1", sequence,
+    schema_version: "PUBLIC_LIVE_V2", sequence,
     generated_at: "2026-08-23T05:00:00.000Z", source_revision: "abc", market_session: "OPEN",
     freshness: { online: true, state: "FRESH" },
     quote: { bid: 3370, ask: 3370.2, spread: 0.2, source_received_time: "2026-08-23T05:00:00.000Z" },
-    forecast: forecast(action), health: { status: "HEALTHY", alerts: [] }, recent_decisions: [],
+    health: { status: "HEALTHY", alerts: [] },
   };
 }
 
@@ -108,37 +98,27 @@ test("one complete HTTP baseline precedes push and recurring status polling is s
   assert.doesNotMatch(previewBanner, /fetch\([\s\S]*\/api\/status/);
 });
 
-test("push preserves complete baseline, forecast actions, and the 90-minute ledger", () => withTimers(() => {
-  const baselineDecisions = Array.from({ length: 18 }, (_, index) => ({
-    decision_id: String(index), decision_time: `2026-08-23T04:${String(index).padStart(2, "0")}:00.000Z`,
-  }));
+test("push preserves news baseline and updates quotes without model data", () => withTimers(() => {
   updateDashboardResource("/api/status", () => ({
-    counts: { decisions: 18 }, outcome_summary: { samples: 10 },
-    u5_context: { label: "baseline" }, sources: { quote: "cTrader" },
+    counts: { news: 18 }, sources: { quote: "cTrader" },
     system: { quote_age_seconds: 2, components: { quote_bridge: { status: "RUNNING" } } },
-    research_forecast: forecast("SHORT"), recent_decisions: baselineDecisions,
   }));
-  const sockets = [];
-  const transport = new LiveBroadcastTransport("wss://broadcast.test/subscribe", () => {
-    const socket = new FakeSocket(); sockets.push(socket); return socket;
-  });
+  const socket = new FakeSocket();
+  const transport = new LiveBroadcastTransport("wss://broadcast.test/subscribe", () => socket);
   transport.start();
-  for (const [index, action] of ["SHORT", "LONG", "WAIT"].entries()) {
-    const state = fullState(index + 1, action);
-    state.recent_decisions = [{
-      decision_id: `new-${index}`, decision_time: `2026-08-23T05:0${index}:00.000Z`,
-    }];
-    sockets[0].emit("message", { data: JSON.stringify(
-      index === 0 ? { type: "FULL_STATE", state } : {
-        type: "STATE_UPDATE", sequence: index + 1, state,
-      },
-    ) });
+  for (let sequence = 1; sequence <= 3; sequence++) {
+    const state = fullState(sequence);
+    state.quote.bid += sequence;
+    state.quote.ask += sequence;
+    socket.emit("message", { data: JSON.stringify({
+      type: sequence === 1 ? "FULL_STATE" : "STATE_UPDATE", sequence, state,
+    }) });
     const status = readDashboardResource("/api/status");
-    assert.equal(status.research_forecast.recommended_action, action);
-    assert.equal(status.research_forecast.forecast_horizon_seconds, 1800);
-    assert.equal(status.counts.decisions, 18);
+    assert.equal(status.latest.bid, 3370 + sequence);
+    assert.equal(status.counts.news, 18);
     assert.equal(status.sources.quote, "cTrader");
-    assert.equal(status.recent_decisions.length, 18);
+    assert.ok(!("research_forecast" in status));
+    assert.ok(!("recent_decisions" in status));
   }
   transport.stop();
 }));
@@ -156,13 +136,6 @@ test("quote age advances from the client clock and resets on a new quote", () =>
   assert.equal(effectiveQuoteAgeSeconds(status, t0 + 3_000), 0.5);
   status.latest.source_received_time = "invalid";
   assert.equal(effectiveQuoteAgeSeconds(status, t0 + 4_000), 99);
-});
-
-test("recent decision deltas merge without shrinking the 18-row baseline", () => {
-  const baseline = Array.from({ length: 18 }, (_, index) => ({ decision_id: String(index) }));
-  const merged = mergeRecentDecisions(baseline, [{ decision_id: "new" }]);
-  assert.equal(merged.length, 18);
-  assert.equal(merged[0].decision_id, "new");
 });
 
 test("disconnect enables fallback, reconnect is bounded, and recovery restores push", () => withTimers(timers => {
@@ -224,5 +197,22 @@ test("reconnect backoff uses exponential bounded jitter", () => withTimers(timer
     assert.equal(timer.delay, expected);
     timer.callback();
   }
+  transport.stop();
+}));
+
+test("retired schema or model fields cannot suppress HTTP fallback", () => withTimers(() => {
+  const socket = new FakeSocket();
+  const transport = new LiveBroadcastTransport("wss://broadcast.test/subscribe", () => socket);
+  transport.start();
+  for (const state of [
+    { ...fullState(), schema_version: "PUBLIC_LIVE_V1" },
+    { ...fullState(), forecast: { recommended_action: "WAIT" } },
+    { ...fullState(), recent_decisions: [] },
+  ]) {
+    socket.emit("message", { data: JSON.stringify({ type: "FULL_STATE", state }) });
+    assert.equal(transport.healthy(), false);
+  }
+  socket.emit("message", { data: JSON.stringify({ type: "FULL_STATE", state: fullState() }) });
+  assert.equal(transport.healthy(), true);
   transport.stop();
 }));

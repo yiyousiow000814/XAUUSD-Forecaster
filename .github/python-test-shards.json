@@ -5,7 +5,6 @@
       "id": "python-1",
       "tests": [
         "tests/dashboard/test_dashboard_health_projection.py",
-        "tests/runtime/test_artifact_path_migration.py",
         "tests/news/test_bootstrap_news_projection.py",
         "tests/news/test_news_input_coverage.py",
         "tests/dashboard/test_dashboard_sync_transport.py",
@@ -24,14 +23,7 @@
     {
       "id": "python-forward",
       "tests": [
-        "tests/decision/test_forward_only.py"
-      ]
-    },
-    {
-      "id": "python-evidence-integrity",
-      "tests": [
-        "tests/evidence/test_evidence_integrity_v2.py",
-        "tests/evidence/test_clock_recovery.py"
+        "tests/runtime/test_live_oos_cleanup.py"
       ]
     },
     {
@@ -59,16 +51,11 @@
       "tests": [
         "tests/architecture/test_ci_contracts.py",
         "tests/news/test_news_recovery_rehearsal.py",
-        "tests/training/test_model_repair_replay.py",
-        "tests/training/test_offline_model_repair.py",
-        "tests/training/test_offline_market_methods.py",
-        "tests/evidence/test_clock_atomicity.py",
         "tests/assistant/test_assistant_content.py",
         "tests/assistant/test_assistant_tools.py",
         "tests/runtime/test_check_production_shape_cli.py",
         "tests/evidence/test_quotes_and_labeling.py",
         "tests/evidence/test_quote_record_recovery.py",
-        "tests/news/test_news_coverage_live_path.py",
         "tests/news/test_news_pruning.py",
         "tests/dashboard/test_admin_access_boundary_check.py",
         "tests/news/test_news_collection_owner.py"
@@ -93,10 +80,8 @@
         "tests/runtime/test_wal_checkpoint_ownership.py",
         "tests/dashboard/test_dashboard_market_resources.py",
         "tests/assistant/test_assistant_compaction.py",
-        "tests/decision/test_decision.py",
         "tests/news/test_named_reference_benchmark.py",
         "tests/dashboard/test_public_health_check.py",
-        "tests/evidence/test_execution_costs.py",
         "tests/runtime/test_main_runtime.py",
         "tests/architecture/test_package_ownership.py"
       ]
@@ -105,7 +90,6 @@
       "id": "python-4",
       "tests": [
         "tests/dashboard/test_dashboard_sync.py",
-        "tests/dashboard/test_chart_history.py",
         "tests/dashboard/test_dashboard_resource_contracts.py",
         "tests/assistant/test_assistant_capacity.py",
         "tests/runtime/test_backup_containment.py",
@@ -113,13 +97,11 @@
         "tests/assistant/test_assistant_evidence.py",
         "tests/dashboard/test_deferred_projection_parity.py",
         "tests/dashboard/test_dashboard_payloads.py",
-        "tests/training/test_training_owner.py",
         "tests/ai/test_gemini_quota.py",
         "tests/dashboard/test_release_validation_fixtures.py",
         "tests/runtime/test_cross_version_runtime_recovery.py",
         "tests/runtime/test_runtime_health.py",
-        "tests/dashboard/test_dashboard_runtime_status.py",
-        "tests/evidence/test_ledger.py"
+        "tests/dashboard/test_dashboard_runtime_status.py"
       ]
     },
     {

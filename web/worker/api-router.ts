@@ -48,7 +48,6 @@ const SNAPSHOT_ROUTES: Record<string, SnapshotRoute> = {
     generated_at: null, news_metrics: null, daily_news_brief_summary: null,
     storyline_summary: null, news_evidence_summary: null, news_feature_policy: null,
   } },
-  "/api/audit-decisions": { id: AUDIT_SNAPSHOT_IDS.decisions, invalid: "invalid audit decisions payload", maxBytes: AUDIT_DETAIL_SNAPSHOT_BYTES, legacyFields: { generated_at: null, recent_decisions: 20 } },
   "/api/audit-briefs": { id: AUDIT_SNAPSHOT_IDS.briefs, invalid: "invalid audit briefs payload", maxBytes: AUDIT_DETAIL_SNAPSHOT_BYTES, legacyFields: { generated_at: null, daily_news_briefs: 3 } },
   "/api/audit-stories": { id: AUDIT_SNAPSHOT_IDS.stories, invalid: "invalid audit stories payload", maxBytes: AUDIT_DETAIL_SNAPSHOT_BYTES, legacyFields: {
     generated_at: null, storylines: 12, market_narrative_candidates: 12,
@@ -56,21 +55,11 @@ const SNAPSHOT_ROUTES: Record<string, SnapshotRoute> = {
     story_event_candidates: 12, market_reaction_streams: 8,
     theme_streams: 8, unassigned_story_events: 12, storyline_summary: null,
   } },
-  "/api/learning": { id: 3, invalid: "invalid learning payload", maxBytes: MAX_DASHBOARD_SNAPSHOT_BYTES },
   "/api/market-chart": { id: 2, invalid: "invalid market chart payload", maxBytes: MAX_DASHBOARD_SNAPSHOT_BYTES },
 };
 
 function legacyAuditProjection(fields: Record<string, number | null>) {
   const arrayValue = (field: string) => {
-    if (field === "recent_decisions") {
-      return `CASE WHEN item.item_type != 'object' THEN item.item_value
-        WHEN json_type(item.item_value, '$.predictions') != 'array'
-          OR json_type(item.item_value, '$.predictions') IS NULL
-        THEN json_remove(item.item_value, '$.features')
-        ELSE json_set(json_remove(item.item_value, '$.features'), '$.predictions', json(coalesce(`
-        + `(SELECT json_group_array(json(prediction_value)) FROM (`
-        + `SELECT CASE WHEN prediction.type IN ('object','array') THEN prediction.value ELSE json_quote(prediction.value) END AS prediction_value FROM json_each(item.item_value, '$.predictions') prediction LIMIT 8)), '[]'))) END`;
-    }
     if (field === "daily_news_briefs") return `CASE WHEN item.item_type = 'object' THEN json_remove(item.item_value, '$.brief_json') ELSE item.item_value END`;
     return "CASE WHEN item.item_type IN ('object','array') THEN json(item.item_value) ELSE item.item_value END";
   };

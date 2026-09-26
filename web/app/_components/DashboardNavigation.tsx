@@ -3,7 +3,7 @@
 import { createContext, useContext, type ReactNode } from "react";
 
 export type DashboardRoom = "live" | "audit" | "health" | "admin" | "assistant" | "retry" | "status" | "architecture";
-export type AuditViewName = "briefs" | "search" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage";
+export type AuditViewName = "briefs" | "search" | "news" | "evidence" | "stories" | "coverage";
 
 export type DashboardLocation = {
   room: DashboardRoom;
@@ -23,7 +23,7 @@ export type DashboardGlobalDestination = {
 
 export const DASHBOARD_GLOBAL_DESTINATIONS: readonly DashboardGlobalDestination[] = [
   { id: "live", label: "总览", href: "/", rooms: ["live"] },
-  { id: "audit", label: "新闻与决策", href: "/audit?view=news", rooms: ["audit"] },
+  { id: "audit", label: "新闻与事件", href: "/audit?view=news", rooms: ["audit"] },
   {
     id: "admin", label: "管理员登录", authenticatedLabel: "管理后台", href: "/admin",
     rooms: ["admin", "assistant", "retry", "status", "architecture"], private: true,

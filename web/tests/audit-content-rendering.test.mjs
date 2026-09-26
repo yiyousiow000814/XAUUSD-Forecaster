@@ -15,7 +15,7 @@ const resourcesPath = fileURLToPath(new URL("../app/_lib/dashboard-resource.ts",
 const temporaryRoot = mkdtempSync(join(tmpdir(), "aurum-audit-content-"));
 test.after(() => rmSync(temporaryRoot, { recursive: true, force: true }));
 
-const resourceUrls = ["/api/status", "/api/audit", "/api/learning", "/api/audit-briefs", "/api/audit-stories", "/api/audit-decisions"];
+const resourceUrls = ["/api/status", "/api/audit", "/api/audit-briefs", "/api/audit-stories"];
 const built = await build({
   bundle: true, write: false, platform: "node", format: "esm", jsx: "automatic",
   define: {__AURUM_DEPLOYMENT__: JSON.stringify({is_preview: false})},
@@ -26,8 +26,12 @@ const built = await build({
     contents: `import React from 'react';
       import {renderToStaticMarkup} from 'react-dom/server';
       import AuditView, {NewsRow} from ${JSON.stringify(viewPath)};
+      import PreviewBanner from ${JSON.stringify(fileURLToPath(new URL("../app/_components/PreviewBanner.tsx", import.meta.url)))};
+      import LiveRoomView from ${JSON.stringify(fileURLToPath(new URL('../app/_views/LiveRoomView.tsx', import.meta.url)))};
       import StatusView from ${JSON.stringify(fileURLToPath(new URL("../app/_views/StatusView.tsx", import.meta.url)))};
       import {clearDashboardResource,updateDashboardResource} from ${JSON.stringify(resourcesPath)};
+      export function renderPreview(payload) { updateDashboardResource("/api/status",()=>payload); return renderToStaticMarkup(React.createElement(PreviewBanner)); }
+      export function renderLive(payload) { updateDashboardResource("/api/status",()=>payload); return renderToStaticMarkup(React.createElement(LiveRoomView)); }
       export function renderNews(row) { return renderToStaticMarkup(React.createElement(NewsRow,{row})); }
       export function renderStatus(payload) { return renderToStaticMarkup(React.createElement(StatusView,{initialPayload:payload})); }
       export function render(view, resources) {
@@ -39,7 +43,7 @@ const built = await build({
 });
 const renderedModule = join(temporaryRoot, "audit.mjs");
 writeFileSync(renderedModule, built.outputFiles[0].contents);
-const { render, renderNews, renderStatus } = await import(pathToFileURL(renderedModule).href);
+const { render, renderNews, renderStatus, renderLive, renderPreview } = await import(pathToFileURL(renderedModule).href);
 
 test("article row expands publisher provenance with one coherent public label", () => {
   const row = {headline: "政策会议展望", emerging_topic_zh: "政策会议展望", event_type: "macro_preview",
@@ -64,12 +68,10 @@ const generatedAt = "2026-09-06T11:00:00Z";
 const baseline = {
   "/api/status": {generated_at: "2026-09-06T12:00:00Z", system: {online: false, market_session: "CLOSED"}, factor_coverage: []},
   "/api/audit": {generated_at: generatedAt},
-  "/api/learning": {generated_at: generatedAt, learning_curves: {models: []}},
 };
 const details = {
   briefs: {projection_contract: "audit-detail-source-v1", generated_at: generatedAt, daily_news_briefs: []},
   stories: {projection_contract: "audit-detail-source-v1", generated_at: generatedAt, storylines: []},
-  decisions: {projection_contract: "audit-detail-source-v1", generated_at: generatedAt, recent_decisions: []},
 };
 
 function selectedBody(html) {
@@ -77,29 +79,29 @@ function selectedBody(html) {
 }
 
 test("every Audit view exposes selected content or a visible initial read state", () => {
-  for (const view of ["briefs", "search", "news", "evidence", "stories", "decisions", "league", "coverage"]) {
+  for (const view of ["briefs", "search", "news", "evidence", "stories", "coverage"]) {
     const body = selectedBody(render(view, baseline));
     assert.match(body, />[^<]*[\p{L}\p{N}][^<]*</u, `${view} must not be blank`);
     if (view in details) assert.match(body, /role="status"/, `${view} idle must be visible pending state`);
   }
 });
 
-test("successful empty decisions and coverage have visible empty states", () => {
-  for (const view of ["decisions", "coverage"]) {
+test("successful empty briefs and coverage have visible empty states", () => {
+  for (const view of ["briefs", "coverage"]) {
     const body = selectedBody(render(view, {...baseline, ...(details[view] ? {[`/api/audit-${view}`]: details[view]} : {})}));
-    assert.match(body, /role="status"/);
+    if (view === "coverage") assert.match(body, /role="status"/);
     assert.match(body, />[^<]*[\p{L}\p{N}][^<]*</u);
   }
 });
 
 test("audit footer uses its resource timestamp independently of status heartbeat", () => {
   const footer = html => html.slice(html.indexOf('<footer class="audit-footer">'));
-  for (const view of ["decisions", "coverage"]) {
+  for (const view of ["briefs", "coverage"]) {
     const status = {...baseline["/api/status"], preview: {
       is_preview: true,
       branch_snapshot: {generated_at: generatedAt, status_paths: ["factor_coverage"]},
     }};
-    const resources = {...baseline, "/api/status": status, "/api/audit-decisions": details.decisions};
+    const resources = {...baseline, "/api/status": status, "/api/audit-briefs": details.briefs};
     const before = footer(render(view, resources));
     const after = footer(render(view, {...resources, "/api/status": {...status, generated_at:"2026-09-06T13:00:00Z"}}));
     assert.equal(before, after, `${view} must retain its own source timestamp`);
@@ -109,11 +111,10 @@ test("audit footer uses its resource timestamp independently of status heartbeat
 });
 
 test("accepted detail content is independent of missing or compact status data", () => {
-  const decisions = {generated_at: generatedAt, recent_decisions: [{decision_id:"retained-decision", decision_time:generatedAt, bid:5000, ask:5001, predictions:[]}]};
-  for (const status of [null, {...baseline["/api/status"], recent_decisions:[]}]) {
-    const html = render("decisions", {"/api/status": status, "/api/audit-decisions": decisions});
-    assert.match(selectedBody(html), /5000\.00/);
-    assert.match(selectedBody(html), /5001\.00/);
+  const briefs = {...details.briefs, daily_news_briefs: [{brief_date:"2026-09-06", generated_at:generatedAt, phase:"FINAL", model_version:"gemma", brief:{overview:"Retained daily brief", items:[]}}]};
+  for (const status of [null, baseline["/api/status"]]) {
+    const html = render("briefs", {"/api/status": status, "/api/audit-briefs": briefs});
+    assert.match(selectedBody(html), /Retained daily brief/);
   }
 });
 
@@ -288,4 +289,19 @@ test("brief prose hides packet refs in every field without rewriting evidence", 
     assert.ok(html.includes(text), text);
   }
   assert.equal(JSON.stringify(brief), original);
+});
+
+
+test("overview links to current events without asserting omitted status counts", () => {
+  const html = renderLive({generated_at: "2026-09-26T08:00:00Z", system: {online:false,quote_age_seconds:null}, counts:{}, sources:{}, news_metrics:{articles:{received:10,stored_revisions:12},events:{independent:0,currently_model_eligible:0}}});
+  assert.match(html, /href="\/audit\?view=evidence"/);
+  assert.match(html, /<strong>新闻事件<\/strong>/);
+  assert.doesNotMatch(html, /0.*个独立事件/);
+});
+
+
+test("preview hydration starts identically even after another server route primes status", () => {
+  assert.equal(renderPreview({}), "");
+  assert.equal(renderPreview({preview:{is_preview:true,branch:"review",commit_sha:"abc12345"}}), "");
+  assert.equal(renderPreview({}), "");
 });

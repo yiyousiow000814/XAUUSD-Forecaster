@@ -42,7 +42,7 @@ DEFERRED_PROJECTION_CONTRACT = "deferred-projection-sync-v1"
 
 
 DEFERRED_PROJECTION_ROUTES = frozenset({
-    "/api/audit-briefs", "/api/audit-stories", "/api/audit-decisions",
+    "/api/audit-briefs", "/api/audit-stories",
 })
 
 
@@ -99,21 +99,13 @@ _RESOURCE_SCHEDULE_LOCK = threading.Lock()
 from xauusd_forecaster.dashboard.resource_contracts import (
     REMOTE_PAYLOAD_LIMIT_BYTES,
     REMOTE_NEWS_LIMIT,
-    REMOTE_DECISION_LIMIT,
     REMOTE_DAILY_BRIEF_LIMIT,
-    LEARNING_HISTORY_CONTRACT_VERSION,
-    LEARNING_HISTORY_BATCH_LIMIT_BYTES,
-    LEARNING_SUMMARY_GROUPS_PER_IDENTITY,
-    MARKET_OVERVIEW_DECISIONS_PER_SERIES,
-    REMOTE_MARKET_DECISION_LIMIT,
     REMOTE_MARKET_CANDLE_LIMIT,
-    REMOTE_MARKET_DENSE_LIMITS,
     REMOTE_MARKET_OVERVIEW_LIMITS,
     MARKET_CHART_SNAPSHOT_LIMIT_BYTES,
     AUDIT_FIRST_PAGE_LIMIT_BYTES,
     AUDIT_DETAIL_LIMIT_BYTES,
     PayloadContractError,
-    MARKET_DECISION_FIELDS,
     _stable_news_key,
     news_withdrawal_keys,
     _json_hash,
@@ -122,24 +114,15 @@ from xauusd_forecaster.dashboard.resource_contracts import (
     news_index_batches,
     _bounded_item_batches,
     _epoch,
-    _learning_record,
-    _visual_decision_overview,
-    _update_decision_overviews,
-    learning_history_records,
-    learning_history_batches,
-    _learning_summary,
-    _decision_key,
     _downsample_market_overview,
     compact_market_chart,
     market_chart_snapshot,
-    learning_snapshot,
     _encoded_snapshot,
     remote_snapshot,
     audit_snapshot,
     _bounded_audit_snapshot,
     _with_projection_producer,
     audit_briefs_snapshot,
-    audit_decisions_snapshot,
     audit_stories_snapshot,
     _audit_detail_snapshot,
 )
@@ -192,8 +175,6 @@ from xauusd_forecaster.dashboard.sync.transport import (
 )
 
 
-def _learning_record_identity(row: dict) -> str:
-    return f"{row['resource']}\0{row['record_key']}"
 
 
 def _projection_producer_revision() -> str:
@@ -363,81 +344,12 @@ def _write_news_sync_state(path: Path, state: dict, *, state_root: Path) -> None
             temporary.unlink(missing_ok=True)
 
 
-def _learning_payload(local_payload: dict, config: dict) -> dict:
-    if not local_payload and config.get("local_status_url"):
-        return _read_local_resource(config, "/api/learning")
-    return local_payload
 
 
-def _sync_learning_history(local_payload: dict, config: dict) -> None:
-    """Export exact derived rows, never the first-paint learning summary."""
-    history_url = config.get("remote_learning_history_url") or (
-        config["remote_ingest_url"].rsplit("/", 1)[0] + "/learning-history"
-    )
-    state_path = Path(config["learning_history_state_file"])
-    state = _read_news_sync_state(state_path)
-    cursor = state.get("cursor") if state.get("contract_version") == "exact-chart-history-v1" else None
-    query = "?cursor=" + urllib.parse.quote(cursor, safe="") if cursor else ""
-    page = _read_local_resource(config, "/api/chart-history" + query)
-    if page.get("contract") != "exact-chart-history-v1" or not isinstance(page.get("records"), list):
-        raise ValueError("Exact chart export is unavailable")
-    position = json.loads(page.get("cursor", "null"))
-    if (not isinstance(position, list) or len(position) != 3
-            or type(position[0]) is not int
-            or not all(isinstance(value, str) for value in position[1:])
-            or type(page.get("source_revision")) is not int
-            or type(page.get("record_count")) is not int
-            or not isinstance(page.get("generated_at"), str)
-            or len(page["records"]) > 200):
-        raise ValueError("Invalid chart export metadata")
-    if page["records"] and cursor and tuple(position) <= tuple(json.loads(cursor)):
-        raise ValueError("Chart export cursor did not advance")
-    records = [{**row, "resource": "exact-" + row["resource"]} for row in page["records"]]
-    if records:
-        response = _post_json(history_url, json.dumps({"records": records}, ensure_ascii=False,
-                              separators=(",", ":"), allow_nan=False).encode("utf-8"), config)
-        if response.get("accepted") != len(records):
-            raise ValueError("Chart history ACK mismatch")
-    elif page.get("complete") and state.get("completed_revision") != page["source_revision"]:
-        response = _post_json(history_url, json.dumps({"chart_completion": {
-            "contract": page["contract"], "source_revision": page["source_revision"],
-            "generated_at": page["generated_at"], "record_count": page["record_count"],
-            "chart_format": page.get("chart_format", "exact-v1"),
-        }}, separators=(",", ":")).encode("utf-8"), config)
-        if response.get("status") != "OK":
-            raise ValueError("Chart completion ACK mismatch")
-    elif not page.get("complete"):
-        raise ValueError("Chart export did not advance")
-    _write_news_sync_state(state_path, {
-        "contract_version": page["contract"], "cursor": page["cursor"],
-        "pending_record_count": 1 if records else 0,
-        "completed_revision": state.get("completed_revision") if records else page["source_revision"],
-        "last_success": datetime.now(UTC).isoformat(),
-    }, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
 
 
-def _sync_learning_summary(local_payload: dict, config: dict) -> None:
-    local_payload = _learning_payload(local_payload, config)
-    learning_url = config.get("remote_learning_url") or (
-        config["remote_ingest_url"].rsplit("/", 1)[0] + "/learning"
-    )
-    learning_state_path = Path(config["learning_state_file"])
-    learning_state = _read_news_sync_state(learning_state_path)
-    learning_payload = learning_snapshot(local_payload)
-    learning_hash = hashlib.sha256(learning_payload).hexdigest()
-    if learning_state.get("payload_hash") != learning_hash:
-        _post_json(learning_url, learning_payload, config)
-        _write_news_sync_state(learning_state_path, {
-            "payload_hash": learning_hash,
-            "last_success": datetime.now(UTC).isoformat(),
-        }, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
 
 
-def _sync_learning(local_payload: dict, config: dict) -> None:
-    """Compatibility helper; the scheduler owns these as separate resources."""
-    payload = _learning_payload(local_payload, config)
-    _sync_learning_history(payload, config)
-    _sync_learning_summary(payload, config)
 
 
 def _sync_market(local_payload: dict, config: dict) -> None:
@@ -471,17 +383,16 @@ def _sync_market(local_payload: dict, config: dict) -> None:
     ).encode("utf-8"), config)
 
 
-def _market_history_payloads(candles: list[dict], decisions: list[dict]) -> list[bytes]:
+def _market_history_payloads(candles: list[dict]) -> list[bytes]:
     """Keep D1 ingest requests bounded while preserving every row."""
     compacted = compact_market_chart({
         "market_chart": {
-            "candles": candles, "overview_candles": [], "decisions": decisions,
+            "candles": candles, "overview_candles": [],
         },
-    }, dense_limit=max(1, len(decisions)), overview_limit=1)
+    }, overview_limit=1)
     candles = compacted["candles"]
-    decisions = compacted["decisions"]
     payloads = []
-    for key, rows in (("candles", candles), ("decisions", decisions)):
+    for key, rows in (("candles", candles),):
         current: list[dict] = []
         for row in rows:
             candidate = [*current, row]
@@ -508,32 +419,6 @@ def _market_history_payloads(candles: list[dict], decisions: list[dict]) -> list
     return payloads
 
 
-def _market_decision_overview_payload(summary: dict) -> bytes:
-    """Bound a replace-in-place overview without splitting its D1 row."""
-    source = summary.get("decisions", [])
-    decisions = [row for row in source if isinstance(row, dict)]
-    limit = min(len(decisions), MARKET_OVERVIEW_DECISIONS_PER_SERIES)
-    while True:
-        bounded = {
-            **summary,
-            "decisions": _visual_decision_overview(decisions, limit),
-        }
-        bounded["decision_count"] = len(bounded["decisions"])
-        bounded["decision_downsampled"] = (
-            int(bounded.get("source_decision_count") or 0)
-            > bounded["decision_count"]
-        )
-        encoded = json.dumps(
-            {"decision_overviews": [bounded]}, ensure_ascii=False,
-            allow_nan=False, separators=(",", ":"),
-        ).encode("utf-8")
-        if len(encoded) <= MARKET_HISTORY_BATCH_LIMIT_BYTES:
-            return encoded
-        if limit <= 1:
-            raise PayloadContractError(
-                "market decision overview row exceeds payload limit"
-            )
-        limit = max(1, limit // 2)
 
 
 def _local_market_history_url(config: dict, after: str | None) -> str:
@@ -573,12 +458,6 @@ def _sync_market_history(config: dict) -> None:
         if state.get("contract_version") == MARKET_HISTORY_CONTRACT_VERSION
         else None
     )
-    decision_overviews = (
-        state.get("decision_overviews", {})
-        if state.get("contract_version") == MARKET_HISTORY_CONTRACT_VERSION
-        else {}
-    )
-    new_after = cursor
     after = _overlap_cursor(cursor)
     pages = 0
     while pages < MARKET_HISTORY_PAGES_PER_CYCLE:
@@ -588,11 +467,7 @@ def _sync_market_history(config: dict) -> None:
         ) as response:
             page = json.loads(response.read())
         candles = page.get("candles") if isinstance(page.get("candles"), list) else []
-        decisions = page.get("decisions") if isinstance(page.get("decisions"), list) else []
-        decision_overviews = _update_decision_overviews(
-            decision_overviews, decisions, new_after,
-        )
-        for payload in _market_history_payloads(candles, decisions):
+        for payload in _market_history_payloads(candles):
             _post_json(remote_url, payload, config)
         next_cursor = page.get("next_cursor")
         if next_cursor:
@@ -600,33 +475,15 @@ def _sync_market_history(config: dict) -> None:
             _write_news_sync_state(state_path, {
                 "contract_version": MARKET_HISTORY_CONTRACT_VERSION,
                 "cursor": cursor,
-                "decision_overviews": decision_overviews,
                 "last_success": datetime.now(UTC).isoformat(),
             }, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
         pages += 1
         if not page.get("has_more") or not next_cursor or next_cursor == after:
             break
         after = str(next_cursor)
-    summaries = sorted(decision_overviews.items())
-    overview_offset = int(state.get("overview_offset") or 0)
-    selected_summaries = []
-    if summaries:
-        for index in range(min(MARKET_OVERVIEWS_PER_CYCLE, len(summaries))):
-            selected_summaries.append(
-                summaries[(overview_offset + index) % len(summaries)][1]
-            )
-        overview_offset = (
-            overview_offset + len(selected_summaries)
-        ) % len(summaries)
-    for summary in selected_summaries:
-        _post_json(
-            remote_url, _market_decision_overview_payload(summary), config,
-        )
     _write_news_sync_state(state_path, {
         "contract_version": MARKET_HISTORY_CONTRACT_VERSION,
         "cursor": cursor,
-        "decision_overviews": decision_overviews,
-        "overview_offset": overview_offset,
         "has_more": bool(page.get("has_more")),
         "last_success": datetime.now(UTC).isoformat(),
     }, state_root=Path(config[RUNTIME_STATE_ROOT_KEY]))
@@ -1002,7 +859,6 @@ def _audit_projection_bytes(
     for family, builder in (
         ("briefs", audit_briefs_snapshot),
         ("stories", audit_stories_snapshot),
-        ("decisions", audit_decisions_snapshot),
     ):
         route = f"/api/audit-{family}"
         detail = _read_local_resource(config, route) if read_local_details else local_payload

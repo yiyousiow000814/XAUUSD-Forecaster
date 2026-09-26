@@ -128,37 +128,14 @@
         "tests/fixtures/dashboard_news_fixtures.py"
       ]
     },
-    "clock-transaction": {
-      "files": [
-        "scripts/runtime/run_forward_collector.py",
-        "xauusd_forecaster/decision/engine.py",
-        "xauusd_forecaster/clock_commit.py",
-        "xauusd_forecaster/clock_recovery.py",
-        "xauusd_forecaster/u5_state.py",
-        "xauusd_forecaster/decision/collector_runtime.py"
-      ],
-      "roots": [
-        "xauusd_forecaster/decision/collector_runtime.py::append_due_grid_events",
-        "xauusd_forecaster/decision/engine.py::ForwardEngine.append_clock_event",
-        "xauusd_forecaster/clock_commit.py::read_completed_clock"
-      ],
-      "tests": [
-        "tests/evidence/test_clock_atomicity.py",
-        "tests/evidence/test_clock_recovery.py",
-        "tests/decision/test_market_session.py"
-      ]
-    },
     "source-first-ack": {
       "files": [
         "scripts/runtime/run_dashboard_sync.py",
         "xauusd_forecaster/dashboard/resource_contracts.py",
         "xauusd_forecaster/dashboard/sync/transport.py",
-        "xauusd_forecaster/dashboard/learning_resources.py",
         "xauusd_forecaster/dashboard/sync/resources.py"
       ],
       "roots": [
-        "xauusd_forecaster/dashboard/sync/resources.py::_sync_learning_summary",
-        "xauusd_forecaster/dashboard/sync/resources.py::_sync_learning_history",
         "xauusd_forecaster/dashboard/sync/resources.py::_sync_market",
         "xauusd_forecaster/dashboard/sync/resources.py::_sync_market_history",
         "xauusd_forecaster/dashboard/sync/resources.py::_sync_operator_retries",

@@ -83,8 +83,6 @@ sourceDatabase.database.prepare(
 const routes = [
   ["/api/status"],
   ["/api/audit"],
-  ["/api/learning"],
-  ["/api/learning-history?resource=model&limit=6"],
   ["/api/market-chart"],
   ["/api/market-history?range=24&identity=BROAD_FULL&frequency=30m"],
   ["/api/news-evidence?mode=all&page=1&limit=20"],

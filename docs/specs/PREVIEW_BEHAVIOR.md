@@ -32,7 +32,7 @@ the Preview is frozen.
 
 A Preview may read bounded current public production data when realistic or
 fresh verification requires it. Suitable examples include current status
-metrics, bounded D1 archive totals, public learning summaries, bounded
+metrics, bounded D1 archive totals, bounded
 histories, and news data.
 
 These reads may refresh while visible when their feature requires freshness.
@@ -119,11 +119,11 @@ product requirement.
 
 ## Current resource behavior
 
-- Status and public learning summaries prefer current read-only D1 and fall back
+- Status prefers current read-only D1 and fall back
   to their immutable build snapshots. Machine-readable field provenance marks
   the status keys that remain branch build snapshots; factor coverage is the
   current branch-recomputed example.
-- The build captures audit briefs, storylines, decisions, and news evidence from
+- The build captures audit briefs, storylines, and news evidence from
   their independently owned public resources. While Stable predates those split
   audit routes, the builder may project only the matching fields from the legacy
   public audit snapshot and labels that resource as a compatibility source.
@@ -136,10 +136,7 @@ product requirement.
   The build and route use the same detail validator as the browser. A coverage
   snapshot's displayed time belongs to the branch snapshot, not a later live
   status heartbeat.
-- Recent decisions and the Live OOS model-group summary retain real zero values.
-  If no authoritative public source exists, the fields are omitted and their
-  per-resource provenance reports `UNAVAILABLE_IN_BUILD_SNAPSHOT`; presentation
-  must not turn that state into `0` or an actionable drill-down.
+- Retired model resources are absent from both the build snapshot and routes.
 - The bounded operational-health event set is retained in the build snapshot so
   server rendering and hydration use the same first-paint incident evidence
   before the allowed current status refresh completes.

@@ -3,18 +3,16 @@
 ## Data path
 
 The existing dashboard mirror heartbeat remains approximately 30 seconds and
-keeps audit, learning, news, and history cadences independent. An explicit,
-separately gated Windows publisher projects one compact `PUBLIC_LIVE_V1` state
+keeps audit, news, and candle-history cadences independent. An explicit,
+separately gated Windows publisher projects one compact `PUBLIC_LIVE_V2` state
 at approximately 30-second cadence and publishes it to the isolated
 `aurum-live-broadcast` Worker. `LiveHub` stores one latest snapshot
 and fans it out through hibernating WebSockets. Browsers merge that state into
 the shared `/api/status` cache used by all public views.
 
-This service is separate because adding a first Durable Object lifecycle to
-`aurum-signal-room` would couple a one-time platform mutation to the existing
-immutable Candidate flow. The website can therefore continue its normal
-`wrangler versions upload` and Promote process, while broadcast bootstrap is a
-coordinated one-time operation in its own control plane.
+This service isolates the Durable Object lifecycle and delivery failures from
+the website. Both releases follow [Release Control](../contracts/RELEASE_CONTROL.md).
+A website build alone does not activate the separate broadcast service.
 
 ## Lifecycle configuration decision
 

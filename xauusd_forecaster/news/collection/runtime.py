@@ -8,9 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from xauusd_forecaster.decision.engine import ForwardEngine
+from xauusd_forecaster.news.collection.intake import collect_official_news
 from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.market import NullMarketProvider
 
 
 UTC = timezone.utc
@@ -19,7 +18,7 @@ NewsCollector = Callable[[ForwardLedger, datetime], NewsStatus]
 
 
 def _collect_official_news(ledger: ForwardLedger, observed_at: datetime) -> NewsStatus:
-    return ForwardEngine(ledger, NullMarketProvider()).collect_news(observed_at)
+    return collect_official_news(ledger, observed_at)
 
 
 class NewsCollectionOwner:

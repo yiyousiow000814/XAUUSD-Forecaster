@@ -9,25 +9,8 @@ import {
 } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { effectiveQuoteAgeSeconds } from "../_lib/live-broadcast";
-import { formatExactCount } from "../_lib/count-format";
 import { quoteBridgePresentation } from "../_lib/quote-bridge-state";
 import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
-
-type Decision = {
-  decision_time: string;
-  effective_action: string;
-  research_action?: string | null;
-  research_status?: string | null;
-  data_health: string;
-  bid: number | null;
-  ask: number | null;
-  spread: number | null;
-  outcome_status?: string | null;
-  outcome_reason_codes?: string[];
-  long_return?: number | null;
-  short_return?: number | null;
-  features?: Record<string, number | null>;
-};
 
 type Payload = {
   preview_status_summary?: boolean;
@@ -47,62 +30,14 @@ type Payload = {
     };
   };
   operational_health?: { status: "HEALTHY" | "WARNING" | "ERROR" };
-  news_input_coverage?: {
-    state: "AVAILABLE" | "DEGRADED" | "QUIET" | "UNAVAILABLE";
-    usable_core_event_count: number;
-    usable_broad_event_count: number;
-    unresolved_annotation_count: number;
-    unresolved_impact_count: number;
-    recovering_count: number;
-    terminal_or_overdue_count: number;
-  } | null;
-  latest: Decision & {
-    source_event_time: string;
-    source_received_time: string;
-    u5: number | null;
-    u5_status: string;
-    reason_codes: string[];
-  };
-  research_forecast: {
-    model_identity: string;
-    model_version: string;
-    recommended_action: "LONG" | "SHORT" | "WAIT";
-    prediction_status: string;
-    ev_long_u5: number | null;
-    ev_short_u5: number | null;
-    interval_width: number | null;
-    decision_time: string;
-    signal_expiry_seconds: number;
-    forecast_horizon_seconds: number;
-    directional_bias: "LONG" | "SHORT" | "NEUTRAL";
-    frozen_record: boolean;
-  } | null;
-  u5_context: { percentile: number | null; samples: number; label: string };
+  latest: { bid: number; ask: number; spread: number; source_received_time: string } | null;
   counts: Record<string, number>;
   news_metrics?: NewsMetrics;
-  outcome_summary: {
-    samples: number;
-    avg_long: number | null;
-    avg_short: number | null;
-    avg_coverage: number | null;
-  };
-  recent_decisions: Decision[];
   sources: Record<string, string>;
 };
 
 const fmt = (value: number | null | undefined, digits = 2) =>
   value === null || value === undefined ? "—" : value.toFixed(digits);
-
-const percent = (value: number | null | undefined) =>
-  value === null || value === undefined ? "—" : `${(value * 100).toFixed(3)}%`;
-
-const signedPercent = (value: number | null | undefined) => {
-  if (value === null || value === undefined) return "—";
-  const rendered = `${Math.abs(value * 100).toFixed(3)}%`;
-  if (value > 0) return `+${rendered}`;
-  if (value < 0) return `−${rendered}`;
-  return `±${rendered}`;
-};
 
 const localTime = (value?: string) =>
   value
@@ -116,16 +51,6 @@ const localTime = (value?: string) =>
         timeZone: "Asia/Kuala_Lumpur",
       }).format(new Date(value))
     : "—";
-
-const countdown = (seconds: number) => {
-  const safe = Math.max(0, Math.floor(seconds));
-  const hours = Math.floor(safe / 3600);
-  const minutes = Math.floor((safe % 3600) / 60);
-  const remainingSeconds = safe % 60;
-  return [hours, minutes, remainingSeconds]
-    .map((value) => value.toString().padStart(2, "0"))
-    .join(":");
-};
 
 export default function LiveRoomView() {
   const cachedStatus = readDashboardResource<Payload>("/api/status");
@@ -179,78 +104,12 @@ export default function LiveRoomView() {
     (payload?.system.market_session === "CLOSED" ||
       payload?.system.market_session === "WEEKLY_CLOSED") && !error
   );
-  const marketUnavailable = Boolean(payload && !online && !marketClosed);
   const mid = latest?.bid && latest.ask ? (latest.bid + latest.ask) / 2 : null;
-  const u5Percent = latest?.u5 == null ? null : Math.expm1(latest.u5) * 100;
-  const u5Dollars = latest?.u5 == null || mid == null ? null : Math.expm1(latest.u5) * mid;
-  const decisions = [...(payload?.recent_decisions ?? [])].reverse();
-  const forecast = payload?.research_forecast;
-  const forecastAction = forecast?.recommended_action ?? "WAIT";
-  const riskPercentile = payload?.u5_context.percentile ?? 0;
-  const forecastAge = forecast?.decision_time
-    ? Math.max(0, Math.floor((now - new Date(forecast.decision_time).getTime()) / 1_000))
-    : null;
-  const signalExpiry = forecast?.signal_expiry_seconds ?? 20;
-  const horizon = forecast?.forecast_horizon_seconds ?? 1_800;
-  const signalRemaining = forecastAge === null ? 0 : Math.max(0, signalExpiry - forecastAge);
-  const horizonRemaining = forecastAge === null ? 0 : Math.max(0, horizon - forecastAge);
-  const horizonMinutes = Math.floor(horizonRemaining / 60);
-  const reopenSeconds = payload?.system.market_reopens_at
-    ? Math.max(0, (new Date(payload.system.market_reopens_at).getTime() - now) / 1_000)
-    : null;
-  const forecastStatus = marketClosed
-    ? reopenSeconds === null
-      ? "等待 cTrader 提供重开时间"
-      : `距离重开 ${countdown(reopenSeconds)}`
-    : loading
-      ? "读取中…"
-      : error
-        ? "数据服务暂不可用"
-        : !online
-          ? "等待行情恢复"
-          : forecastAge === null
-            ? "等待最新预测"
-            : signalRemaining > 0
-              ? `可参考 · ${signalRemaining}秒`
-              : horizonRemaining > 0
-                ? `观察中 · 剩${horizonMinutes}分钟`
-                : "本轮已结束";
-  const dialState = marketClosed
-    ? "closed"
-    : marketUnavailable
-      ? "unavailable"
-      : forecastAction.toLowerCase();
-  const dialAction = marketClosed
-    ? "休市"
-    : marketUnavailable
-      ? "无行情"
-      : forecastAction;
   const newsMetrics = resolveNewsMetrics(payload);
   const quoteBridge = quoteBridgePresentation(
     payload?.system.components?.quote_bridge?.status,
     payload?.system.market_session,
   );
-  const newsCoverage = payload?.news_input_coverage;
-  const newsCoverageCopy = !newsCoverage
-    ? {
-        label: "新闻覆盖：等待新版本决策快照",
-        detail: payload?.preview_status_summary
-          ? "Preview 保留合并前的生产快照，不推测历史输入状态"
-          : "等待下一轮决策生成覆盖快照",
-      }
-    : newsCoverage.state === "AVAILABLE"
-      ? { label: "新闻覆盖：可用", detail: `本轮使用 ${formatExactCount(newsCoverage.usable_broad_event_count)} 个决策时可见事件` }
-      : newsCoverage.state === "DEGRADED"
-        ? {
-            label: "新闻覆盖：降级",
-            detail: newsCoverage.recovering_count > 0
-              ? `${formatExactCount(newsCoverage.recovering_count)} 条复核正在自动重试；当前预测仅使用决策时已完成的新闻证据`
-              : "部分新闻链路不完整；当前预测仅使用决策时已完成的新闻证据",
-          }
-        : newsCoverage.state === "QUIET"
-          ? { label: "当前无符合条件的新闻", detail: "新闻系统运行正常" }
-          : { label: "新闻输入不可用", detail: "综合新闻模型暂不出方向；Market-only 仍独立评估" };
-
   return (
     <main>
       <section className="hero">
@@ -269,17 +128,6 @@ export default function LiveRoomView() {
           </div>
         </div>
 
-        <div className="decision-dial">
-          <span className="dial-label">30分钟预测</span>
-          <div className={`action action-${dialState}`}>
-            {dialAction}
-          </div>
-          {forecastStatus && (marketClosed || marketUnavailable || (signalRemaining > 0 && online)) && <strong className="forecast-state is-current">{forecastStatus}</strong>}
-          <div className={`news-coverage-state is-${newsCoverage?.state.toLowerCase() ?? "pending"}`}>
-            <strong>{newsCoverageCopy.label}</strong>
-            <small>{newsCoverageCopy.detail}</small>
-          </div>
-        </div>
       </section>
 
       {error && <div className="error-banner">{error}。行情采集可能仍在运行，但网页数据服务已停止。</div>}
@@ -287,74 +135,17 @@ export default function LiveRoomView() {
       <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
 
       <section className="metric-grid">
-        <article>
-          <span>DATA HEALTH</span>
-          <strong className={marketClosed || latest?.data_health === "OK" ? "good" : "warn"}>
-            {marketClosed ? "休市" : latest?.data_health ?? "—"}
-          </strong>
-          <small className="metric-detail metric-detail-time"><span>{marketClosed ? "最后预测" : "最新决策"}</span><time>{localTime(latest?.decision_time)}</time></small>
-        </article>
-        <article>
-          <span>DECISIONS</span>
-          <strong><MetricValue phase={currentPhase}><CountValue value={payload?.counts.decision_events} /></MetricValue></strong>
-          <small className="metric-detail">Forward Epoch 起</small>
-        </article>
-        <article>
-          <span>30M OUTCOMES</span>
-          <strong><MetricValue phase={currentPhase}><CountValue value={payload?.counts.outcomes} /></MetricValue></strong>
-          <small><CountValue value={payload?.outcome_summary.samples} format="exact" suffix=" 个有效样本" /></small>
-        </article>
+        <article><span>MARKET STATUS</span><strong>{marketClosed ? "休市" : online ? "行情在线" : "行情暂不可用"}</strong><small>{localTime(latest?.source_received_time)}</small></article>
+        <article><span>CURRENT NEWS EVENTS</span><strong>新闻事件</strong><a href="/audit?view=evidence">当前可用新闻事件 ↗</a></article>
+        <article><span>NEWS &amp; STORIES</span><strong>新闻与脉络</strong><a href="/audit?view=stories">查看事件脉络 ↗</a></article>
         <article>
           <span>NEWS ARTICLES</span>
           <strong><MetricValue phase={currentPhase}><CountValue value={newsMetrics.articles.received} /></MetricValue></strong>
-          <small className="metric-detail metric-detail-stack"><CountValue value={newsMetrics.events.independent} format="exact" suffix=" 个独立事件" /><CountValue value={newsMetrics.articles.stored_revisions} format="exact" suffix=" 个保存版本" /></small>
+          <small className="metric-detail metric-detail-stack"><CountValue value={newsMetrics.articles.stored_revisions} format="exact" suffix=" 个保存版本" /></small>
         </article>
       </section>
 
-      <section className="workspace-grid">
-        <article className="panel timeline-panel">
-          <div className="panel-head">
-            <div><span>RESEARCH FORECAST LEDGER · 非下单动作</span><h2>最近90分钟</h2></div>
-            <button type="button" onClick={refresh} disabled={refreshing}>
-              {refreshing ? "同步中" : "刷新"}
-            </button>
-          </div>
-          <div className="timeline">
-            {decisions.map((row) => (
-              <div className="tick" key={row.decision_time}>
-                <span className={`health-dot ${row.data_health === "OK" ? "ok" : "bad"}`} />
-                <time>{localTime(row.decision_time).slice(-8, -3)}</time>
-                <b title={`安全基准动作 ${row.effective_action}`}>{row.research_action ?? row.effective_action}</b>
-                <span>{fmt(row.bid)} / {fmt(row.ask)}</span>
-                <em title={row.outcome_status === "VALID" ? "30分钟结果已计算" : row.outcome_status ? `样本已隔离，不进入训练：${row.outcome_reason_codes?.join(" · ") || "报价证据无效"}` : "预测已记录，等待未来30分钟走完后计算结果"}>{row.outcome_status === "VALID" ? "30分钟结果 ✓" : row.outcome_status ? "无效样本 · 已隔离" : "等待30分钟结果"}</em>
-              </div>
-            ))}
-          </div>
-        </article>
-
-        <article className="panel factor-panel">
-          <div className="panel-head"><div><span>MARKET STATE</span><h2>黄金自身确认</h2></div></div>
-          <Factor label="1分钟" value={latest?.features?.return_1m} />
-          <Factor label="5分钟" value={latest?.features?.return_5m} />
-          <Factor label="15分钟" value={latest?.features?.return_15m} />
-          <Factor label="30分钟" value={latest?.features?.return_30m} />
-          <div className="factor-footer">
-            <span><b>30分钟波动风险</b><small>相对本系统历史</small></span>
-            <strong>{payload?.u5_context.label ?? "等待样本"}<small>{u5Percent === null ? "—" : `约 ±${u5Percent.toFixed(2)}% · ±$${u5Dollars?.toFixed(1)}`}</small></strong>
-            <em>{riskPercentile.toFixed(0)} / 100</em>
-            <div className="risk-scale" aria-label={`历史波动分位 ${riskPercentile.toFixed(0)} / 100`}><i style={{ left: `${Math.min(100, Math.max(0, riskPercentile))}%` }} /></div>
-            <p>箭头表示它在已收集 {formatExactCount(payload?.u5_context.samples)} 个样本中的波动分位；越靠红色，未来30分钟通常波动越剧烈。它不是亏损概率，也不代表方向。</p>
-          </div>
-        </article>
-
-        <article className="panel evidence-panel">
-          <div className="panel-head"><div><span>EVIDENCE</span><h2>Forward 学习状态</h2></div></div>
-          <div className="evidence-stat"><span>平均 Long</span><b>{percent(payload?.outcome_summary.avg_long)}</b></div>
-          <div className="evidence-stat"><span>平均 Short</span><b>{percent(payload?.outcome_summary.avg_short)}</b></div>
-          <div className="evidence-stat"><span>报价覆盖率</span><b>{percent(payload?.outcome_summary.avg_coverage)}</b></div>
-          <p>样本不足时不训练、不晋升，也不会把 WAIT 当作失败。</p>
-        </article>
-
+      <section className="workspace-grid news-workspace">
         <article className="panel source-panel">
           <div className="panel-head"><div><span>SOURCE HEALTH</span><h2>数据链路</h2></div></div>
           <Source name="cTrader XAUUSD · 本机 Algo" state={quoteBridge.label} good={quoteBridge.good} />
@@ -367,22 +158,9 @@ export default function LiveRoomView() {
       <footer>
         <span>FORWARD EPOCH {localTime(payload?.forward_epoch)}</span>
         <span>LAST SYNC {localTime(payload?.generated_at)}</span>
-        <span>SHADOW / NO ORDER AUTHORITY</span>
+        <span>NEWS & MARKET OBSERVATION</span>
       </footer>
     </main>
-  );
-}
-
-function Factor({ label, value }: { label: string; value?: number | null }) {
-  const magnitude = Math.min(100, Math.abs(value ?? 0) * 25_000);
-  const direction = value === null || value === undefined ? "neutral" : value > 0 ? "up" : value < 0 ? "down" : "flat";
-  const directionLabel = direction === "up" ? "▲ 上涨" : direction === "down" ? "▼ 下跌" : direction === "flat" ? "— 持平" : "— 暂无";
-  return (
-    <div className="factor">
-      <span>{label}</span>
-      <div><i className={direction} style={{ width: `${magnitude}%` }} /></div>
-      <b className={direction}><small>{directionLabel}</small>{signedPercent(value)}</b>
-    </div>
   );
 }
 

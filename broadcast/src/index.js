@@ -32,7 +32,9 @@ export async function acceptSubscriber(ctx, pairFactory = () => new WebSocketPai
   const [client, server] = Object.values(pair);
   ctx.acceptWebSocket(server);
   const latest = await ctx.storage.get(LATEST_KEY);
-  if (latest) server.send(JSON.stringify({ type: "FULL_STATE", state: latest }));
+  let valid = false;
+  try { if (latest) { validateLiveState(latest); valid = true; } } catch {}
+  if (valid) server.send(JSON.stringify({ type: "FULL_STATE", state: latest }));
   return client;
 }
 
@@ -80,8 +82,8 @@ export class LiveHub {
       if (latest && state.sequence <= latest.sequence) {
         return json({ error: "stale sequence", latest_sequence: latest.sequence }, 409);
       }
-      const message = latest
-        ? { type: "STATE_UPDATE", sequence: state.sequence, state: stateUpdate(latest, state) }
+      const message = latest?.schema_version === LIVE_SCHEMA_VERSION
+        ? { type: "STATE_UPDATE", sequence: state.sequence, state: stateUpdate(state) }
         : { type: "FULL_STATE", state };
       const publishedAt = new Date().toISOString();
       await this.ctx.storage.put({

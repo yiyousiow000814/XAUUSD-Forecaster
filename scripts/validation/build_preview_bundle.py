@@ -122,30 +122,6 @@ def _legacy_resource(
     )
 
 
-def _live_oos_model_groups(learning: dict) -> int | None:
-    curves = learning.get("learning_curves")
-    if not isinstance(curves, dict):
-        return None
-    models = curves.get("models")
-    if isinstance(models, list):
-        return len({
-            str(row.get("model_identity"))
-            for row in models
-            if isinstance(row, dict) and row.get("model_identity")
-            and (
-                row.get("active_rank") is not None
-                or row.get("lifecycle_status") == "LATEST"
-            )
-        })
-    version_groups = curves.get("version_groups")
-    if isinstance(version_groups, list):
-        return len({
-            str(row.get("model_identity"))
-            for row in version_groups
-            if isinstance(row, dict) and row.get("model_identity")
-            and row.get("lifecycle_status") == "LATEST"
-        })
-    return None
 
 
 def _apply_branch_runtime_contract(status: dict) -> None:
@@ -366,7 +342,6 @@ def _read_completed_news_index(base_url: str) -> dict:
 def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     source_status = _read_json(base_url, "/api/status")
     source_audit = _read_json(base_url, "/api/audit")
-    learning = _read_json(base_url, "/api/learning")
     market_chart = _read_json(base_url, "/api/market-chart")
     market_chart["history_resource"] = "/api/market-history"
     news_index = _read_completed_news_index(base_url)
@@ -392,39 +367,7 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
             ("storylines", "storyline_summary"),
             dashboard_payloads.audit_stories_payload,
         )
-    audit_decisions, resources["audit_decisions"] = _read_optional_json(
-        base_url, "/api/audit-decisions",
-    )
-    if audit_decisions is None:
-        audit_decisions, resources["audit_decisions"] = _legacy_resource(
-            "/api/audit-decisions", source_audit,
-            ("recent_decisions",),
-            lambda value: dashboard_payloads.audit_decisions_payload(
-                value, decision_limit=resource_contracts.REMOTE_DECISION_LIMIT,
-            ),
-        )
-
     status = dict(source_status)
-    if isinstance(source_status.get("recent_decisions"), list):
-        resources["recent_decisions"] = _resource_evidence(
-            "/api/status", available=True, source="/api/status",
-        )
-    elif audit_decisions is not None and isinstance(
-        audit_decisions.get("recent_decisions"), list,
-    ):
-        status["recent_decisions"] = audit_decisions["recent_decisions"][
-            :PREVIEW_RECENT_DECISION_LIMIT
-        ]
-        resources["recent_decisions"] = {
-            **resources["audit_decisions"],
-            "requested_path": "/api/status#recent_decisions",
-        }
-    else:
-        status.pop("recent_decisions", None)
-        resources["recent_decisions"] = _resource_evidence(
-            "/api/status#recent_decisions", available=False,
-            reason="NO_AUTHORITATIVE_PUBLIC_SOURCE",
-        )
 
     news_source, resources["news_evidence"] = _read_optional_json(
         base_url, f"/api/news-evidence?limit={PREVIEW_NEWS_PAGE_SIZE}",
@@ -440,29 +383,6 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
         if news_source is not None else None
     )
 
-    counts = status.setdefault("counts", {})
-    live_oos_groups = counts.get("live_oos_model_groups")
-    if not isinstance(live_oos_groups, int):
-        live_oos_groups = _live_oos_model_groups(learning)
-        if live_oos_groups is not None:
-            counts["live_oos_model_groups"] = live_oos_groups
-            resources["live_oos_summary"] = _resource_evidence(
-                "/api/status#counts.live_oos_model_groups", available=True,
-                source="/api/learning", compatibility=True,
-                reason="DERIVED_FROM_BOUNDED_LEARNING_SUMMARY",
-            )
-        else:
-            counts.pop("live_oos_model_groups", None)
-            resources["live_oos_summary"] = _resource_evidence(
-                "/api/status#counts.live_oos_model_groups", available=False,
-                reason="NO_AUTHORITATIVE_PUBLIC_SOURCE",
-            )
-    else:
-        resources["live_oos_summary"] = _resource_evidence(
-            "/api/status#counts.live_oos_model_groups", available=True,
-            source="/api/status",
-        )
-
     _apply_branch_runtime_contract(status)
 
     status["factor_coverage"] = _rebuild_factor_coverage(status)
@@ -472,10 +392,6 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
         "/api/audit", available=True, source="/api/audit",
     )
     status = json.loads(resource_contracts.remote_snapshot(status))
-    if resources["recent_decisions"]["availability"] == UNAVAILABLE_IN_BUILD_SNAPSHOT:
-        status.pop("recent_decisions", None)
-    if resources["live_oos_summary"]["availability"] == UNAVAILABLE_IN_BUILD_SNAPSHOT:
-        status.get("counts", {}).pop("live_oos_model_groups", None)
     status["preview"] = {
         "is_preview": True,
         "branch": branch,
@@ -500,7 +416,6 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     for name, payload in (
         ("audit_briefs", audit_briefs),
         ("audit_stories", audit_stories),
-        ("audit_decisions", audit_decisions),
     ):
         if payload is not None:
             payload["preview_resource"] = resources[name]
@@ -519,19 +434,15 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
 
     # Graphs use branch-side range queries against read-only D1. Compact build
     # summaries are retained only for non-chart first paint and list metadata.
-    learning_history = resource_contracts.learning_history_records(learning)
 
     return {
         "status": status,
         "audit": audit,
         "audit_briefs": audit_briefs,
         "audit_stories": audit_stories,
-        "audit_decisions": audit_decisions,
-        "learning": learning,
         # Production's public learning payload is already compressed. Wider
         # spacing there is not proof of a source-data gap, so Preview must not
         # infer dashed segments from it.
-        "learning_history": learning_history,
         "market_chart": market_chart,
         "news_index": news_index,
         "news_evidence": news_evidence,

@@ -276,7 +276,7 @@ test('broken generated index cannot silently become an empty or declared-success
   const index = currentIndex();
   assert.throws(() => projectCurrentSource({}), /ARCHITECTURE_CURRENT_SOURCE_INVALID/);
   const shaped = structuredClone(index);
-  shaped.allowed.views['clock-transaction'].roots[0] = 'missing::symbol';
+  shaped.allowed.views['source-first-ack'].roots[0] = 'missing::symbol';
   assert.throws(() => projectCurrentSource(shaped), /ARCHITECTURE_ROOT_UNRESOLVED/);
   for (const corrupt of [
     value => { value.observed.symbols[0].line = 0; },
@@ -321,7 +321,7 @@ test('source evidence reaches node and call inspectors without manufacturing exe
 
 test('visible reference groups retain every source site without inventing flows or leaking disclosure', () => {
   const manifest = parseArchitectureManifest(projectCurrentSource(currentIndex()).manifest);
-  const original = buildArchitectureGraph(manifest, 'clock-transaction');
+  const original = buildArchitectureGraph(manifest, 'source-first-ack');
   const first = original.edges[0];
   const graph = { ...original, edges: [first,
     { ...first, id: 'second-source-site' },

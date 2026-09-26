@@ -14,53 +14,19 @@ import { PREVIEW_NEWS_PAGE_SIZE } from "../_lib/preview-manifest";
 import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
 import { authoritativeNewsTotals, type NewsTotalsScope } from "../_lib/news-index-contract";
 import type { NewsReviewState } from "../_lib/news-review-state";
-import { formatExactCount, progressCountPresentation } from "../_lib/count-format";
+import { formatExactCount } from "../_lib/count-format";
 import { publicImpactReason, publicBriefText } from "../_lib/public-news-copy";
 import { validAuditDetailPayload } from "../_lib/audit-detail-contract";
 import { sortNewsEvidenceByTime } from "../_lib/news-evidence-order";
-import type { VersionEvaluationStatus } from "../_lib/version-result-state";
-import LearningGraphModal from "../audit/LearningGraphModal";
 
 declare const __AURUM_DEPLOYMENT__: { is_preview: boolean };
 
-type Prediction = {
-  model_identity: string;
-  model_version: string;
-  predicted_direction_u5: number | null;
-  predicted_news_residual_u5: number | null;
-  ev_long_u5: number | null;
-  ev_short_u5: number | null;
-  uncertainty_u5: number | null;
-  recommended_action: string;
-  effective_action: string;
-  prediction_status: string;
-};
-
 type AuditDeskView = AuditViewName;
-type AuditDetailView = "briefs" | "stories" | "decisions";
+type AuditDetailView = "briefs" | "stories";
 
 const AUDIT_DETAIL_RESOURCES: Record<AuditDetailView, string> = {
   briefs: "/api/audit-briefs",
   stories: "/api/audit-stories",
-  decisions: "/api/audit-decisions",
-};
-
-type Decision = {
-  decision_id: string;
-  decision_time: string;
-  effective_action: string;
-  research_action?: string | null;
-  research_status?: string | null;
-  data_health: string;
-  bid: number | null;
-  ask: number | null;
-  outcome_status: string | null;
-  outcome_reason_codes: string[];
-  long_return: number | null;
-  short_return: number | null;
-  long_mfe: number | null;
-  long_mae: number | null;
-  predictions: Prediction[];
 };
 
 type News = {
@@ -180,71 +146,6 @@ type EventCandidate = { candidate_id: string; episode_key: string; headline: str
 type MarketReactionStream = { stream_id: string; title: string; item_count: number; last_updated: string; latest_headline: string; model_permission: "DISPLAY_ONLY" };
 type UnassignedStoryEvent = { event_key: string; headline: string; first_seen: string; record_kind: string; reason: string };
 
-type LearningModel = {
-  model_version: string;
-  model_identity: string;
-  model_stage: string;
-  training_rows: number;
-  training_cutoff: string;
-  subsequent_oos_rows: number;
-  effective_blocks: number;
-  distinct_days: number;
-  cumulative_quote_return: number;
-  average_quote_return: number | null;
-  profit_factor_quote_adjusted: number | null;
-  max_drawdown_quote_return: number;
-  sharpe_quote_adjusted: number | null;
-  interval_width: number | null;
-  calibration_status: string;
-  wait_rate: number | null;
-  coverage_rate: number | null;
-  average_oracle_regret: number | null;
-  wait_opportunity_cost: number;
-  long_frequency: number;
-  short_frequency: number;
-  active_rank: number | null;
-  lifecycle_status: "LATEST" | "PREVIOUS" | "ARCHIVED";
-  news_event_days: number;
-  news_evidence_status: string;
-};
-type NewsModelActivation = {
-  model_identity: string;
-  status: "ACTIVE" | "LEGACY_ACTIVE" | "GENERATION_WAIT" | "NOT_TRAINED" | "POLICY_MISMATCH" | "ARTIFACT_UNAVAILABLE";
-  reason: string;
-  model_version: string | null;
-  actual_feature_version: string | null;
-  actual_eligibility_version: string | null;
-  expected_feature_version: string;
-  expected_eligibility_version: string;
-};
-
-type RollingProcess = {
-  model_identity: string;
-  history_cutoff?: string | null;
-  active_model_versions: string[];
-  oos_rows: number;
-  distinct_days: number;
-  cumulative_quote_return: number;
-  average_quote_return: number | null;
-  profit_factor_quote_adjusted: number | null;
-  max_drawdown_quote_return: number;
-  sharpe_quote_adjusted: number | null;
-  calibration_status: string;
-  cadence_metrics?: Record<EvaluationCadence, CadenceMetric>;
-};
-type VersionGroup = {
-  model_identity: string; training_dataset_hash: string; generation: number;
-  lifecycle_status: "LATEST" | "PREVIOUS" | "ARCHIVED"; created_at: string;
-  latest_rebuild_at: string; training_rows: number; artifact_rebuilds: number;
-  model_versions: string[]; subsequent_oos_rows: number; distinct_days: number;
-  subsequent_prediction_rows?: number; unscored_oos_rows?: number; overdue_oos_rows?: number;
-  evaluation_status?: VersionEvaluationStatus;
-  cumulative_quote_return: number; profit_factor_quote_adjusted: number | null;
-  coverage_rate: number | null; average_oracle_regret: number | null;
-  cadence_metrics?: Record<EvaluationCadence, CadenceMetric>;
-};
-type EvaluationCadence = "EVERY_5M" | "FIXED_30M";
-type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote_return: number; profit_factor_quote_adjusted: number | null; coverage_rate: number | null; prediction_rows?: number; unscored_oos_rows?: number; overdue_oos_rows?: number; evaluation_status?: VersionEvaluationStatus };
 type DailyBriefPhase = "WAITING" | "UPDATING" | "DEFERRED" | "FINAL" | "DEGRADED" | "EMPTY";
 type DailyNewsBrief = { brief_date: string; revision_number: number; cutoff_at: string; generated_at: string; model_version: string; prompt_version: string; phase?: DailyBriefPhase; received_items?: number; reviewed_items?: number; pending_items?: number; terminal_failure_items?: number; next_retry_at?: string | null; finalized_at?: string | null; brief: { title: string; overview?: string; drivers?: string[]; watch_next?: string; items: Array<{ headline: string; summary: string; evidence_ids: string[] }> } };
 type DailyNewsBriefSummary = { brief_date: string; phase: DailyBriefPhase; received_items: number | null; reviewed_items: number | null; pending_items: number | null; terminal_failure_items: number | null; latest_revision: number | null; last_generated_at: string | null; next_retry_at: string | null; is_final: boolean; total_brief_days: number | null; observation_scope?: "BUILD_SNAPSHOT_COMPATIBILITY" };
@@ -284,12 +185,6 @@ type Payload = {
       compatibility_fallback?: boolean;
     }>;
   };
-  learning_preview_summary?: boolean;
-  learning_history_resource?: string;
-  learning_history_manifest?: {
-    contract_version: string; model_total: number;
-    version_group_total: number; record_total: number;
-  };
   generated_at: string;
   system?: { online: boolean; market_session?: "OPEN" | "CLOSED" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE"; source_of_truth: string; sites_mirror: string; deployment?: { runtime_git_sha: string | null; expected_git_sha: string | null; runtime_dirty: boolean; status: string; storyline_policy_version: string; payload_schema_version: string; payload_generated_at: string; source_database_epoch: string | null } };
   operational_health?: { status: "HEALTHY" | "WARNING" | "ERROR" };
@@ -313,7 +208,6 @@ type Payload = {
   audit_resource?: string;
   audit_briefs_resource?: string;
   audit_stories_resource?: string;
-  audit_decisions_resource?: string;
   news_evidence_resource?: string;
   news_evidence_summary: {
     policy_version: string;
@@ -343,69 +237,7 @@ type Payload = {
   news_feature_policy: {
     maximum_current_age_hours: number;
     freshness_half_life_hours: number;
-    historical_training_rows_retained: boolean;
     point_in_time_cutoff: boolean;
-  };
-  recent_decisions: Decision[];
-  training: {
-    automatic: boolean;
-    minimum_rows: number;
-    retrain_interval: number;
-    eligible_rows: number;
-    complete_rows: number;
-    next_training_at: number;
-    champion_auto_promotion: boolean;
-    models: Array<{ model_identity: string; model_version: string; training_cutoff: string }>;
-  };
-  learning_curves: {
-    collection_epoch: string | null;
-    evaluation_epoch_v2: string | null;
-    legacy_engineering_rows: number;
-    repaired_seed_rows: number;
-    live_oos_rows: number;
-    raw_matured_rows: number;
-    effective_30m_blocks: number;
-    distinct_trading_days: number;
-    outcome_quality: { valid: number; invalid: number; reason_counts: Record<string, number> };
-    news_exposed_rows: number;
-    distinct_news_clusters: number;
-    learning_stage: string;
-    news_contract_transition?: {
-      current_contract_exposed_rows: number;
-      current_contract_distinct_events: number;
-      minimum_exposed_rows: number;
-      missing_exposed_rows: number;
-    };
-    current_preview_version: string | null;
-    current_shadow_version: string | null;
-    next_training_threshold: number;
-    training_generation_count: number;
-    training_run_count: number;
-    recovery_rebuild_count: number;
-    active_generation: null | { generation_id: string; training_cutoff: string; policy_version: string; weighting_version: string; member_count: number };
-    news_training_evidence: {
-      raw_article_revisions: number;
-      distinct_articles: number;
-      eligible_event_versions: number;
-      distinct_eligible_events: number;
-      decision_event_exposures: number;
-      active_generation_weights: Record<string, { decision_event_exposures: number; effective_event_count: number; maximum_event_weight_share: number | null; total_event_budget: number }>;
-    };
-    commission_status: string;
-    slippage_status: string;
-    models: LearningModel[];
-    version_groups: VersionGroup[];
-    rolling_processes: RollingProcess[];
-    news_model_activation: NewsModelActivation[];
-    identity_curves: Array<{ model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: Array<{ decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number }>; source_point_count_30m?: number; chart_point_count_30m?: number; chart_downsampled_30m?: boolean; points_30m?: Array<{ decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number }> }>;
-    zero_return_baseline: {
-      label: string;
-      model_identity: string;
-      cumulative_quote_return: number;
-      trained: boolean;
-      uses_ai: boolean;
-    };
-    disclaimer: string;
   };
   factor_coverage: Array<{
     domain: string;
@@ -418,34 +250,6 @@ type Payload = {
     observed_at?: string | null;
     unit?: string | null;
   }>;
-  market_chart: {
-    candles: Array<{ time: string; open: number; high: number; low: number; close: number; ticks?: number }>;
-    overview_candles?: Array<{ time: string; open: number; high: number; low: number; close: number; ticks?: number }>;
-    decisions: Array<{
-      source_decision_id: string;
-      decision_time: string;
-      exit_time: string;
-      model_identity: string;
-      recommended_action: string;
-      outcome_status: string;
-      predicted_direction_u5: number | null;
-      ev_long_u5: number | null;
-      ev_short_u5: number | null;
-      lcb_long_u5: number | null;
-      lcb_short_u5: number | null;
-    }>;
-    training_markers: Array<{ model_identity: string; training_dataset_hash: string; created_at: string; training_rows: number; artifact_count: number }>;
-    decision_resource?: string;
-    history_resource?: string;
-    history_start?: string | null;
-    history_end?: string | null;
-    detail_start?: string | null;
-    source_candle_count?: number;
-    overview_downsampled?: boolean;
-    prediction_history_start?: Record<string, string>;
-    source_decision_count?: number;
-    decision_downsampled?: boolean;
-  };
 };
 
 type NewsIndexResponse = {
@@ -504,14 +308,6 @@ const dailyBriefDateLabel = (phase?: DailyBriefPhase, isToday = false) => phase 
 const shortBriefDate = (value: string) => value.slice(5).replace("-", "/");
 const DAILY_BRIEF_VISIBLE_DATES = 4;
 const number = (value?: number | null, digits = 2) => value === null || value === undefined ? "—" : value.toFixed(digits);
-const percent = (value?: number | null) => value === null || value === undefined ? "—" : `${value >= 0 ? "+" : "−"}${Math.abs(value * 100).toFixed(3)}%`;
-const outcomeReason = (codes: string[]) => codes.some(code => code.includes("CLOCK_AHEAD"))
-  ? "服务器报价时钟与本机接收钟偏差过大，样本已隔离"
-  : codes.includes("NO_ENTRY_RECEIVED_WITHIN_EXPIRY")
-    ? "20秒有效期内没有收到可执行报价，样本已隔离"
-    : codes.includes("NO_EXIT_RECEIVED_AFTER_HORIZON")
-      ? "30分钟后没有收到退出报价，样本已隔离"
-      : "报价证据不完整，样本已隔离且不进入训练";
 const impulse = (value?: number | null) => value === null || value === undefined ? "—" : `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
 const NEWS_PER_PAGE = PREVIEW_NEWS_PAGE_SIZE;
 const EVIDENCE_PER_PAGE = 20;
@@ -567,13 +363,6 @@ const MODEL_LABELS: Record<string, string> = {
   BROAD_FULL: "黄金＋大视野新闻 Ridge",
   NEWS_ONLY: "纯新闻方向 Ridge",
 };
-function predictionStatusLabel(status: string): string {
-  if (status === "RESEARCH_RESIDUAL_DIRECTION") return "修正量自己的30分钟方向研究";
-  if (status === "DIAGNOSTIC_RESIDUAL_ONLY") return "历史版本仅保存修正值";
-  if (status === "RESEARCH_NEWS_ONLY") return "只看新闻的30分钟方向研究";
-  if (status === "NO_ELIGIBLE_NEWS") return "当前没有合格新闻";
-  return status;
-}
 const TOPIC_LABELS: Record<string, string> = {
   rates_fed: "利率 / Fed", inflation: "通胀", employment: "就业", inflation_employment: "通胀 / 就业",
   growth_economy: "增长 / 经济", usd_liquidity: "美元 / 流动性",
@@ -856,19 +645,17 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
   };
   const cachedAuditBriefs = detailSnapshot("briefs");
   const cachedAuditStories = detailSnapshot("stories");
-  const cachedAuditDecisions = detailSnapshot("decisions");
-  const cachedLearning = readDashboardResource<Partial<Payload>>("/api/learning");
   const cachedNewsIndex = readDashboardResource<NewsIndexResponse>(`/api/news-index?page=1&limit=${NEWS_PER_PAGE}&review_state=COMPLETED`);
   const [summaryPayload, setPayload] = useState<Payload | null>(() => cachedStatus
     ? ({
-        ...cachedStatus, ...cachedAudit, ...cachedLearning,
-        ...cachedAuditBriefs, ...cachedAuditStories, ...cachedAuditDecisions,
+        ...cachedStatus, ...cachedAudit,
+        ...cachedAuditBriefs, ...cachedAuditStories,
       } as Payload)
     : null);
-  const payload = useMemo(() => summaryPayload || cachedAudit || cachedLearning || cachedAuditBriefs || cachedAuditStories || cachedAuditDecisions
-    ? ({ ...summaryPayload, ...cachedAudit, ...cachedLearning,
-        ...cachedAuditBriefs, ...cachedAuditStories, ...cachedAuditDecisions } as Payload)
-    : null, [summaryPayload, cachedAudit, cachedLearning, cachedAuditBriefs, cachedAuditStories, cachedAuditDecisions]);
+  const payload = useMemo(() => summaryPayload || cachedAudit || cachedAuditBriefs || cachedAuditStories
+    ? ({ ...summaryPayload, ...cachedAudit,
+        ...cachedAuditBriefs, ...cachedAuditStories } as Payload)
+    : null, [summaryPayload, cachedAudit, cachedAuditBriefs, cachedAuditStories]);
   const [newsIndex, setNewsIndex] = useState<NewsIndexResponse>(() => (
     cachedNewsIndex ?? {
       items: [], total: 0, all_total: 0, category_counts: {}, page: 1,
@@ -880,19 +667,14 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
   const [statusState, setStatusState] = useState<CurrentDataPhase>(
     cachedStatus?.preview_status_summary ? "loading" : cachedStatus ? "ready" : "loading",
   );
-  const [learningState, setLearningState] = useState<CurrentDataPhase | "idle">(
-    cachedLearning?.learning_preview_summary ? "loading" : cachedLearning ? "ready" : "idle",
-  );
   const [auditDetailState, setAuditDetailState] = useState<Record<AuditDetailView, CurrentDataPhase | "idle">>({
     briefs: cachedAuditBriefs ? "ready" : "idle",
     stories: cachedAuditStories ? "ready" : "idle",
-    decisions: cachedAuditDecisions ? "ready" : "idle",
   });
   const [auditDetailError, setAuditDetailError] = useState<Record<AuditDetailView, string | null>>({
-    briefs: null, stories: null, decisions: null,
+    briefs: null, stories: null,
   });
   const [statusError, setStatusError] = useState<string | null>(null);
-  const [learningError, setLearningError] = useState<string | null>(null);
   const [auditError, setAuditError] = useState<string | null>(null);
   const [evidenceError, setEvidenceError] = useState<string | null>(null);
   const [newsError, setNewsError] = useState<string | null>(null);
@@ -948,15 +730,10 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     });
     return () => { cancelled = true; };
   }, [pageDetailKeys, view]);
-  const [graphOpen, setGraphOpen] = useState(false);
-  const [graphStartTab, setGraphStartTab] = useState<"curve">("curve");
   const fullStatusReadyRef = useRef(Boolean(cachedStatus && !cachedStatus.preview_status_summary));
-  const fullLearningReadyRef = useRef(Boolean(cachedLearning && !cachedLearning.learning_preview_summary));
   const fullNewsIndexReadyRef = useRef(Boolean(
     cachedNewsIndex && authoritativeNewsTotals(cachedNewsIndex),
   ));
-  const learningDataAvailableRef = useRef(Boolean(cachedLearning));
-  const learningFailureCountRef = useRef(0);
 
   useEffect(() => subscribeDashboardResource("/api/status", () => {
     const current = readDashboardResource<Payload>("/api/status");
@@ -967,7 +744,6 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     setStatusError(null);
   }), []);
 
-  const [summaryCadence, setSummaryCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [evidenceMode, setEvidenceMode] = useState<"eligible" | "seen" | "unseen">("eligible");
   const [evidencePage, setEvidencePage] = useState(1);
   const [evidencePageCursors, setEvidencePageCursors] = useState<Record<number, string | null>>({ 1: null });
@@ -989,27 +765,6 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     } catch (reason) {
       setStatusState("error");
       setStatusError(reason instanceof Error ? reason.message : "无法读取系统状态");
-    }
-  }, []);
-
-  const refreshLearning = useCallback(async (force = false) => {
-    setLearningState(previous => previous === "ready" ? previous : "loading");
-    try {
-      const body = await loadDashboardResource<Partial<Payload>>("/api/learning", { force });
-      setPayload(previous => ({ ...previous, ...body }) as Payload);
-      learningDataAvailableRef.current = true;
-      learningFailureCountRef.current = 0;
-      if (!body.learning_preview_summary) fullLearningReadyRef.current = true;
-      setLearningState(body.learning_preview_summary ? "snapshot" : "ready");
-      setLearningError(null);
-    } catch (reason) {
-      learningFailureCountRef.current += 1;
-      setLearningState(learningDataAvailableRef.current ? "ready" : "error");
-      setLearningError(
-        !learningDataAvailableRef.current || learningFailureCountRef.current >= 2
-          ? (reason instanceof Error ? reason.message : "无法读取学习进度")
-          : null,
-      );
     }
   }, []);
 
@@ -1177,18 +932,6 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     );
   }, [refreshNews, view, newsCategory, newsPage, newsReviewState]);
 
-  useEffect(() => {
-    // The bounded learning summary owns a headline metric, so load it on mount.
-    // Deep paged learning history remains lazy inside the interactive modal.
-    return scheduleDashboardRefresh(
-      () => void refreshLearning(!fullLearningReadyRef.current),
-      () => void refreshLearning(true),
-      DASHBOARD_REFRESH_INTERVALS.learning,
-      "current",
-      "learning",
-    );
-  }, [refreshLearning]);
-
   const selectedAuditDetailState = view in AUDIT_DETAIL_RESOURCES
     ? auditDetailState[view as AuditDetailView] : null;
   const auditDetailResourceMode = __AURUM_DEPLOYMENT__.is_preview ? "build-snapshot" : "current";
@@ -1225,12 +968,6 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
       `news-evidence:${evidenceMode}:${evidencePage}`,
     );
   }, [evidenceMode, evidencePage, refreshEvidence, view]);
-
-  const openLearningGraph = (tab: "curve") => {
-    setGraphStartTab(tab);
-    setGraphOpen(true);
-    if (!fullLearningReadyRef.current) void refreshLearning(true);
-  };
 
   const selectView = (next: AuditDeskView) => {
     if (next === view) return;
@@ -1282,12 +1019,6 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     }
   };
 
-  const progress = useMemo(() => {
-    const training = payload?.training;
-    if (!training) return 0;
-    return Math.min(100, training.complete_rows / training.next_training_at * 100);
-  }, [payload]);
-
   const archiveTotals = authoritativeNewsTotals(newsIndex);
   const newsProjectionNotice = ({
     REPLAYING: ["新新闻正在同步", `列表和数量来自 ${time(newsIndex.activated_at)} 启用的已核对快照；新一批完成后自动更新。`],
@@ -1305,14 +1036,11 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     && statusState === "ready" && coveragePhase === "snapshot";
   const currentPagePhase: CurrentDataPhase = statusState === "error"
     || (view === "news" && newsPhase === "error")
-    || (view === "league" && learningState === "error")
     ? "error"
     : statusState === "snapshot" || pageUsesBranchSnapshot
-      || (view === "league" && learningState === "snapshot")
       ? "snapshot"
       : statusState === "loading"
         || (view === "news" && newsPhase === "loading")
-        || (view === "league" && learningState !== "ready")
         ? "loading" : "ready";
   const categories = useMemo(() => [
     {
@@ -1333,48 +1061,16 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     ? newsIndex.items
     : [];
   const emptyNewsRows = Math.max(0, NEWS_PER_PAGE - visibleNews.length);
-  const activeLearningModels = (payload?.learning_curves?.models ?? []).filter(
-    row => row.active_rank !== null,
-  );
-  const activeLearningIdentities = new Set(
-    activeLearningModels.map(row => row.model_identity),
-  ).size;
-  const liveOosModelGroups = learningState === "ready"
-    ? activeLearningIdentities
-    : payload?.counts?.live_oos_model_groups;
-  const liveOosPhase: CurrentDataPhase = learningState === "ready"
-    ? "ready"
-    : payload?.counts?.live_oos_model_groups !== undefined
-      ? statusState
-      : learningState === "idle" ? "loading" : learningState;
-  const liveOosHeadlinePhase: CurrentDataPhase =
-    liveOosModelGroups === undefined && view !== "league" ? "loading" : liveOosPhase;
-  const liveOosHeadline = liveOosModelGroups === undefined
-    ? "读取中" : `${liveOosModelGroups}组`;
-  const latestVersionGroups = (payload?.learning_curves?.version_groups ?? []).filter(
-    row => row.lifecycle_status === "LATEST",
-  );
-  const directionPoolRows = Math.max(0, ...latestVersionGroups
-    .filter(row => !row.model_identity.endsWith("NEWS_RESIDUAL"))
-    .map(row => row.training_rows));
   const newsMetrics = resolveNewsMetrics(payload);
   const readableNewsTotal = archiveTotals?.readable ?? null;
   const parsedNewsTotal = archiveTotals?.parsed ?? null;
   const newsWaitingTotal = archiveTotals
     ? newsIndex.review_state_counts?.PROCESSING ?? 0
     : null;
-  const rowsUntilTraining = statusState === "ready" && payload?.training
-    ? Math.max(0, payload.training.next_training_at - payload.training.complete_rows)
-    : null;
-  const trainingProgress = progressCountPresentation(
-    payload?.training?.complete_rows,
-    payload?.training?.next_training_at,
-  );
   const combinedErrors = [
     statusError && `系统状态：${statusError}`,
     auditError && `审计首屏：${auditError}`,
     view === "evidence" && evidenceError && `新闻证据：${evidenceError}`,
-    view === "league" && learningError && `学习进度：${learningError}`,
     view === "news" && newsError && `新闻索引：${newsError}`,
     view in AUDIT_DETAIL_RESOURCES
       && auditDetailError[view as AuditDetailView]
@@ -1442,8 +1138,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     ? null : continuedEventTotal + singleEventTotal;
   const selectedResource = view in AUDIT_DETAIL_RESOURCES
     ? AUDIT_DETAIL_RESOURCES[view as AuditDetailView]
-    : view === "league" ? "/api/learning"
-      : view === "evidence" ? evidenceUrl
+    : view === "evidence" ? evidenceUrl
         : view === "news" || view === "search" ? null : "/api/status";
   const selectedResourceSnapshot = selectedResource
     ? readDashboardResource<{ generated_at?: string; activated_at?: string }>(selectedResource)
@@ -1453,43 +1148,17 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     : view === "coverage" && coveragePhase === "snapshot"
       ? payload?.preview?.branch_snapshot?.generated_at
       : selectedResourceSnapshot?.activated_at ?? selectedResourceSnapshot?.generated_at;
-  const detailLabel = ({ briefs: "每日简报", stories: "事件脉络", decisions: "决策与30分钟结果" } as const)[view as AuditDetailView];
-  const secondaryResourceError = view === "news" ? newsError : view === "evidence" ? evidenceError : view === "league" ? learningError : null;
-  const secondaryResourceLabel = view === "news" ? "新闻索引" : view === "evidence" ? "新闻证据" : "学习进度";
+  const detailLabel = ({ briefs: "每日简报", stories: "事件脉络" } as const)[view as AuditDetailView];
+  const secondaryResourceError = view === "news" ? newsError : view === "evidence" ? evidenceError : null;
+  const secondaryResourceLabel = view === "news" ? "新闻索引" : view === "evidence" ? "新闻证据" : "新闻证据";
   const retrySecondaryResource = () => {
     if (view === "evidence") void refreshEvidence(true);
-    else if (view === "league") void refreshLearning(true);
     else void refreshNews(true).catch(reason => setNewsError(reason instanceof Error ? reason.message : "无法读取新闻索引"));
   };
   return (
     <main className={`audit-main audit-view-${view}`}>
       <section className="audit-intro">
         <div><p className="eyebrow">IMMUTABLE FORWARD EVIDENCE</p><h1>新闻先被看见，<br />决定随后产生。</h1></div>
-        <div
-          className="training-card"
-          aria-label={statusState === "ready"
-            ? `学习进度：已收集 ${formatExactCount(payload?.training?.complete_rows)} 条，目标 ${formatExactCount(payload?.training?.next_training_at)} 条，还差 ${formatExactCount(rowsUntilTraining)} 条`
-            : "学习进度暂不可用"}
-        >
-          <div className="training-card-head"><span>学习进度</span></div>
-          <div className="training-card-total">
-            <strong>{statusState === "ready" && payload?.training
-              ? <span className="training-progress-pair" aria-hidden="true">
-                <span>{trainingProgress.current.main}{trainingProgress.current.remainder && <span className="training-progress-tail">+{trainingProgress.current.remainder}</span>}</span>
-                <i>/</i>
-                <span>{trainingProgress.target.main}{trainingProgress.target.remainder && <span className="training-progress-tail">+{trainingProgress.target.remainder}</span>}</span>
-              </span>
-              : <small>{statusState === "loading" ? "读取中…" : "暂不可用"}</small>}
-            </strong>
-            <span>{rowsUntilTraining === null ? "等待数据" : rowsUntilTraining === 0 ? "可以开始下一轮" : `还差 ${formatExactCount(rowsUntilTraining)} 条`}</span>
-          </div>
-          {statusState === "ready" && trainingProgress.showExactDetail && (
-            <small className="training-card-exact">
-              当前 {trainingProgress.current.exact} · 目标 {trainingProgress.target.exact}
-            </small>
-          )}
-          <div className="progress-track"><i style={{ width: `${progress}%` }} /></div>
-        </div>
       </section>
 
       {combinedErrors && <div className="error-banner">{combinedErrors}。{selectedAuditDetailState !== null && auditDetailError[view as AuditDetailView] && auditDetailResourceMode === "build-snapshot" ? "构建快照不会自动刷新；可手动重读当前快照，资料更新需要新构建。" : "可稍后重新载入页面。"}已有成功资料按各自资源保留。</div>}
@@ -1509,8 +1178,6 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻 <b><MetricValue phase={newsPhase}><CountValue value={readableNewsTotal} /></MetricValue></b></a>
         <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>当前可用新闻事件 <b><MetricValue phase={statusState}><CountValue value={newsMetrics.events.currently_model_eligible} /></MetricValue></b></a>
         <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b><MetricValue phase={statusState}><CountValue value={activeEventTotal} /></MetricValue></b></a>
-        <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b><MetricValue phase={statusState}><CountValue value={payload?.counts?.decision_events} /></MetricValue></b></a>
-        <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b><MetricValue phase={liveOosHeadlinePhase}>{liveOosHeadline}</MetricValue></b></a>
         <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b><MetricValue phase={coveragePhase} snapshotLabel="分支快照" snapshotTitle="此覆盖结果由当前 PR 分支在构建时重新计算，不是生产实时观测">{payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</MetricValue></b></a>
       </nav>
       </div>
@@ -1523,8 +1190,6 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
           <option value="news">新闻 · {formatExactCount(readableNewsTotal)}</option>
           <option value="evidence">当前可用新闻事件 · {formatExactCount(newsMetrics.events.currently_model_eligible)}</option>
           <option value="stories">事件脉络 · {formatExactCount(activeEventTotal)}</option>
-          <option value="decisions">决策与30分钟结果 · {formatExactCount(payload?.counts?.decision_events)}</option>
-          <option value="league">Live OOS 学习曲线 · {liveOosModelGroups === undefined ? "读取中" : `${formatExactCount(liveOosModelGroups)}组`}</option>
           <option value="coverage">大视野覆盖 · {formatExactCount(payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length)}/11</option>
         </select>
       </label>
@@ -1784,79 +1449,6 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         <details className="unassigned-story-events" open><summary>市场叙事候选 <b><CountValue value={payload?.storyline_summary?.market_narrative_total} /></b> <small>只有市场反应或评论，核心现实进展尚未确认</small></summary>{(payload?.market_narrative_candidates ?? []).map(story => <div key={story.storyline_id}><time>{time(story.last_updated)}</time><span><b>{story.title}</b><br />{story.latest_change}</span><small>{formatExactCount(story.event_count)} 个候选节点 · {formatExactCount(story.evidence_document_count)} 份文件 · 不进入活跃故事</small></div>)}</details>
         <details className="unassigned-story-events"><summary>历史档案 <b><CountValue value={payload?.storyline_summary?.archived_total} /></b> <small>ARCHIVAL_BACKFILL，不显示为当前新事件</small></summary>{(payload?.archived_storylines ?? []).map(story => <div key={story.storyline_id}><time>{time(story.timeline[0]?.event_time)}</time><span><b>{story.title}</b><br />{story.latest_change}</span><small>{formatExactCount(story.event_count)} 个历史事件 · 系统首次收录 {time(story.last_updated)}</small></div>)}{(payload?.archived_story_event_candidates ?? []).map(item => <div key={item.candidate_id}><time>{time(item.event_time)}</time><span>{item.headline}</span><small>{formatExactCount(item.evidence_documents)} 份历史证据文件 · 系统首次收录 {time(item.first_seen)}</small></div>)}</details>
         <details className="unassigned-story-events"><summary>未归属事件 <b><CountValue value={payload?.storyline_summary?.unassigned_total} /></b></summary>{(payload?.unassigned_story_events ?? []).map(item => <div key={item.event_key}><time>{time(item.first_seen)}</time><span>{item.headline}</span><small>{item.record_kind} · {item.reason}</small></div>)}</details>
-      </section>}
-
-      {view === "decisions" && selectedAuditDetailState === "ready" && <section className="decision-audit">
-        {(payload?.recent_decisions ?? []).length === 0 && <div className="current-data-notice" role="status"><b>本页没有决策记录</b><span>决策详情资源已返回空结果；上方计数属于完整历史，不代表本页已经载入明细。</span></div>}
-        {(payload?.recent_decisions ?? []).map((row) => {
-          const full = row.predictions.find(item => item.model_identity === "BROAD_FULL")
-            ?? row.predictions.find(item => item.model_identity === "FULL");
-          return <details className="decision-row" key={row.decision_id}>
-            <summary>
-              <time>{time(row.decision_time)}</time><b>{row.research_action ?? full?.recommended_action ?? "WAIT"}</b>
-              <span>{number(row.bid)} / {number(row.ask)}</span>
-              <em>大视野研究预测 {full?.recommended_action ?? row.research_action ?? "WAIT"}</em>
-              <strong className={row.outcome_status === "VALID" ? "good" : row.outcome_status ? "bad" : "muted"}>{row.outcome_status === "VALID" ? `Long ${percent(row.long_return)} · Short ${percent(row.short_return)}` : row.outcome_status ? `无效样本 · ${outcomeReason(row.outcome_reason_codes)}` : "等待30分钟结果"}</strong>
-            </summary>
-            <div className="prediction-grid">
-              {row.predictions.map(model => <article key={model.model_version}>
-                <span>{MODEL_LABELS[model.model_identity] ?? model.model_identity}</span><h3>{model.recommended_action}</h3>
-                <p>{predictionStatusLabel(model.prediction_status)}</p>
-                <dl><div><dt>方向 U5</dt><dd>{number(model.predicted_direction_u5, 3)}</dd></div><div><dt>News residual</dt><dd>{number(model.predicted_news_residual_u5, 3)}</dd></div><div><dt>Long EV</dt><dd>{number(model.ev_long_u5, 3)}</dd></div><div><dt>Short EV</dt><dd>{number(model.ev_short_u5, 3)}</dd></div><div><dt>不确定性</dt><dd>{number(model.uncertainty_u5, 3)}</dd></div></dl>
-                <small>{model.model_version}</small>
-              </article>)}
-            </div>
-          </details>;
-        })}
-      </section>}
-
-      {view === "league" && <section className="shadow-league">
-        <header className="league-intro">
-          <div><p className="eyebrow">LIVE OOS LEARNING CURVES</p><h2>每次训练是一组，<br />只看它之后没见过的数据。</h2></div>
-          <dl>
-            <div><dt>Collection started</dt><dd>{time(payload?.learning_curves?.collection_epoch)}</dd></div>
-            <div><dt>Evaluation V2 started</dt><dd>{time(payload?.learning_curves?.evaluation_epoch_v2)}</dd></div>
-            <div><dt>当前证据等级</dt><dd>{payload?.learning_curves?.learning_stage ?? "ENGINEERING"}</dd></div>
-          </dl>
-        </header>
-        <div className="learning-summary-grid">
-          <article><span>上一次学习</span><strong>{learningState === "ready" ? <CountValue value={directionPoolRows} /> : "—"}</strong><small>当前模型已经学到这里</small></article>
-          <article><span>下一次学习</span><strong>{learningState === "ready" && rowsUntilTraining !== null ? (rowsUntilTraining === 0 ? "已经就绪" : `还差 ${formatExactCount(rowsUntilTraining)} 条`) : "—"}</strong><small>{rowsUntilTraining === 0 ? "已经达到目标，可以开始新一轮" : `目标 ${formatExactCount(payload?.training?.next_training_at)} 条`}</small></article>
-        </div>
-        <section className="graph-launch">
-          <div><h3>查看学习曲线与 K 线</h3><p>长期累计、每组成绩与决策位置</p></div>
-          <button type="button" onClick={() => openLearningGraph("curve")}>打开交互图表 ↗</button>
-        </section>
-        <section className="model-score-summary"><header><div><span>LIVE OOS SCOREBOARD</span><h3>六套模型，现在表现怎样？</h3></div><small>左为历史累计，箭头后为当前累计，圆点后为本组贡献。</small></header><div className="summary-cadence"><span>统计频率</span><button type="button" className={summaryCadence === "EVERY_5M" ? "active" : ""} onClick={() => setSummaryCadence("EVERY_5M")}>每5分钟（重叠）</button><button type="button" className={summaryCadence === "FIXED_30M" ? "active" : ""} onClick={() => setSummaryCadence("FIXED_30M")}>每30分钟（:00 / :30）</button><small>预测期限始终是30分钟。</small></div>
-        {(payload?.learning_curves?.models?.length ?? 0) === 0 ? <div className="league-empty">
-          <strong>正在建立第一版 Preview</strong><p>达到 96 条修复或 Forward 完整样本即可训练 Market Preview，不需要等待60天。曲线只从模型创建后的新 Decision 开始，绝不回填假历史成绩。</p>
-        </div> : <div className="compact-model-summary">{Object.keys(MODEL_LABELS).filter(identity => identity !== "CHAMPION_0").map(identity => {
-          const process = payload?.learning_curves?.rolling_processes?.find(row => row.model_identity === identity);
-          const latestGroup = payload?.learning_curves?.version_groups?.find(row => row.model_identity === identity && row.lifecycle_status === "LATEST");
-          if (!process && !latestGroup && identity !== "NEWS_ONLY") return null;
-          const diagnostic = identity === "NEWS_RESIDUAL" || identity === "BROAD_NEWS_RESIDUAL";
-          const newsOnlyPending = identity === "NEWS_ONLY" && !process && !latestGroup;
-          const processMetric = process?.cadence_metrics?.[summaryCadence] ?? process;
-          const groupMetric = latestGroup?.cadence_metrics?.[summaryCadence] ?? latestGroup;
-          const hasTotal = (processMetric?.oos_rows ?? 0) > 0;
-          const hasGroup = (groupMetric?.oos_rows ?? 0) > 0;
-          const total = hasTotal ? processMetric!.cumulative_quote_return : null;
-          const group = hasGroup ? groupMetric!.cumulative_quote_return : null;
-          const history = total === null ? null : total - (group ?? 0);
-          const tone = group === null ? "is-pending" : group >= 0 ? "is-positive" : "is-negative";
-          return <article key={identity}><b>{MODEL_LABELS[identity]}{diagnostic ? <small>新闻修正量</small> : newsOnlyPending ? <small>等待新版生成</small> : null}</b><div className="return-flow" aria-label={`本组开始前 ${percent(history)}，加入本组后 ${percent(total)}，本组贡献 ${percent(group)}`}><span className="return-value return-history" title="本组开始前的历史累计"><small>开始前</small><span>{history === null ? "—" : percent(history)}</span></span><i className={tone} aria-hidden="true">→</i><span className="return-value return-total" title="加入本组后的连续累计"><small>当前累计</small><strong>{total === null ? "等待" : percent(total)}</strong></span><i className="return-separator" aria-hidden="true">·</i><span className={`return-value return-group ${tone}`} title="本组独立贡献"><small>本组贡献</small><strong>{group === null ? "等待" : percent(group)}</strong></span></div></article>;
-        })}</div>}</section>
-        <details className="model-method-note">
-          <summary><span>方法与实盘边界</span><small>新闻修正量、成本与 Shadow 限制</small></summary>
-          <div>
-            <article><b>新闻修正量也显示自己的方向</b><span>正修正显示 LONG，负修正显示 SHORT；它表示新闻把黄金基线往上或往下推，不等于“黄金＋新闻”的完整方向。例：黄金自身 +0.10 U5，新闻修正 +0.04 U5，修正量是 LONG，完整模型为 +0.14 U5。</span></article>
-            <article><b>“纯新闻方向”单独回答新闻看涨还是看跌</b><span>它完全不读取黄金行情特征，只用决策时已经看见的合格新闻，直接预测未来30分钟黄金方向；没有合格新闻时显示 WAIT。它与新闻修正量分开评分。</span></article>
-            <article><b>成本口径</b><span>收益使用可执行 Bid/Ask，并扣除入场、退出两边各 $30 / 百万美元成交额的 commission；slippage 暂按 0。尚未包含账户真实成交偏差，所以不是实盘 PnL。</span></article>
-            <article><b>做法可以实时复现；结果尚未达到实盘标准</b><span>行情和新闻都只读取决策时已经看见的内容；30分钟结果成熟后才进入下一轮训练。当前仍没有下单权限，也不会自动晋升。</span></article>
-          </div>
-        </details>
-        <footer className="league-footer">仅供研究观察，不代表盈利，也不会自动下单。</footer>
-        <LearningGraphModal key={graphStartTab} open={graphOpen} onClose={() => setGraphOpen(false)} startTab={graphStartTab} curves={payload?.learning_curves?.identity_curves ?? []} market={payload?.market_chart} versionGroups={payload?.learning_curves?.version_groups ?? []} historyResource={payload?.learning_history_resource} />
       </section>}
 
       {view === "coverage" && <section className="coverage-grid">

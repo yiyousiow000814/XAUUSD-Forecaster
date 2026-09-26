@@ -1,4 +1,4 @@
-"""Bounded PUBLIC_LIVE_V1 projection and opt-in broadcast publisher."""
+"""Bounded PUBLIC_LIVE_V2 projection and opt-in broadcast publisher."""
 
 from __future__ import annotations
 
@@ -10,26 +10,19 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-LIVE_SCHEMA_VERSION = "PUBLIC_LIVE_V1"
+LIVE_SCHEMA_VERSION = "PUBLIC_LIVE_V2"
 LIVE_BROADCAST_ORIGIN = "https://aurum-live-broadcast.yiyousiow1234.workers.dev"
 MAX_LIVE_BYTES = 16_384
-MAX_RECENT_DECISIONS = 18
-FORECAST_FIELDS = (
-    "model_identity", "model_version", "recommended_action",
-    "prediction_status", "ev_long_u5", "ev_short_u5", "interval_width",
-    "decision_time", "signal_expiry_seconds", "forecast_horizon_seconds",
-    "directional_bias", "frozen_record",
-)
 PRIVATE_FIELDS = {
     "gemini_quota", "gemini_31_quota", "gemma_quota",
     "gemini_embedding_quota", "annotation_queue", "llm_routing", "admin",
     "features", "tokens", "secrets", "learning_history", "market_history",
-    "news_archive",
+    "news_archive", "forecast", "research_forecast", "recent_decisions",
 }
 
 
 class LiveBroadcastContractError(ValueError):
-    """The compact public state violates PUBLIC_LIVE_V1."""
+    """The compact public state violates PUBLIC_LIVE_V2."""
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -75,15 +68,8 @@ def validate_live_state(value: Mapping[str, Any]) -> dict[str, Any]:
         raise LiveBroadcastContractError("crossed quote")
     if not isinstance(quote.get("source_received_time"), str):
         raise LiveBroadcastContractError("invalid quote.source_received_time")
-    if not isinstance(state.get("forecast"), Mapping) or not isinstance(state.get("health"), Mapping):
+    if not isinstance(state.get("health"), Mapping):
         raise LiveBroadcastContractError("invalid public summaries")
-    if state["forecast"].get("recommended_action") not in {"LONG", "SHORT", "WAIT"}:
-        raise LiveBroadcastContractError("invalid forecast.recommended_action")
-    decisions = state.get("recent_decisions")
-    if decisions is not None and (
-        not isinstance(decisions, list) or len(decisions) > MAX_RECENT_DECISIONS
-    ):
-        raise LiveBroadcastContractError("recent_decisions is not bounded")
     if _contains_private_field(state):
         raise LiveBroadcastContractError("private field is forbidden")
     if len(serialize_live_state(state)) > MAX_LIVE_BYTES:
@@ -92,22 +78,10 @@ def validate_live_state(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def public_live_state(status: Mapping[str, Any], *, sequence: int, source_revision: str) -> dict[str, Any]:
-    """Project only delivery state; growing research remains on existing APIs."""
+    """Project only quotes and health; news remains on existing APIs."""
     system = _mapping(status.get("system"))
     latest = _mapping(status.get("latest"))
-    forecast = _mapping(status.get("research_forecast"))
     operational = _mapping(status.get("operational_health"))
-    decisions = status.get("recent_decisions")
-    compact_decisions = []
-    if isinstance(decisions, list):
-        for row in decisions[:MAX_RECENT_DECISIONS]:
-            if not isinstance(row, Mapping):
-                continue
-            compact_decisions.append({
-                key: copy.deepcopy(row.get(key))
-                for key in ("decision_id", "decision_time", "effective_action", "outcome_status")
-                if key in row
-            })
     bid = latest.get("bid", system.get("bid"))
     ask = latest.get("ask", system.get("ask"))
     spread = latest.get("spread")
@@ -135,35 +109,11 @@ def public_live_state(status: Mapping[str, Any], *, sequence: int, source_revisi
             "bid": bid, "ask": ask, "spread": spread,
             "source_received_time": latest.get("source_received_time", generated_at),
         },
-        "forecast": {
-            key: copy.deepcopy(forecast.get(key))
-            for key in FORECAST_FIELDS
-        },
         "health": {
             "status": operational.get("status", "UNKNOWN"),
             "alerts": bounded_alerts,
         },
     }
-    state["forecast"]["recommended_action"] = (
-        forecast.get("recommended_action")
-        if forecast.get("recommended_action") in {"LONG", "SHORT", "WAIT"}
-        else "WAIT"
-    )
-    state["forecast"]["prediction_status"] = forecast.get(
-        "prediction_status", "UNAVAILABLE",
-    )
-    state["forecast"]["signal_expiry_seconds"] = forecast.get(
-        "signal_expiry_seconds", 20,
-    )
-    state["forecast"]["forecast_horizon_seconds"] = forecast.get(
-        "forecast_horizon_seconds", 1_800,
-    )
-    state["forecast"]["directional_bias"] = forecast.get(
-        "directional_bias", "NEUTRAL",
-    )
-    state["forecast"]["frozen_record"] = bool(forecast.get("frozen_record"))
-    if isinstance(decisions, list):
-        state["recent_decisions"] = compact_decisions
     return validate_live_state(state)
 
 

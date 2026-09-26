@@ -56,7 +56,7 @@ the isolated service:
 npx wrangler secret put LIVE_BROADCAST_PUBLISH_TOKEN --name aurum-live-broadcast
 ```
 
-Verify `/health` contains the intended code revision, `PUBLIC_LIVE_V1`, a ready
+Verify `/health` contains the intended code revision, `PUBLIC_LIVE_V2`, a ready
 binding, and no secret. Run one authenticated `dry_run=true` publish and prove
 that `latest_available` and subscriber delivery did not change. Then run an
 approved local/external WebSocket smoke against `/subscribe`, followed by one
@@ -83,7 +83,7 @@ next update, and application writes are rejected.
    `AURUM_LIVE_BROADCAST_PUBLISHER_ENABLED=1`. Preview and pre-Promote validation
    continue to use dry-run; never activate the publisher from Preview.
 10. Verify Control Center reports `RUNNING` and `/health` exposes a real latest
-    `PUBLIC_LIVE_V1` state from the exact runtime revision with
+    `PUBLIC_LIVE_V2` state from the exact runtime revision with
     `latest_published_at` no older than 90 seconds.
 11. Keep OBSERVING until normal decision cycles complete.
 

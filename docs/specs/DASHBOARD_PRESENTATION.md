@@ -142,7 +142,7 @@ part of it.
 1. The canonical product brand is `AU`, `AURUM SIGNAL ROOM`, and
    `XAUUSD · Forward-only intelligence`. It is identical on every top-level
    View and links to the realtime room.
-2. The public global destination order is `总览`, `新闻与决策`, `系统`, and
+2. The public global destination order is `总览`, `新闻与事件`, `系统`, and
    `管理员登录`. The first three stable entry routes are `/`,
    `/audit?view=news`, and `/health`. `管理员登录` first opens a local
    explanation dialog; only its explicit Google login action performs a normal

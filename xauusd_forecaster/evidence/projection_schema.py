@@ -376,7 +376,6 @@ def install_dashboard_critical_activity_schema(
 
 READ_MODEL_CONTRACTS = {
     "audit": "dashboard-audit-resources-v2",
-    "learning": "dashboard-learning-pyramid-history-v4",
     "market_chart": "dashboard-market-chart-summary-v1",
 }
 
@@ -385,10 +384,6 @@ _RESOURCE_SOURCE_TABLES = {
     "audit": (
         "daily_news_briefs", "decision_events", "news_annotations",
         "news_revisions", "news_title_translations", "outcomes",
-    ),
-    "learning": (
-        "derived_outcomes", "model_updates_v2",
-        "prediction_scores_v2", "predictions_v2",
     ),
     "market_chart": (
         "decision_events", "derived_market_snapshots", "model_updates_v2",
