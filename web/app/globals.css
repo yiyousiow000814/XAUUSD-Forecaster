@@ -28,7 +28,7 @@ main { min-height:100vh; position:relative; overflow:hidden; padding:24px 3vw 18
 .count-value { white-space:nowrap; font-variant-numeric:tabular-nums; }
 @keyframes current-data-pulse { from { opacity:.12; } to { opacity:.52; } }
 @media (prefers-reduced-motion:reduce) { .current-metric-placeholder i { animation:none; opacity:.32; } }
-.brand strong,.brand small { display:block; }.brand strong { text-transform:uppercase; letter-spacing:.08em; font-size:13px; }.brand small { color:var(--muted); font-size:10px; margin-top:4px; }
+.brand strong,.brand small { display:block; }.brand strong { letter-spacing:.03em; font-size:18px; }.brand small { color:var(--muted); font-size:10px; margin-top:4px; }
 .live-pill { display:flex; gap:9px; align-items:center; border:1px solid var(--ink); border-radius:999px; padding:8px 13px; font-size:11px; letter-spacing:.12em; }
 .live-pill span { width:8px; height:8px; border-radius:50%; background:var(--red); }.live-pill.is-live span { background:var(--acid); box-shadow:0 0 0 4px rgba(215,255,79,.18); }
 .live-pill.is-loading span { background:var(--gold); box-shadow:0 0 0 4px rgba(201,151,51,.16); }
@@ -1325,7 +1325,7 @@ body.modal-open { overflow:hidden; }
 
 @media (max-width:430px){
   main { padding:12px; }
-  .brand strong { font-size:12px; }
+  .brand strong { font-size:16px; }
   .audit-intro h1 { font-size:32px; }
   .training-card-total { align-items:flex-end; gap:10px; }
   .training-card-total strong { font-size:31px; }
@@ -2064,7 +2064,7 @@ body:has(.assistant-main) > .dashboard-shell { width:100%; height:auto; min-heig
   .admin-login-dialog footer { justify-content:stretch; }
   .admin-login-dialog footer button,.admin-login-dialog footer a { flex:1 1 auto; min-width:0; }
   .dashboard-header.topbar { gap:8px; }
-  .dashboard-brand strong { font-size:11px; }
+  .dashboard-brand strong { font-size:16px; }
   .dashboard-brand small { font-size:9px; }
   .dashboard-header .mobile-dashboard-nav>label>span { padding-inline:8px; }
   .dashboard-header .mobile-dashboard-nav select { padding-left:9px; font-size:13px; }
