@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import gzip
+import zlib
+from functools import lru_cache
 import math
 import sqlite3
 from datetime import datetime
@@ -13,45 +16,66 @@ from xauusd_forecaster.market_session import expected_weekly_closure
 
 from xauusd_forecaster.market import parse_quote_line
 
+QUOTE_TAIL_BYTES = 65_536
+QUOTE_ARCHIVE_BYTES = 128 * 1024 * 1024
+
+
+@lru_cache(maxsize=8)
+def _quote_tail(path: Path, size: int, modified_ns: int) -> tuple[bytes, ...]:
+    # Archive identity invalidates cached tails; never inflate an unbounded file.
+    if path.suffix == ".gz":
+        tail = b""
+        remaining = QUOTE_ARCHIVE_BYTES
+        with gzip.open(path, "rb") as handle:
+            while remaining:
+                chunk = handle.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    return tuple(tail.splitlines())
+                remaining -= len(chunk)
+                tail = (tail + chunk)[-QUOTE_TAIL_BYTES:]
+            if handle.read(1):
+                return ()
+        return tuple(tail.splitlines())
+    with path.open("rb") as handle:
+        handle.seek(max(0, size - QUOTE_TAIL_BYTES))
+        return tuple(handle.read(QUOTE_TAIL_BYTES).splitlines())
+
+
 def latest_quote(database: Path) -> dict | None:
-    sources = sorted((database.parent / "quotes").glob("*.jsonl"))
-    if not sources:
-        return None
-    with sources[-1].open("rb") as handle:
-        handle.seek(0, 2)
-        size = handle.tell()
-        handle.seek(max(0, size - 65_536))
-        lines = handle.read().splitlines()
-    for line in reversed(lines):
+    root = database.parent / "quotes"
+    # Prefer a raw day over its archive and skip an empty rollover day.
+    sources = {path.name.removesuffix(".gz"): path for path in root.glob("*.jsonl.gz")}
+    sources.update({path.name: path for path in root.glob("*.jsonl")})
+    archive_reads = 0
+    for name in sorted(sources, reverse=True)[:8]:
+        path = sources[name]
         try:
-            quote = parse_quote_line(line, sources[-1])
-            if not math.isfinite(quote.bid) or not math.isfinite(quote.ask):
-                continue
-            return {
-                "bid": quote.bid, "ask": quote.ask, "spread": quote.ask - quote.bid,
-                "source_received_time": quote.received_time.isoformat(),
-                "source_event_time": quote.event_time.isoformat(),
-            }
-        except (KeyError, AttributeError, TypeError, ValueError):
+            if path.suffix == ".gz":
+                archive_reads += 1
+                if archive_reads > 1:
+                    break
+            stat = path.stat()
+            lines = _quote_tail(path, stat.st_size, stat.st_mtime_ns)
+        except (OSError, EOFError, zlib.error):
             continue
+        for line in reversed(lines):
+            try:
+                quote = parse_quote_line(line, path)
+                if not math.isfinite(quote.bid) or not math.isfinite(quote.ask):
+                    continue
+                return {
+                    "bid": quote.bid, "ask": quote.ask, "spread": quote.ask - quote.bid,
+                    "source_received_time": quote.received_time.isoformat(),
+                    "source_event_time": quote.event_time.isoformat(),
+                }
+            except (KeyError, AttributeError, TypeError, ValueError):
+                continue
     return None
 
 
 def latest_quote_received(database: Path) -> str | None:
-    sources = sorted((database.parent / "quotes").glob("*.jsonl"))
-    if not sources:
-        return None
-    with sources[-1].open("rb") as handle:
-        handle.seek(0, 2)
-        handle.seek(max(0, handle.tell() - 65_536))
-        lines = handle.read().splitlines()
-    for line in reversed(lines):
-        try:
-            return str(json.loads(line)["received_time"]).replace("Z", "+00:00")
-        except (KeyError, TypeError, ValueError):
-            continue
-    return None
-
+    quote = latest_quote(database)
+    return quote["source_received_time"] if quote else None
 
 
 

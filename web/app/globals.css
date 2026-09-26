@@ -10,7 +10,7 @@ main { min-height:100vh; position:relative; overflow:hidden; padding:24px 3vw 18
 .grain { position:fixed; inset:0; pointer-events:none; opacity:.18; background-image:repeating-linear-gradient(0deg,transparent 0 3px,rgba(17,17,15,.08) 4px); mix-blend-mode:multiply; }
 .topbar { display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--ink); padding-bottom:18px; position:relative; z-index:1; }
 .brand { display:flex; align-items:center; gap:12px; }
-.brand-button { border:0; background:transparent; padding:0; text-align:left; cursor:pointer; position:relative; }
+.brand-button { min-height:44px; border:0; background:transparent; padding:0; text-align:left; cursor:pointer; position:relative; }
 .brand-button.is-navigating::after { content:""; position:absolute; left:0; bottom:-5px; width:42%; height:3px; background:var(--acid); animation:nav-progress .7s ease-in-out infinite alternate; pointer-events:none; }
 @keyframes nav-progress { from { transform:translateX(0); } to { transform:translateX(138%); } }
 @media (prefers-reduced-motion:reduce) { .brand-button.is-navigating::after { width:100%; animation:none; } }
@@ -28,7 +28,6 @@ main { min-height:100vh; position:relative; overflow:hidden; padding:24px 3vw 18
 .count-value { white-space:nowrap; font-variant-numeric:tabular-nums; }
 @keyframes current-data-pulse { from { opacity:.12; } to { opacity:.52; } }
 @media (prefers-reduced-motion:reduce) { .current-metric-placeholder i { animation:none; opacity:.32; } }
-.brand-mark { width:46px; height:46px; display:grid; place-items:center; border-radius:50%; background:var(--ink); color:var(--paper); font-family:var(--font-display); font-size:23px; }
 .brand strong,.brand small { display:block; }.brand strong { text-transform:uppercase; letter-spacing:.08em; font-size:13px; }.brand small { color:var(--muted); font-size:10px; margin-top:4px; }
 .live-pill { display:flex; gap:9px; align-items:center; border:1px solid var(--ink); border-radius:999px; padding:8px 13px; font-size:11px; letter-spacing:.12em; }
 .live-pill span { width:8px; height:8px; border-radius:50%; background:var(--red); }.live-pill.is-live span { background:var(--acid); box-shadow:0 0 0 4px rgba(215,255,79,.18); }
@@ -1326,7 +1325,6 @@ body.modal-open { overflow:hidden; }
 
 @media (max-width:430px){
   main { padding:12px; }
-  .brand-mark { width:44px; height:44px; }
   .brand strong { font-size:12px; }
   .audit-intro h1 { font-size:32px; }
   .training-card-total { align-items:flex-end; gap:10px; }
@@ -1438,7 +1436,6 @@ body.modal-open { overflow:hidden; }
   .preview-banner span { display:none; }
   .preview-banner code { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; word-break:normal; }
   .topbar { gap:14px; padding:14px 0 16px; }
-  .brand-mark { width:48px; height:48px; }
   .mobile-dashboard-nav { gap:10px; }
 
   .audit-main .audit-intro { display:none; }
@@ -2067,7 +2064,6 @@ body:has(.assistant-main) > .dashboard-shell { width:100%; height:auto; min-heig
   .admin-login-dialog footer { justify-content:stretch; }
   .admin-login-dialog footer button,.admin-login-dialog footer a { flex:1 1 auto; min-width:0; }
   .dashboard-header.topbar { gap:8px; }
-  .dashboard-brand .brand-mark { width:44px; height:44px; }
   .dashboard-brand strong { font-size:11px; }
   .dashboard-brand small { font-size:9px; }
   .dashboard-header .mobile-dashboard-nav>label>span { padding-inline:8px; }
