@@ -64,7 +64,10 @@ def test_retired_collector_keeps_maintenance_without_model_work(
     monkeypatch.setattr(collector, "time", SimpleNamespace(sleep=lambda *_: (_ for _ in ()).throw(EndIteration)))
     registry = json.loads((Path(__file__).resolve().parents[2] / "scripts/windows-service-launch-contract.json").read_text())
     service = next(item for item in registry["services"] if item["key"] == "collector")
-    arguments = [value.replace("{runtime_forward_root}", str(state_root)) for value in service["arguments"]]
+    # The registry is a Windows launch contract; adapt separators for the
+    # same lifecycle rehearsal on Linux CI without changing its CLI options.
+    arguments = [value.replace("\\", "/").replace("{runtime_forward_root}", str(state_root))
+                 for value in service["arguments"]]
     monkeypatch.setattr(sys, "argv", ["run_forward_collector.py", *arguments])
 
     with pytest.raises(EndIteration):
