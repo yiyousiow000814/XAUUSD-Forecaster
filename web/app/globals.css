@@ -2077,3 +2077,8 @@ body:has(.assistant-main) > .dashboard-shell { width:100%; height:auto; min-heig
 .dashboard-global-state .live-pill { min-height:44px; font-size:12px; letter-spacing:.04em; }
 .dashboard-global-state:focus-visible { outline:2px solid var(--green); outline-offset:4px; }
 .dashboard-global-state[aria-current="page"] .live-pill { box-shadow:inset 0 0 0 1px var(--ink); }
+
+/* Retained news workspace after the forecast panels were removed. */
+.workspace-grid.news-workspace { grid-template-columns:1fr; }
+.news-workspace .source-panel { grid-column:1; grid-row:auto; }
+.metric-grid article > a { display:flex; align-items:center; min-height:44px; min-width:44px; max-width:100%; }

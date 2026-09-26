@@ -145,7 +145,7 @@ export default function LiveRoomView() {
         </article>
       </section>
 
-      <section className="workspace-grid">
+      <section className="workspace-grid news-workspace">
         <article className="panel source-panel">
           <div className="panel-head"><div><span>SOURCE HEALTH</span><h2>数据链路</h2></div></div>
           <Source name="cTrader XAUUSD · 本机 Algo" state={quoteBridge.label} good={quoteBridge.good} />
