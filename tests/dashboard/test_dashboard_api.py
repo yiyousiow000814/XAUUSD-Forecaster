@@ -19,42 +19,42 @@ from tests.fixtures.dashboard_news_fixtures import (
     _isolated_dashboard_credentials, _basic_annotation_payload, _append_basic_annotation,
 )
 
-from xauusd_forecaster.dashboard import news_presentation, news_resources
+from xauusd_news.dashboard import news_presentation, news_resources
 
-from xauusd_forecaster.news.annotation.product import ANNOTATION_FAILURE_RECOVERY_VERSION
-from xauusd_forecaster.news.annotation.product import INVALID_CHINESE_TITLE
-from xauusd_forecaster.news.annotation.product import PROMPT_VERSION
-from xauusd_forecaster.ai.provider_registry import AI_QUOTA_SURFACES
-from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.dashboard.read_models import DashboardReadModelOwner
-from xauusd_forecaster.dashboard.read_models import DashboardReadModelSnapshot
-from xauusd_forecaster.dashboard.read_models import DashboardReadModelUnavailable
-from xauusd_forecaster.dashboard.read_models import READ_MODEL_CONTRACTS
-from xauusd_forecaster.dashboard.read_models import REFRESHED_DIRTY
-from xauusd_forecaster.dashboard.read_models import read_dashboard_read_model
-from xauusd_forecaster.dashboard.summaries import DASHBOARD_COUNT_TABLES
-from xauusd_forecaster.dashboard.summaries import dashboard_news_source_summary
-from xauusd_forecaster.dashboard.summaries import install_dashboard_summary_schema
-from xauusd_forecaster.dashboard.deployment_provenance import (
+from xauusd_news.news.annotation.product import ANNOTATION_FAILURE_RECOVERY_VERSION
+from xauusd_news.news.annotation.product import INVALID_CHINESE_TITLE
+from xauusd_news.news.annotation.product import PROMPT_VERSION
+from xauusd_news.ai.provider_registry import AI_QUOTA_SURFACES
+from xauusd_news.evidence.ledger import ForwardLedger
+from xauusd_news.dashboard.read_models import DashboardReadModelOwner
+from xauusd_news.dashboard.read_models import DashboardReadModelSnapshot
+from xauusd_news.dashboard.read_models import DashboardReadModelUnavailable
+from xauusd_news.dashboard.read_models import READ_MODEL_CONTRACTS
+from xauusd_news.dashboard.read_models import REFRESHED_DIRTY
+from xauusd_news.dashboard.read_models import read_dashboard_read_model
+from xauusd_news.dashboard.summaries import DASHBOARD_COUNT_TABLES
+from xauusd_news.dashboard.summaries import dashboard_news_source_summary
+from xauusd_news.dashboard.summaries import install_dashboard_summary_schema
+from xauusd_news.dashboard.deployment_provenance import (
     DeploymentProvenanceOwner,
     deployment_status,
 )
-from xauusd_forecaster.dashboard.storage_status import (
+from xauusd_news.dashboard.storage_status import (
     backup_lifecycle_status,
     canonical_payload_digest,
     wal_checkpoint_status,
 )
-from xauusd_forecaster.dashboard.operator_bridge import operator_bridge_auth_error
-from xauusd_forecaster.maintenance import (
+from xauusd_news.dashboard.operator_bridge import operator_bridge_auth_error
+from xauusd_news.maintenance import (
     BACKUP_RECEIPT_SCHEMA,
     BACKUP_RETENTION_SCHEMA,
     BACKUP_RETENTION_STATE,
 )
-from xauusd_forecaster.ai.quota import GeminiQuotaLedger
-from xauusd_forecaster.news.scheduler.state import authorize_repairable_annotation_failures
-from xauusd_forecaster.news.scheduler.state import configured_api_credentials
-from xauusd_forecaster.news.scheduler.state import reserve_account_request
-from xauusd_forecaster.news.collection.source_registry import NEWS_SOURCE_REGISTRY
+from xauusd_news.ai.quota import GeminiQuotaLedger
+from xauusd_news.news.scheduler.state import authorize_repairable_annotation_failures
+from xauusd_news.news.scheduler.state import configured_api_credentials
+from xauusd_news.news.scheduler.state import reserve_account_request
+from xauusd_news.news.collection.source_registry import NEWS_SOURCE_REGISTRY
 
 
 UTC = timezone.utc
@@ -723,7 +723,7 @@ def test_dashboard_annotation_counts_match_current_worker_policy(tmp_path) -> No
                 parsed_at=now + timedelta(seconds=1),
                 prompt_version=PROMPT_VERSION,
             )
-    from xauusd_forecaster.news.scheduler.state import sync_pending_jobs
+    from xauusd_news.news.scheduler.state import sync_pending_jobs
     sync_pending_jobs(ledger.connection, now=now + timedelta(seconds=2))
     ledger.connection.close()
 
@@ -741,7 +741,7 @@ def test_dashboard_annotation_counts_match_current_worker_policy(tmp_path) -> No
 
 
 def test_dashboard_quota_uses_scheduler_ledger(tmp_path, monkeypatch) -> None:
-    import xauusd_forecaster.news.scheduler.state as news_scheduler
+    import xauusd_news.news.scheduler.state as news_scheduler
 
     configured = {"GEMINI_API_KEYS": "key-a;key-b", "GEMINI_API_KEY": ""}
     monkeypatch.setattr(
@@ -789,7 +789,7 @@ def test_dashboard_quota_uses_scheduler_ledger(tmp_path, monkeypatch) -> None:
 def test_dashboard_quota_keeps_pre_scheduler_file_compatibility(
     tmp_path, monkeypatch,
 ) -> None:
-    import xauusd_forecaster.news.scheduler.state as news_scheduler
+    import xauusd_news.news.scheduler.state as news_scheduler
 
     configured = {"GEMINI_API_KEYS": "legacy-key", "GEMINI_API_KEY": ""}
     monkeypatch.setattr(
@@ -1012,7 +1012,7 @@ def test_optional_api_producers_fail_independently(
 def test_durable_optional_read_models_are_atomic_bounded_and_incremental(
     monkeypatch, tmp_path,
 ) -> None:
-    import xauusd_forecaster.dashboard.read_models as read_models
+    import xauusd_news.dashboard.read_models as read_models
 
     database = tmp_path / "forward.sqlite3"
     ForwardLedger(database).close()
@@ -1112,7 +1112,7 @@ def _insert_brief(connection: sqlite3.Connection, index: int) -> None:
 
 @pytest.mark.parametrize("empty", [False, True])
 def test_audit_source_build_http_sync_preserves_each_detail_once(monkeypatch, tmp_path, empty):
-    from xauusd_forecaster.dashboard.sync import resources as sync
+    from xauusd_news.dashboard.sync import resources as sync
     from scripts.validation.build_release_validation_fixtures import _source_payload
 
     module = _dashboard_module()
@@ -1131,7 +1131,7 @@ def test_audit_source_build_http_sync_preserves_each_detail_once(monkeypatch, tm
         builds.append(kwargs["snapshot_connection"])
         return {**source, "generated_at": kwargs["clock"]().isoformat()}
 
-    from xauusd_forecaster.dashboard import status_resources
+    from xauusd_news.dashboard import status_resources
     monkeypatch.setattr(status_resources, "_dashboard_payload", build)
     owner = DashboardReadModelOwner(database, {
         "audit": lambda snapshot: module._optional_resource_payload(snapshot, "audit"),
@@ -1338,7 +1338,7 @@ def test_read_model_freshness_cannot_be_manufactured(
 
 
 def test_existing_read_model_schema_gains_snapshot_provenance(tmp_path) -> None:
-    from xauusd_forecaster.dashboard.read_models import install_dashboard_read_model_schema
+    from xauusd_news.dashboard.read_models import install_dashboard_read_model_schema
 
     database = tmp_path / "forward.sqlite3"
     ForwardLedger(database).close()
@@ -1448,10 +1448,10 @@ def test_optional_read_model_validation_and_concurrent_reads(tmp_path) -> None:
 def test_retry_operator_bridge_lists_and_atomically_applies_idempotent_override(
     monkeypatch, tmp_path,
 ) -> None:
-    from xauusd_forecaster.news.scheduler.state import ROUTINE_POOL
-    from xauusd_forecaster.news.scheduler.state import backoff_job
-    from xauusd_forecaster.news.scheduler.state import claim_job
-    from xauusd_forecaster.news.scheduler.state import enqueue_job
+    from xauusd_news.news.scheduler.state import ROUTINE_POOL
+    from xauusd_news.news.scheduler.state import backoff_job
+    from xauusd_news.news.scheduler.state import claim_job
+    from xauusd_news.news.scheduler.state import enqueue_job
 
     module = _dashboard_module()
     bridge_token = "test-operator-bridge-token-" + "x" * 32
@@ -2174,7 +2174,7 @@ def test_news_projection_manifest_is_authorized_and_nonblocking(
     token = "operator-bridge-" + "x" * 32
     monkeypatch.setenv("DASHBOARD_OPERATOR_BRIDGE_TOKEN", token)
     generation = __import__(
-        "xauusd_forecaster.news_projection", fromlist=["build_news_projection_generation"],
+        "xauusd_news.news_projection", fromlist=["build_news_projection_generation"],
     ).build_news_projection_generation(
         [], [], window_start="2026-06-25T00:00:00+00:00",
         watermark="2026-08-24T00:00:00+00:00",
@@ -2245,7 +2245,7 @@ def test_news_projection_manifest_is_authorized_and_nonblocking(
 
 def test_news_projection_accepts_a_large_realistic_article_within_worker_bound() -> None:
     projection = __import__(
-        "xauusd_forecaster.news_projection", fromlist=["build_news_projection_generation"],
+        "xauusd_news.news_projection", fromlist=["build_news_projection_generation"],
     )
     generation = projection.build_news_projection_generation(
         [{
@@ -2504,7 +2504,7 @@ def test_dashboard_keeps_readable_late_news_in_semantic_queue(tmp_path) -> None:
             "cluster_id": "late-readable",
         }
     )
-    from xauusd_forecaster.news.scheduler.state import sync_pending_jobs
+    from xauusd_news.news.scheduler.state import sync_pending_jobs
     sync_pending_jobs(ledger.connection, now=now)
     ledger.connection.close()
 
@@ -2860,8 +2860,8 @@ def test_news_evidence_pages_are_byte_bounded_and_complete_at_large_scale(
 
 @pytest.mark.parametrize("stop_after_first", [False, True])
 def test_optional_resource_round_releases_readers_for_wal_recovery(tmp_path, monkeypatch, stop_after_first):
-    from xauusd_forecaster.dashboard import read_models
-    from xauusd_forecaster.sqlite_wal import checkpoint_forward_wal, open_forward_writer_connection
+    from xauusd_news.dashboard import read_models
+    from xauusd_news.sqlite_wal import checkpoint_forward_wal, open_forward_writer_connection
     database = tmp_path / "forward.sqlite3"
     ForwardLedger(database).close()
     writer = open_forward_writer_connection(database)

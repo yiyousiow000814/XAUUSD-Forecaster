@@ -6,25 +6,25 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from xauusd_forecaster.assistant.capacity import ASSISTANT_CAPACITY_POLICY_VERSION
-from xauusd_forecaster.assistant.capacity import AssistantCapacityPolicy
-from xauusd_forecaster.assistant.capacity import AssistantCapacityUnavailable
-from xauusd_forecaster.assistant.capacity import AssistantServicePriority
-from xauusd_forecaster.assistant.capacity import configured_assistant_capacity_policies
-from xauusd_forecaster.assistant.capacity import credential_pool_fingerprint
-from xauusd_forecaster.assistant.capacity import execute_assistant_capacity_route
-from xauusd_forecaster.assistant.routing import AssistantTaskType
-from xauusd_forecaster.assistant.routing import ModelCapacityClass
-from xauusd_forecaster.assistant.routing import ModelProfile
-from xauusd_forecaster.assistant.routing import plan_assistant_route
-from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.ai.model_gateway import ModelGatewayCapacityExhausted
-from xauusd_forecaster.ai.model_gateway import ModelRequestUsage
-from xauusd_forecaster.news.scheduler.state import PREEMPTIBLE_POOL
-from xauusd_forecaster.news.scheduler.state import ROUTINE_POOL
-from xauusd_forecaster.news.scheduler.state import ApiCredential
-from xauusd_forecaster.news.scheduler.state import minute_bucket
-from xauusd_forecaster.news.scheduler.state import quota_day
+from xauusd_news.assistant.capacity import ASSISTANT_CAPACITY_POLICY_VERSION
+from xauusd_news.assistant.capacity import AssistantCapacityPolicy
+from xauusd_news.assistant.capacity import AssistantCapacityUnavailable
+from xauusd_news.assistant.capacity import AssistantServicePriority
+from xauusd_news.assistant.capacity import configured_assistant_capacity_policies
+from xauusd_news.assistant.capacity import credential_pool_fingerprint
+from xauusd_news.assistant.capacity import execute_assistant_capacity_route
+from xauusd_news.assistant.routing import AssistantTaskType
+from xauusd_news.assistant.routing import ModelCapacityClass
+from xauusd_news.assistant.routing import ModelProfile
+from xauusd_news.assistant.routing import plan_assistant_route
+from xauusd_news.evidence.ledger import ForwardLedger
+from xauusd_news.ai.model_gateway import ModelGatewayCapacityExhausted
+from xauusd_news.ai.model_gateway import ModelRequestUsage
+from xauusd_news.news.scheduler.state import PREEMPTIBLE_POOL
+from xauusd_news.news.scheduler.state import ROUTINE_POOL
+from xauusd_news.news.scheduler.state import ApiCredential
+from xauusd_news.news.scheduler.state import minute_bucket
+from xauusd_news.news.scheduler.state import quota_day
 
 
 NOW = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
@@ -392,8 +392,8 @@ def test_background_cannot_consume_preemptible_pool() -> None:
 def sqlite3_connection():
     import sqlite3
 
-    from xauusd_forecaster.assistant.capacity import install_assistant_capacity_schema
-    from xauusd_forecaster.news.scheduler.state import install_scheduler_schema
+    from xauusd_news.assistant.capacity import install_assistant_capacity_schema
+    from xauusd_news.news.scheduler.state import install_scheduler_schema
 
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row

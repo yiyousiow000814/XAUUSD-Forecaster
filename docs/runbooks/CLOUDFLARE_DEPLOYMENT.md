@@ -1,7 +1,7 @@
 # Cloudflare Deployment
 
-The sole production application is `aurum-signal-room`. Workers Builds connects
-to `yiyousiow000814/XAUUSD-Forecaster`, production branch `main`, root `/web`.
+The sole production application is `xauusd-news`. Workers Builds connects
+to `yiyousiow000814/xauusd-news`, production branch `main`, root `/web`.
 Non-production builds are disabled. Build: `npm ci && npm test`.
 Deploy: `npx wrangler deploy --message "main:$WORKERS_CI_COMMIT_SHA"`.
 

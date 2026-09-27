@@ -278,7 +278,7 @@ def test_runtime_and_producer_roots_are_independent_cli_contracts(tmp_path) -> N
     assert 'parser.add_argument("--producer-root", required=True)' in source
     assert 'LOCAL_DATABASE = RUNTIME_ROOT / ".local"' in source
     producer = tmp_path / "producer"
-    shutil.copytree(ROOT / "xauusd_forecaster", producer / "xauusd_forecaster",
+    shutil.copytree(ROOT / "xauusd_news", producer / "xauusd_news",
                     ignore=shutil.ignore_patterns("__pycache__"))
     runtime = tmp_path / "runtime"
     other = tmp_path / "unrelated"

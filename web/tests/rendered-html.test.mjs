@@ -666,7 +666,7 @@ test("keeps Admin login intent local until the explicit Access handoff", () => {
   assert.match(shell, /<h2>管理员登录<\/h2>/);
   assert.match(shell, /仅系统管理员可访问 Assistant、重试任务和 AI 模型用量。/);
   assert.match(shell, /登录后进入私有管理后台。/);
-  assert.match(shell, /\^\[0-9a-f\]\{8\}-aurum-signal-room/);
+  assert.match(shell, /\^\[0-9a-f\]\{8\}-xauusd-news/);
   assert.match(shell, /这是未受 Cloudflare Access 保护的 Candidate 检查页面。/);
   assert.match(shell, /管理员登录需在正式 Access 边界验收；此页面不会伪造登录通过。/);
   assert.match(shell, /candidateInspection \? null : <button/);
@@ -1781,7 +1781,7 @@ test("activates only complete paged news-evidence generations outside status", (
   const store = readFileSync(
     new URL("../app/api/_shared/news-evidence-store.ts", import.meta.url), "utf8",
   );
-  const sync = readFileSync(new URL("../../xauusd_forecaster/dashboard/sync/resources.py", import.meta.url), "utf8");
+  const sync = readFileSync(new URL("../../xauusd_news/dashboard/sync/resources.py", import.meta.url), "utf8");
   const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
   assert.match(migration, /event_key TEXT PRIMARY KEY/);
   assert.match(migration, /news_evidence_current_eligible/);
@@ -2163,7 +2163,7 @@ test("loads market history by bounded range without model decisions", () => {
 
 test("live room reports articles without treating omitted event counts as zero", async () => {
   const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
-  const payloads = readFileSync(new URL("../../xauusd_forecaster/dashboard/payloads.py", import.meta.url), "utf8");
+  const payloads = readFileSync(new URL("../../xauusd_news/dashboard/payloads.py", import.meta.url), "utf8");
   assert.match(source, /OverviewNews/);
   assert.doesNotMatch(source, /newsMetrics|metric-grid|source-panel/);
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
@@ -2256,7 +2256,7 @@ test("keeps the legacy news Q&A queue protected and paused without a duplicate s
   );
   const queue = readFileSync(new URL("../app/api/_shared/news-questions.ts", import.meta.url), "utf8");
   const auth = readFileSync(new URL("../app/api/_shared/dashboard-operator-auth.ts", import.meta.url), "utf8");
-  const sync = readFileSync(new URL("../../xauusd_forecaster/dashboard/sync/resources.py", import.meta.url), "utf8");
+  const sync = readFileSync(new URL("../../xauusd_news/dashboard/sync/resources.py", import.meta.url), "utf8");
 
   assert.doesNotMatch(view, /view === "qa"/);
   assert.doesNotMatch(view, /PRIVATE · EVIDENCE GROUNDED|私有问答|\/api\/news-questions/);
@@ -2347,9 +2347,9 @@ test("separates Access-owned human APIs from the ingest worker control plane", (
   ].map(name => readFileSync(
     new URL(`../app/admin/api/${name}/route.ts`, import.meta.url), "utf8",
   ));
-  const sync = readFileSync(new URL("../../xauusd_forecaster/dashboard/sync/resources.py", import.meta.url), "utf8");
+  const sync = readFileSync(new URL("../../xauusd_news/dashboard/sync/resources.py", import.meta.url), "utf8");
   const chatWorker = readFileSync(
-    new URL("../../xauusd_forecaster/assistant/chat_worker.py", import.meta.url), "utf8",
+    new URL("../../xauusd_news/assistant/chat_worker.py", import.meta.url), "utf8",
   );
   const security = readFileSync(
     new URL("../../docs/contracts/ASSISTANT_SECURITY.md", import.meta.url), "utf8",
@@ -2864,7 +2864,7 @@ test("only native main publication remains configured", () => {
   const config = JSON.parse(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const contract = JSON.parse(readFileSync(new URL("../cloudflare-build-contract.json", import.meta.url), "utf8"));
-  assert.equal(config.name, "aurum-signal-room");
+  assert.equal(config.name, "xauusd-news");
   assert.equal(packageJson.scripts["cf:preview-upload"], undefined);
   assert.equal(contract.source.production_branch, "main");
   assert.equal(contract.non_production_builds_enabled, false);

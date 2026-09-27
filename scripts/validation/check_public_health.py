@@ -12,10 +12,10 @@ import urllib.error
 import urllib.request
 
 
-DEFAULT_BASE_URL = "https://aurum-signal-room.yiyousiow1234.workers.dev"
+DEFAULT_BASE_URL = "https://xauusd-news.yiyousiow1234.workers.dev"
 TIMEOUT_SECONDS = 20
 PAGE_MARKERS = {
-    "/": "Aurum Signal Room",
+    "/": "XAUUSD News",
     "/health": "系统健康状态",
     "/audit": "证据台页面",
 }

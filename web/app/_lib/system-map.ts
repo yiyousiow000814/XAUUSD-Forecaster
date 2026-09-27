@@ -4,13 +4,13 @@ export type MapEdge = { from: string; to: string; label: string; source: MapSour
 export type SystemMap = { id: string; title: string; summary: string; nodes: MapNode[]; edges: MapEdge[] };
 const source = (path: string, witness: string): MapSource => ({ path, witness });
 const collector = source('scripts/runtime/run_forward_collector.py', 'news_owner = NewsCollectionOwner(');
-const news = source('xauusd_forecaster/news/collection/runtime.py', 'collect_official_news(ledger, observed_at)');
+const news = source('xauusd_news/news/collection/runtime.py', 'collect_official_news(ledger, observed_at)');
 const annotation = source('scripts/runtime/run_news_annotator.py', 'statuses = run_scheduled_batch_with_lock_retry(');
 const api = source('scripts/runtime/run_dashboard_api.py', 'read_model_owner.start()');
 const sync = source('scripts/runtime/run_dashboard_sync.py', '_post_json(target["remote_ingest_url"], live_payload, target)');
 const worker = source('web/worker/api-router.ts', 'return publicStatusRead(env.DB)');
 const bridge = source('ctrader/XauusdForwardQuoteBridge/XauusdForwardQuoteBridge.cs', 'double bid = this.Symbol.Bid');
-const market = source('xauusd_forecaster/dashboard/runtime_status.py', 'def latest_quote(');
+const market = source('xauusd_news/dashboard/runtime_status.py', 'def latest_quote(');
 const node = (id: string, title: string, detail: string, ref: MapSource, child?: string): MapNode => ({ id, title, detail, source: ref, child });
 const edge = (from: string, to: string, label: string, ref: MapSource): MapEdge => ({ from, to, label, source: ref });
 
@@ -34,8 +34,8 @@ export const SYSTEM_MAPS: SystemMap[] = [
     node('sources','新闻来源','按来源周期采集',news),
     node('intake','原文与修订','保存来源内容和时间证据',news),
     node('annotator','AI 复核任务','独立进程执行语义任务',annotation),
-    node('visible','新闻证据','当前可用的事件与来源',source('xauusd_forecaster/news/semantics/evidence.py','def event_evidence_rows_from_connection(')),
-  ], edges: [edge('sources','intake','采集入库',news),edge('intake','annotator','待处理新闻',annotation),edge('annotator','visible','复核结果入库',source('xauusd_forecaster/news/annotation/product.py','ledger.append_annotation('))] },
+    node('visible','新闻证据','当前可用的事件与来源',source('xauusd_news/news/semantics/evidence.py','def event_evidence_rows_from_connection(')),
+  ], edges: [edge('sources','intake','采集入库',news),edge('intake','annotator','待处理新闻',annotation),edge('annotator','visible','复核结果入库',source('xauusd_news/news/annotation/product.py','ledger.append_annotation('))] },
   { id: 'dashboard', title: '网页与同步', summary: 'SQLite 是新闻证据权威；D1 提供网页投影，浏览器不连接本机。', nodes: [
     node('local','本机 SQLite','新闻、事件和来源证据',source('scripts/runtime/run_dashboard_api.py','DashboardReadModelOwner(')),
     node('read','读模型 / 本机 API','独立生成有界页面资源',api),

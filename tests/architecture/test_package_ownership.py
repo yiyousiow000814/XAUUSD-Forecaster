@@ -14,26 +14,26 @@ def test_canonical_owners_import_and_reopen_schema_outside_repository_cwd(tmp_pa
     source = r'''
 import importlib, json, pathlib, pkgutil, sys
 sys.path.insert(0, sys.argv[1])
-import xauusd_forecaster
+import xauusd_news
 before = set(pathlib.Path.cwd().iterdir())
 for area in ("ai", "assistant", "dashboard", "evidence", "news", "runtime"):
-    package = importlib.import_module("xauusd_forecaster." + area)
+    package = importlib.import_module("xauusd_news." + area)
     for item in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
         importlib.import_module(item.name)
 assert set(pathlib.Path.cwd().iterdir()) == before, "IMPORT_MUTATED_WORKING_DIRECTORY"
 for name, module in tuple(sys.modules.items()):
-    if name.startswith("xauusd_forecaster.") and getattr(module, "__file__", None):
+    if name.startswith("xauusd_news.") and getattr(module, "__file__", None):
         assert pathlib.Path(module.__file__).resolve().is_relative_to(pathlib.Path(sys.argv[1]).resolve()), (name, module.__file__)
-from xauusd_forecaster.news.semantics import contracts
+from xauusd_news.news.semantics import contracts
 assert json.loads(contracts._SCHEMA_PATH.read_text(encoding="utf-8"))
-from xauusd_forecaster.evidence.ledger import ForwardLedger
+from xauusd_news.evidence.ledger import ForwardLedger
 path = pathlib.Path.cwd() / "isolated.sqlite3"
 for _ in range(2):
     ledger = ForwardLedger(path)
     assert ledger.connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     ledger.close()
-from xauusd_forecaster.dashboard import status_resources
-from xauusd_forecaster.dashboard.sync import resources
+from xauusd_news.dashboard import status_resources
+from xauusd_news.dashboard.sync import resources
 assert status_resources.MODULE_ROOT == pathlib.Path(sys.argv[1]).resolve()
 assert resources.MODULE_ROOT == pathlib.Path(sys.argv[1]).resolve()
 '''

@@ -15,7 +15,7 @@ implementation status is recorded separately in
 
 ## Canonical ownership
 
-XAUUSD Forecaster MUST own the canonical conversation state. A conversation
+XAUUSD News MUST own the canonical conversation state. A conversation
 MUST NOT belong to or depend for continuity on:
 
 - one provider session;

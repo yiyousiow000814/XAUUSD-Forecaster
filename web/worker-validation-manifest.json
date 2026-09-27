@@ -215,7 +215,7 @@
       "acceptance_samples": 10,
       "producers": [
         "scripts/runtime/run_dashboard_sync.py",
-        "xauusd_forecaster/dashboard_payloads.py"
+        "xauusd_news/dashboard_payloads.py"
       ],
       "owners": [
         "web/app/api/audit-briefs/route.ts",
@@ -236,7 +236,7 @@
       "acceptance_samples": 10,
       "producers": [
         "scripts/runtime/run_dashboard_sync.py",
-        "xauusd_forecaster/dashboard_payloads.py"
+        "xauusd_news/dashboard_payloads.py"
       ],
       "owners": [
         "web/app/api/audit-stories/route.ts",
@@ -279,7 +279,7 @@
       "acceptance_samples": 10,
       "producers": [
         "scripts/runtime/run_dashboard_sync.py",
-        "xauusd_forecaster/dashboard_payloads.py"
+        "xauusd_news/dashboard_payloads.py"
       ],
       "owners": [
         "web/app/api/ingest/route.ts",
@@ -303,7 +303,7 @@
       "acceptance_samples": 10,
       "producers": [
         "scripts/runtime/run_dashboard_sync.py",
-        "xauusd_forecaster/dashboard_payloads.py"
+        "xauusd_news/dashboard_payloads.py"
       ],
       "owners": [
         "web/app/api/audit/route.ts",
@@ -327,7 +327,7 @@
       "acceptance_samples": 10,
       "producers": [
         "scripts/runtime/run_dashboard_sync.py",
-        "xauusd_forecaster/dashboard_payloads.py"
+        "xauusd_news/dashboard_payloads.py"
       ],
       "owners": [
         "web/app/api/audit-briefs/route.ts",
@@ -349,7 +349,7 @@
       "acceptance_samples": 10,
       "producers": [
         "scripts/runtime/run_dashboard_sync.py",
-        "xauusd_forecaster/dashboard_payloads.py"
+        "xauusd_news/dashboard_payloads.py"
       ],
       "owners": [
         "web/app/api/audit-stories/route.ts",
@@ -371,7 +371,7 @@
       "acceptance_samples": 10,
       "producers": [
         "scripts/runtime/run_dashboard_sync.py",
-        "xauusd_forecaster/dashboard_payloads.py"
+        "xauusd_news/dashboard_payloads.py"
       ],
       "owners": [
         "web/app/api/market-chart/route.ts",
@@ -395,7 +395,7 @@
       "acceptance_samples": 10,
       "producers": [
         "scripts/runtime/run_dashboard_sync.py",
-        "xauusd_forecaster/dashboard_payloads.py"
+        "xauusd_news/dashboard_payloads.py"
       ],
       "owners": [
         "web/app/api/market-history/route.ts",
@@ -419,7 +419,7 @@
       "acceptance_samples": 10,
       "producers": [
         "scripts/runtime/run_dashboard_sync.py",
-        "xauusd_forecaster/dashboard_payloads.py"
+        "xauusd_news/dashboard_payloads.py"
       ],
       "scenarios": [
         {
@@ -461,7 +461,7 @@
       "acceptance_samples": 10,
       "producers": [
         "scripts/runtime/run_dashboard_sync.py",
-        "xauusd_forecaster/news_projection.py"
+        "xauusd_news/news_projection.py"
       ],
       "scenarios": [
         {
@@ -737,7 +737,7 @@
       "acceptance_samples": 10,
       "producers": [
         "scripts/runtime/run_dashboard_sync.py",
-        "xauusd_forecaster/news_projection.py"
+        "xauusd_news/news_projection.py"
       ],
       "scenarios": [
         {

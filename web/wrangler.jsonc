@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "aurum-signal-room",
+  "name": "xauusd-news",
   "main": "./worker/index.ts",
   "compatibility_date": "2026-08-07",
   "compatibility_flags": ["nodejs_compat"],
@@ -29,6 +29,7 @@
   "d1_databases": [
     {
       "binding": "DB",
+      // D1 has no in-place rename API; preserve the existing data resource.
       "database_name": "aurum-signal-room",
       "database_id": "3ef51a58-bb3b-4443-b527-be3af4d5c6b2",
       "migrations_dir": "drizzle"

@@ -13,9 +13,9 @@ from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(MODULE_ROOT))
 
-from xauusd_forecaster.news.retrieval.benchmark import evaluate_candidate_retrieval
-from xauusd_forecaster.news.retrieval.benchmark import load_benchmark_manifest
-from xauusd_forecaster.news.retrieval.search import latest_embedding_profile
+from xauusd_news.news.retrieval.benchmark import evaluate_candidate_retrieval
+from xauusd_news.news.retrieval.benchmark import load_benchmark_manifest
+from xauusd_news.news.retrieval.search import latest_embedding_profile
 
 
 def main() -> int:

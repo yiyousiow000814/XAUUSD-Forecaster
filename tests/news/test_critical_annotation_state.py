@@ -7,24 +7,24 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-import xauusd_forecaster.news.annotation.product as annotation_contract
-import xauusd_forecaster.news.semantics.critical_state as critical_state
-import xauusd_forecaster.news.scheduler.state as scheduler
-from xauusd_forecaster.news.annotation.product import PROMPT_VERSION
-from xauusd_forecaster.news.semantics.critical_state import INSTALL_VERSION
-from xauusd_forecaster.news.semantics.critical_state import annotation_materialization_contract
-from xauusd_forecaster.news.semantics.critical_state import annotation_queue_snapshot
-from xauusd_forecaster.news.semantics.critical_state import install_critical_annotation_state_schema
-from xauusd_forecaster.news.semantics.critical_state import news_current_counts
-from xauusd_forecaster.news.semantics.critical_state import refresh_news_revision_state
-from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.runtime.operational_health import scheduler_health_snapshot
-from xauusd_forecaster.news.scheduler.state import ROUTINE_POOL
-from xauusd_forecaster.news.scheduler.state import backoff_job
-from xauusd_forecaster.news.scheduler.state import claim_job
-from xauusd_forecaster.news.scheduler.state import complete_job
-from xauusd_forecaster.news.scheduler.state import enqueue_job
-from xauusd_forecaster.news.scheduler.state import reconcile_completed_jobs
+import xauusd_news.news.annotation.product as annotation_contract
+import xauusd_news.news.semantics.critical_state as critical_state
+import xauusd_news.news.scheduler.state as scheduler
+from xauusd_news.news.annotation.product import PROMPT_VERSION
+from xauusd_news.news.semantics.critical_state import INSTALL_VERSION
+from xauusd_news.news.semantics.critical_state import annotation_materialization_contract
+from xauusd_news.news.semantics.critical_state import annotation_queue_snapshot
+from xauusd_news.news.semantics.critical_state import install_critical_annotation_state_schema
+from xauusd_news.news.semantics.critical_state import news_current_counts
+from xauusd_news.news.semantics.critical_state import refresh_news_revision_state
+from xauusd_news.evidence.ledger import ForwardLedger
+from xauusd_news.runtime.operational_health import scheduler_health_snapshot
+from xauusd_news.news.scheduler.state import ROUTINE_POOL
+from xauusd_news.news.scheduler.state import backoff_job
+from xauusd_news.news.scheduler.state import claim_job
+from xauusd_news.news.scheduler.state import complete_job
+from xauusd_news.news.scheduler.state import enqueue_job
+from xauusd_news.news.scheduler.state import reconcile_completed_jobs
 
 
 NOW = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)

@@ -8,21 +8,21 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from xauusd_forecaster.ai.provider_registry import AI_QUOTA_SURFACES
-from xauusd_forecaster.news.annotation.product import DEFAULT_GEMMA_MODEL
-from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.ai.model_gateway import GeminiModelGateway
-from xauusd_forecaster.ai.model_gateway import ModelGatewayResponseInvalid
-from xauusd_forecaster.ai.model_gateway import ModelRequestUsage
-from xauusd_forecaster.news.scheduler.state import ApiCredential
-from xauusd_forecaster.news.scheduler.state import CONTRACT_BACKFILL_LANE
-from xauusd_forecaster.news.scheduler.state import calibrated_input_tokens
-from xauusd_forecaster.news.scheduler.state import mark_account_request_attempted
-from xauusd_forecaster.news.scheduler.state import record_account_request_outcome
-from xauusd_forecaster.news.scheduler.state import reserve_account_request
-from xauusd_forecaster.news.scheduler.state import reserve_provider_dispatch
-from xauusd_forecaster.news.scheduler.state import rolling_account_usage
-from xauusd_forecaster.news.scheduler.model_gateway import SchedulerModelAccountant
+from xauusd_news.ai.provider_registry import AI_QUOTA_SURFACES
+from xauusd_news.news.annotation.product import DEFAULT_GEMMA_MODEL
+from xauusd_news.evidence.ledger import ForwardLedger
+from xauusd_news.ai.model_gateway import GeminiModelGateway
+from xauusd_news.ai.model_gateway import ModelGatewayResponseInvalid
+from xauusd_news.ai.model_gateway import ModelRequestUsage
+from xauusd_news.news.scheduler.state import ApiCredential
+from xauusd_news.news.scheduler.state import CONTRACT_BACKFILL_LANE
+from xauusd_news.news.scheduler.state import calibrated_input_tokens
+from xauusd_news.news.scheduler.state import mark_account_request_attempted
+from xauusd_news.news.scheduler.state import record_account_request_outcome
+from xauusd_news.news.scheduler.state import reserve_account_request
+from xauusd_news.news.scheduler.state import reserve_provider_dispatch
+from xauusd_news.news.scheduler.state import rolling_account_usage
+from xauusd_news.news.scheduler.model_gateway import SchedulerModelAccountant
 
 
 NOW = datetime(2026, 8, 18, 1, 0, tzinfo=UTC)

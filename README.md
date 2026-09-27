@@ -1,4 +1,4 @@
-# XAUUSD Forecaster
+# XAUUSD News
 
 A dashboard for XAUUSD quotes, curated news events, source evidence, daily
 briefs, and event storylines. Live OOS forecasting and its prediction, scoring,

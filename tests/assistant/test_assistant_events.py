@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.assistant.events import MAX_ASSISTANT_ANSWER_DELTA_BYTES
-from xauusd_forecaster.assistant.events import AssistantEventBuilder
-from xauusd_forecaster.assistant.events import AssistantEventContractError
-from xauusd_forecaster.assistant.events import AssistantEventEnvelope
-from xauusd_forecaster.assistant.events import AssistantEventSequence
-from xauusd_forecaster.assistant.events import AssistantEventType
-from xauusd_forecaster.assistant.events import encode_assistant_sse
+from xauusd_news.assistant.events import MAX_ASSISTANT_ANSWER_DELTA_BYTES
+from xauusd_news.assistant.events import AssistantEventBuilder
+from xauusd_news.assistant.events import AssistantEventContractError
+from xauusd_news.assistant.events import AssistantEventEnvelope
+from xauusd_news.assistant.events import AssistantEventSequence
+from xauusd_news.assistant.events import AssistantEventType
+from xauusd_news.assistant.events import encode_assistant_sse
 
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "assistant_event_v1.json"

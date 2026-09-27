@@ -34,7 +34,7 @@ import { liveBroadcastTransport } from "../_lib/live-broadcast";
 import { ensureStatusBaseline } from "../_lib/dashboard-refresh";
 
 export const isVersionedCandidateHost = (hostname: string) => (
-  /^[0-9a-f]{8}-aurum-signal-room\./i.test(hostname)
+  /^[0-9a-f]{8}-xauusd-news\./i.test(hostname)
 );
 
 const subscribeStaticBrowserLocation = () => () => undefined;

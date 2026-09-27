@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.assistant.content import ASSISTANT_CONTENT_PROTOCOL_VERSION
-from xauusd_forecaster.assistant.content import AssistantContentContractError
-from xauusd_forecaster.assistant.content import build_assistant_content_document
-from xauusd_forecaster.assistant.content import validate_assistant_content_document
+from xauusd_news.assistant.content import ASSISTANT_CONTENT_PROTOCOL_VERSION
+from xauusd_news.assistant.content import AssistantContentContractError
+from xauusd_news.assistant.content import build_assistant_content_document
+from xauusd_news.assistant.content import validate_assistant_content_document
 
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "assistant_content_v1.json"

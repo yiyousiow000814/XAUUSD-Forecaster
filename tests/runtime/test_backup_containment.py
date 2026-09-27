@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster import maintenance
-from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.runtime.process_identity import _process_start_token
+from xauusd_news import maintenance
+from xauusd_news.evidence.ledger import ForwardLedger
+from xauusd_news.runtime.process_identity import _process_start_token
 from scripts.runtime import run_forward_collector as collector
 from scripts.runtime import run_dashboard_api as dashboard_api
 

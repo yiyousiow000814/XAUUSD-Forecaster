@@ -14,7 +14,7 @@ AUTOMATION_ROOTS = (
     Path("ctrader"),
     Path("scripts"),
     Path("web"),
-    Path("xauusd_forecaster"),
+    Path("xauusd_news"),
 )
 AUTOMATION_SUFFIXES = {
     ".cs",
@@ -32,7 +32,7 @@ AUTOMATION_SUFFIXES = {
 IGNORED_PARTS = {".next", ".open-next", "node_modules", "__pycache__"}
 POLICY_IMPLEMENTATION = Path("scripts/validation/check_repository_policy.py")
 CLOUDFLARE_BUILD_CONTRACT = Path("web/cloudflare-build-contract.json")
-EXPECTED_CLOUDFLARE_BUILD_CONTRACT = {'schema_version': 'cloudflare-production-build-v3', 'source': {'provider': 'github', 'repository': 'yiyousiow000814/XAUUSD-Forecaster', 'production_branch': 'main', 'root_directory': '/web', 'path_includes': ['*'], 'path_excludes': []}, 'commands': {'build': 'npm ci && npm test', 'deploy': 'npx wrangler deploy --message "main:$WORKERS_CI_COMMIT_SHA"'}, 'output': {'artifact_kind': 'PRODUCTION_ARTIFACT', 'immutable_version_only': False, 'changes_stable_traffic': True}, 'non_production_builds_enabled': False}
+EXPECTED_CLOUDFLARE_BUILD_CONTRACT = {'schema_version': 'cloudflare-production-build-v3', 'source': {'provider': 'github', 'repository': 'yiyousiow000814/xauusd-news', 'production_branch': 'main', 'root_directory': '/web', 'path_includes': ['*'], 'path_excludes': []}, 'commands': {'build': 'npm ci && npm test', 'deploy': 'npx wrangler deploy --message "main:$WORKERS_CI_COMMIT_SHA"'}, 'output': {'artifact_kind': 'PRODUCTION_ARTIFACT', 'immutable_version_only': False, 'changes_stable_traffic': True}, 'non_production_builds_enabled': False}
 
 YAML_ENVIRONMENT_KEY = re.compile(
     r"(?:^|[{,])\s*(?:environment|'environment'|\"environment\")\s*:",

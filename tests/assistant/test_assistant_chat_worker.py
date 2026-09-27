@@ -6,14 +6,14 @@ import urllib.parse
 
 import pytest
 
-import xauusd_forecaster.assistant.chat_worker as worker
-from xauusd_forecaster.assistant.agent import AssistantAgentResult
-from xauusd_forecaster.assistant.capacity import AssistantCapacityUnavailable
-from xauusd_forecaster.assistant.content import build_assistant_content_document
-from xauusd_forecaster.assistant.tools import NEWS_SEARCH_TOOL_NAME
-from xauusd_forecaster.assistant.tools import AssistantToolCall
-from xauusd_forecaster.assistant.tools import AssistantToolCapability
-from xauusd_forecaster.assistant.tools import AssistantToolStatus
+import xauusd_news.assistant.chat_worker as worker
+from xauusd_news.assistant.agent import AssistantAgentResult
+from xauusd_news.assistant.capacity import AssistantCapacityUnavailable
+from xauusd_news.assistant.content import build_assistant_content_document
+from xauusd_news.assistant.tools import NEWS_SEARCH_TOOL_NAME
+from xauusd_news.assistant.tools import AssistantToolCall
+from xauusd_news.assistant.tools import AssistantToolCapability
+from xauusd_news.assistant.tools import AssistantToolStatus
 
 
 CUTOFF = "2026-08-16T01:00:00.000Z"

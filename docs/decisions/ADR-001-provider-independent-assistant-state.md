@@ -11,7 +11,7 @@ and audit behavior depend on external transport state.
 
 ## Decision
 
-XAUUSD Forecaster owns canonical conversations and messages under a stable
+XAUUSD News owns canonical conversations and messages under a stable
 Forecaster actor. Provider request IDs, model profiles, and credential-pool IDs
 are per-turn provenance only.
 

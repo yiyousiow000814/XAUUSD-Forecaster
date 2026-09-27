@@ -5,14 +5,19 @@ from datetime import UTC, datetime
 
 import pytest
 
-from xauusd_forecaster.ai.quota import GeminiQuotaLedger
-from xauusd_forecaster.ai.quota import key_fingerprint
+from xauusd_news.ai.quota import GeminiQuotaLedger
+from xauusd_news.ai.quota import key_fingerprint
 
 
 KEY = "secret-api-key-for-migration"
 LEGACY_FINGERPRINT = "2ede7a1eaf23"
 DAY = datetime(2026, 8, 19, 6, 0, tzinfo=UTC)
 NEXT_DAY = datetime(2026, 8, 20, 7, 0, tzinfo=UTC)
+
+
+def test_persisted_credential_identity_survives_package_rename() -> None:
+    # Existing quota and state records use this protocol identity.
+    assert key_fingerprint(KEY) == "hmac-v1-81bfe162625ced0dbc7c0b3b5ef11b8a"
 
 
 def _write_state(path, *, legacy: int | None, canonical: int | None) -> None:

@@ -5,7 +5,7 @@ import urllib.error
 
 import pytest
 
-from xauusd_forecaster.dashboard.sync import progress as module
+from xauusd_news.dashboard.sync import progress as module
 
 
 class _DeclaredPayloadContractError(ValueError):

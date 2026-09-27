@@ -7,13 +7,13 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-import xauusd_forecaster.news.scheduler.state as scheduler
-import xauusd_forecaster.news.semantics.transitions as transition_policy
+import xauusd_news.news.scheduler.state as scheduler
+import xauusd_news.news.semantics.transitions as transition_policy
 from tests.news.test_news_semantic_contract_v15 import _target_annotation
-from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.news.semantics.contracts import CURRENT_NEWS_PROMPT_VERSION
-from xauusd_forecaster.news.semantics.contracts import PREVIOUS_NEWS_PROMPT_VERSION
-from xauusd_forecaster.runtime.operational_health import scheduler_health_snapshot
+from xauusd_news.evidence.ledger import ForwardLedger
+from xauusd_news.news.semantics.contracts import CURRENT_NEWS_PROMPT_VERSION
+from xauusd_news.news.semantics.contracts import PREVIOUS_NEWS_PROMPT_VERSION
+from xauusd_news.runtime.operational_health import scheduler_health_snapshot
 
 
 NOW = datetime(2026, 8, 12, 2, 0, tzinfo=UTC)

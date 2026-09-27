@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from xauusd_forecaster.dashboard.status_cache import (
+from xauusd_news.dashboard.status_cache import (
     StatusSnapshotCache,
     StatusSnapshotUnavailable,
 )

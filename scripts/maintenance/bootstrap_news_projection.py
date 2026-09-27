@@ -18,7 +18,7 @@ from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(MODULE_ROOT))
 
-from xauusd_forecaster.dashboard.sync.resources import (  # noqa: E402
+from xauusd_news.dashboard.sync.resources import (  # noqa: E402
     NEWS_MIRROR_CONTRACT_VERSION,
     NEWS_PROJECTION_BATCHES_PER_CYCLE,
     PayloadContractError,
@@ -32,21 +32,21 @@ from xauusd_forecaster.dashboard.sync.resources import (  # noqa: E402
     _write_news_sync_state,
     RUNTIME_STATE_ROOT_KEY,
 )
-from xauusd_forecaster.dashboard.news_resources import (  # noqa: E402
+from xauusd_news.dashboard.news_resources import (  # noqa: E402
     _advance_news_projection_capture,
     _build_news_projection_source_from_database,
     _news_projection_snapshot_stat,
     _read_news_projection_generation_artifact,
     _write_news_projection_generation_artifact,
 )
-from xauusd_forecaster.evidence.ledger import ForwardLedger  # noqa: E402
-from xauusd_forecaster.news_projection import (  # noqa: E402
+from xauusd_news.evidence.ledger import ForwardLedger  # noqa: E402
+from xauusd_news.news_projection import (  # noqa: E402
     NewsProjectionGeneration, NewsProjectionRetainedGeneration, NewsProjectionSourceCapture,
 )
-from xauusd_forecaster.runtime_paths import PRODUCTION_RUNTIME_STATE_ROOT  # noqa: E402
+from xauusd_news.runtime_paths import PRODUCTION_RUNTIME_STATE_ROOT  # noqa: E402
 
 VERSION_HOST = re.compile(
-    r"^[a-z0-9-]+-aurum-signal-room\.[a-z0-9-]+\.workers\.dev$"
+    r"^[a-z0-9-]+-xauusd-news\.[a-z0-9-]+\.workers\.dev$"
 )
 
 
@@ -60,7 +60,7 @@ def _version_origin(value: str) -> str:
         or parsed.fragment
         or not VERSION_HOST.fullmatch(host)
     ):
-        raise ValueError("version host must be an exact aurum-signal-room workers.dev origin")
+        raise ValueError("version host must be an exact xauusd-news workers.dev origin")
     return urllib.parse.urlunsplit(("https", host, "", "", ""))
 
 
@@ -240,17 +240,17 @@ def advance_frozen_source_capture(
         raise ValueError("NEWS_SOURCE_CAPTURE_PROVENANCE_REQUIRED")
     if watermark.utcoffset() is None:
         raise ValueError("NEWS_SOURCE_CAPTURE_TIME_INVALID")
-    from xauusd_forecaster.dashboard import news_resources as source_owner
-    from xauusd_forecaster import news_projection as capture_owner
+    from xauusd_news.dashboard import news_resources as source_owner
+    from xauusd_news import news_projection as capture_owner
 
     actual_files = {
         "scripts/maintenance/bootstrap_news_projection.py": Path(__file__),
-        "xauusd_forecaster/dashboard/news_resources.py": Path(source_owner.__file__),
-        "xauusd_forecaster/news_projection.py": Path(capture_owner.__file__),
+        "xauusd_news/dashboard/news_resources.py": Path(source_owner.__file__),
+        "xauusd_news/news_projection.py": Path(capture_owner.__file__),
     }
     executing_identity = active_producer_identity if active_producer_identity is not None else source_identity
     if (Path(source_owner._news_reader_rows.__code__.co_filename).resolve()
-            != actual_files["xauusd_forecaster/dashboard/news_resources.py"].resolve()
+            != actual_files["xauusd_news/dashboard/news_resources.py"].resolve()
             or any(hashlib.sha256(path.read_bytes()).hexdigest()
                    != executing_identity.get("inputs", {}).get(name)
                    for name, path in actual_files.items())):

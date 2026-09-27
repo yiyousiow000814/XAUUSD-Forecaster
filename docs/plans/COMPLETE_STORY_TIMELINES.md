@@ -75,7 +75,7 @@ runtime owner. Packing is bounded by the admitted row inventory; removed rows
 are display projections, not deleted source evidence. Long individual chains
 can still exceed the fixed envelope and fail explicitly, a documented limit.
 
-Deployed Preview at `ee0b50f9-aurum-signal-room.yiyousiow1234.workers.dev`
+Deployed Preview at `ee0b50f9-xauusd-news.yiyousiow1234.workers.dev`
 passed desktop, 390x844 and 360x800 navigation, scrolling, expansion and return
 checks. No overflow or console warnings/errors; 44/48px targets. All five
 story-card outer boundaries, including the incomplete desktop row, remained

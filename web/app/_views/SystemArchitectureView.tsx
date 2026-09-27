@@ -11,7 +11,7 @@ const SourceIndex = lazy(() => import('./ArchitectureExplorerView'));
 function SourceLink({ source }: { source: MapSource }) {
   const sha = architectureCommitSha();
   if (!sha) return <code>{source.path}</code>;
-  return <a href={`https://github.com/yiyousiow000814/XAUUSD-Forecaster/blob/${sha}/${source.path}`} target="_blank" rel="noreferrer">{source.path} ↗</a>;
+  return <a href={`https://github.com/yiyousiow000814/xauusd-news/blob/${sha}/${source.path}`} target="_blank" rel="noreferrer">{source.path} ↗</a>;
 }
 
 function FlowDiagram({ view, selected, choose }: { view: SystemMap; selected: string | null; choose: (node: MapNode) => void }) {

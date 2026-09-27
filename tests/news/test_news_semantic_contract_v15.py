@@ -6,22 +6,22 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-import xauusd_forecaster.news.annotation.product as annotation_module
-from xauusd_forecaster.news.annotation.product import annotate_pending_news
-from xauusd_forecaster.news.annotation.product import pending_annotation_records
-from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.ai.quota import GeminiQuotaLedger
-from xauusd_forecaster.ai.model_gateway import GeminiModelGateway
-from xauusd_forecaster.news.semantics.contracts import CURRENT_NEWS_PROMPT_VERSION
-from xauusd_forecaster.news.semantics.contracts import LEGACY_NEWS_PROMPT_VERSION
-from xauusd_forecaster.news.semantics.contracts import LEGACY_SEMANTIC_NEWS_PROMPT_VERSION
-from xauusd_forecaster.news.semantics.contracts import PREVIOUS_NEWS_PROMPT_VERSION
-from xauusd_forecaster.news.semantics.contracts import canonicalize_active_annotation
-from xauusd_forecaster.news.semantics.contracts import news_annotation_schema
-from xauusd_forecaster.news.semantics.contracts import validate_news_annotation
-from xauusd_forecaster.news.semantics.evidence import event_evidence_rows
-from xauusd_forecaster.news.annotation.impact import IMPACT_PROMPT_VERSION
-from xauusd_forecaster.news.annotation.impact import pending_impact_records
+import xauusd_news.news.annotation.product as annotation_module
+from xauusd_news.news.annotation.product import annotate_pending_news
+from xauusd_news.news.annotation.product import pending_annotation_records
+from xauusd_news.evidence.ledger import ForwardLedger
+from xauusd_news.ai.quota import GeminiQuotaLedger
+from xauusd_news.ai.model_gateway import GeminiModelGateway
+from xauusd_news.news.semantics.contracts import CURRENT_NEWS_PROMPT_VERSION
+from xauusd_news.news.semantics.contracts import LEGACY_NEWS_PROMPT_VERSION
+from xauusd_news.news.semantics.contracts import LEGACY_SEMANTIC_NEWS_PROMPT_VERSION
+from xauusd_news.news.semantics.contracts import PREVIOUS_NEWS_PROMPT_VERSION
+from xauusd_news.news.semantics.contracts import canonicalize_active_annotation
+from xauusd_news.news.semantics.contracts import news_annotation_schema
+from xauusd_news.news.semantics.contracts import validate_news_annotation
+from xauusd_news.news.semantics.evidence import event_evidence_rows
+from xauusd_news.news.annotation.impact import IMPACT_PROMPT_VERSION
+from xauusd_news.news.annotation.impact import pending_impact_records
 from tests.fixtures.model_accounting_fakes import CallbackModelAccountant
 
 
@@ -452,7 +452,7 @@ def test_previous_v16_and_active_v17_annotations_coexist(tmp_path) -> None:
 def test_pending_annotation_identity_projection_preserves_scoped_eligibility(
     tmp_path, selection_order, discovery_only,
 ) -> None:
-    from xauusd_forecaster.news.scheduler.state import enqueue_job
+    from xauusd_news.news.scheduler.state import enqueue_job
 
     now = datetime(2026, 8, 11, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "scoped-annotation.sqlite3", now=now)
@@ -615,7 +615,7 @@ def test_active_annotation_requires_independent_impact_before_model_visibility(t
 @pytest.mark.parametrize("budget_delta", [0, -1])
 def test_complete_display_review_selects_a_route_that_can_fit(monkeypatch, checkpoint, budget_delta):
     import json
-    from xauusd_forecaster.ai.model_gateway import ModelRequestAccountant
+    from xauusd_news.ai.model_gateway import ModelRequestAccountant
 
     evidence = "BLS reported lower job openings."
     body = (evidence + " ") * 3200 + "END OF COMPLETE ARTICLE"

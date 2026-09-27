@@ -18,8 +18,8 @@ source structure before any owner extraction.
 | `scripts/xauusd_control_center.ps1` | 16,152 nonblank/read lines; 374 functions | Release, runtime, provider, recovery, and presentation ownership remain mixed |
 | `scripts/run_dashboard_api.py` | 69 top-level functions/classes; over 4,100 physical lines | Status, News, market, read models, backup/WAL status, and HTTP routing remain mixed |
 | `scripts/run_dashboard_sync.py` | 99 top-level functions/classes; about 2,700 physical lines | Payload shaping, transport, scheduling, cursors, deferred projection, and process loop remain mixed |
-| `xauusd_forecaster/news_scheduler.py` | 3,799 measured lines | Durable job, quota, retry, and transition ownership has high fan-out |
-| `xauusd_forecaster/annotation.py` | 3,144 measured lines | Annotation execution is both a high fan-in and high fan-out owner |
+| `xauusd_news/news_scheduler.py` | 3,799 measured lines | Durable job, quota, retry, and transition ownership has high fan-out |
+| `xauusd_news/annotation.py` | 3,144 measured lines | Annotation execution is both a high fan-in and high fan-out owner |
 | Python import graph | one 14-module strongly connected component | Ledger, scheduler, annotation, time, retrieval, market, and retained Assistant support are cyclic |
 | Package to scripts imports | zero | The required direction is currently preserved |
 | Changed since old Draft audit base `55593c05…` | 163 files | Old implementation patches cannot be treated as current |

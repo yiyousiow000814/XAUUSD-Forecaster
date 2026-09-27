@@ -16,7 +16,7 @@ ARCHITECTURE_DOCS = (
 LINK_PATTERN = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 CODE_PATTERN = re.compile(r"`([^`\r\n]+)`")
 REPOSITORY_PREFIXES = (
-    "scripts/", "xauusd_forecaster/", "web/", "broadcast/", "ctrader/",
+    "scripts/", "xauusd_news/", "web/", "broadcast/", "ctrader/",
     "tests/", "docs/", ".github/",
 )
 

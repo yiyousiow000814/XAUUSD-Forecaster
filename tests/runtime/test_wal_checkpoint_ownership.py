@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.sqlite_wal import (
+from xauusd_news.evidence.ledger import ForwardLedger
+from xauusd_news.sqlite_wal import (
     FORWARD_WAL_SIZE_LIMIT_BYTES,
     checkpoint_forward_wal,
     open_forward_writer_connection,
@@ -56,7 +56,7 @@ def test_checkpoint_preserves_reader_then_truncates_after_full_backfill(
     )
     writer.commit()
 
-    from xauusd_forecaster.dashboard.storage_status import wal_checkpoint_status
+    from xauusd_news.dashboard.storage_status import wal_checkpoint_status
 
     started = datetime.now(UTC)
     pinned = checkpoint_forward_wal(
@@ -120,11 +120,11 @@ def test_forward_ledger_uses_shared_writer_policy(tmp_path: Path) -> None:
 def test_every_runtime_writer_crosses_shared_wal_policy_boundary() -> None:
     root = Path(__file__).resolve().parents[2]
     owners = {
-        "xauusd_forecaster/dashboard/read_models.py": "open_forward_writer_connection",
-        "xauusd_forecaster/evidence/ledger.py": "open_forward_writer_connection",
-        "xauusd_forecaster/news/collection/pruning.py": "open_forward_writer_connection",
-        "xauusd_forecaster/news/retrieval/search.py": "open_forward_writer_connection",
-        "xauusd_forecaster/dashboard/operator_bridge.py": "open_forward_writer_connection",
+        "xauusd_news/dashboard/read_models.py": "open_forward_writer_connection",
+        "xauusd_news/evidence/ledger.py": "open_forward_writer_connection",
+        "xauusd_news/news/collection/pruning.py": "open_forward_writer_connection",
+        "xauusd_news/news/retrieval/search.py": "open_forward_writer_connection",
+        "xauusd_news/dashboard/operator_bridge.py": "open_forward_writer_connection",
     }
     for relative, boundary in owners.items():
         assert boundary in (root / relative).read_text(encoding="utf-8"), relative
@@ -161,7 +161,7 @@ def test_oversized_checkpoint_catches_reader_release_during_bounded_wait(tmp_pat
 
 
 def test_checkpoint_owner_retries_oversize_contention_without_multiplying_owners(tmp_path, monkeypatch):
-    from xauusd_forecaster import sqlite_wal
+    from xauusd_news import sqlite_wal
     from types import SimpleNamespace
     outcomes = iter([
         SimpleNamespace(status="TRUNCATE_BUSY", wal_bytes_after=FORWARD_WAL_SIZE_LIMIT_BYTES+1),

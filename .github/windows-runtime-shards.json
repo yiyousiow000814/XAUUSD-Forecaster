@@ -24,7 +24,7 @@
         "scripts/windows-service-launch-contract.json",
         "tests/runtime/test_main_runtime.py",
         "ctrader/XauusdForwardQuoteBridge/XauusdForwardQuoteBridge.cs",
-        "xauusd_forecaster/market.py",
+        "xauusd_news/market.py",
         "tests/evidence/test_quote_record_recovery.py",
         "tests/dashboard/test_public_health_check.py",
         "tests/runtime/test_runtime_health.py",
@@ -58,9 +58,9 @@
       "family": "news-discovery-admission",
       "paths": [
         "tests/news/test_news_scheduler.py",
-        "xauusd_forecaster/news/scheduler/*",
-        "xauusd_forecaster/news/annotation/*",
-        "xauusd_forecaster/news/semantics/critical_state.py"
+        "xauusd_news/news/scheduler/*",
+        "xauusd_news/news/annotation/*",
+        "xauusd_news/news/semantics/critical_state.py"
       ],
       "tests": [
         {
@@ -75,9 +75,9 @@
       "family": "news-recovery-accounts",
       "paths": [
         "tests/news/test_news_scheduler.py",
-        "xauusd_forecaster/news/scheduler/*",
-        "xauusd_forecaster/news/annotation/*",
-        "xauusd_forecaster/news/semantics/critical_state.py"
+        "xauusd_news/news/scheduler/*",
+        "xauusd_news/news/annotation/*",
+        "xauusd_news/news/semantics/critical_state.py"
       ],
       "tests": [
         {
@@ -92,9 +92,9 @@
       "family": "news-queue-execution",
       "paths": [
         "tests/news/test_news_scheduler.py",
-        "xauusd_forecaster/news/scheduler/*",
-        "xauusd_forecaster/news/annotation/*",
-        "xauusd_forecaster/news/semantics/critical_state.py"
+        "xauusd_news/news/scheduler/*",
+        "xauusd_news/news/annotation/*",
+        "xauusd_news/news/semantics/critical_state.py"
       ],
       "tests": [
         {

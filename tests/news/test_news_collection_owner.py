@@ -4,10 +4,10 @@ import json
 import threading
 from datetime import datetime, timedelta, timezone
 
-from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.market import MarketObservation
-from xauusd_forecaster.market_session import BrokerMarketSession
-from xauusd_forecaster.news.collection.runtime import NewsCollectionOwner
+from xauusd_news.evidence.ledger import ForwardLedger
+from xauusd_news.market import MarketObservation
+from xauusd_news.market_session import BrokerMarketSession
+from xauusd_news.news.collection.runtime import NewsCollectionOwner
 
 
 UTC = timezone.utc

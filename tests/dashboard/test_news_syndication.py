@@ -1,8 +1,8 @@
 from copy import deepcopy
 from itertools import permutations
 
-from xauusd_forecaster.dashboard.news_syndication import group_article_copies
-from xauusd_forecaster.news.semantics.article_source import readable_source_text
+from xauusd_news.dashboard.news_syndication import group_article_copies
+from xauusd_news.news.semantics.article_source import readable_source_text
 
 LEAD = "The central bank has scheduled its next policy meeting for Wednesday, while the decision and accompanying statement have not yet been announced."
 DETAIL = "A separate retail report will follow. Analysts describe two conditional outcomes rather than an announcement that rates have already changed."

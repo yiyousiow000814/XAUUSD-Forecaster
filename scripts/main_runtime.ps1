@@ -208,7 +208,7 @@ function Update-MainRuntime {
 }
 
 function Install-MainRuntimeTask {
-    param([string]$TaskName = 'XAUUSD-Forecaster-Main')
+    param([string]$TaskName = 'xauusd-news-main')
     $launcher = Join-Path $script:RuntimeRoot 'scripts/main_services_launcher.vbs'
     $entry = Join-Path $script:RuntimeRoot 'scripts/run_main_services.ps1'
     foreach ($path in @($launcher, $entry, (Join-Path $script:RuntimeRoot 'scripts/main_runtime.ps1'))) {

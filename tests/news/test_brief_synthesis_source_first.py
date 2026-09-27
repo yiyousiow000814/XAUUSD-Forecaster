@@ -11,12 +11,12 @@ import pytest
 
 from tests.news.test_daily_brief import _fake_generation, _seed_news_item
 from tests.fixtures.model_accounting_fakes import CallbackModelAccountant
-import xauusd_forecaster.news.semantics.critical_state as critical_annotation_state
-import xauusd_forecaster.news.brief.product as daily_brief
-import xauusd_forecaster.news.scheduler.state as news_scheduler
-from xauusd_forecaster.evidence.schema import install_v2_schema
-from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.evidence.ledger import SCHEMA
+import xauusd_news.news.semantics.critical_state as critical_annotation_state
+import xauusd_news.news.brief.product as daily_brief
+import xauusd_news.news.scheduler.state as news_scheduler
+from xauusd_news.evidence.schema import install_v2_schema
+from xauusd_news.evidence.ledger import ForwardLedger
+from xauusd_news.evidence.ledger import SCHEMA
 
 
 NOW = datetime(2026, 8, 10, 3, tzinfo=UTC)

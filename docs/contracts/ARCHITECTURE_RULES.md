@@ -16,7 +16,7 @@ contracts.
    a public projection and separate retained Assistant authority; it is not a
    forecasting recovery source.
 3. Process launchers and scripts compose configuration, processes, and owner
-   APIs. Reusable domain logic belongs under `xauusd_forecaster/`. Package code
+   APIs. Reusable domain logic belongs under `xauusd_news/`. Package code
    must not import from `scripts/`.
 4. A compatibility shim may contain no domain logic or mutable state and must
    have an explicit removal condition.
@@ -73,11 +73,11 @@ correction.
 
 ### Dashboard resource serialization
 
-`xauusd_forecaster/dashboard/resource_contracts.py` owns pure, bounded
+`xauusd_news/dashboard/resource_contracts.py` owns pure, bounded
 Critical, Audit, Learning, Market chart, and News batch serialization. API
 and Sync consume that owner; it reuses the field projections in
-`xauusd_forecaster/dashboard/payloads.py` and the News generation contract in
-`xauusd_forecaster/news_projection.py`. It accepts already-read source values
+`xauusd_news/dashboard/payloads.py` and the News generation contract in
+`xauusd_news/news_projection.py`. It accepts already-read source values
 and an explicit optional producer revision. It must not discover a runtime
 root, query Git or a database, perform HTTP, advance an ACK, or schedule work.
 Field selection, input validity and transport limits remain governed by

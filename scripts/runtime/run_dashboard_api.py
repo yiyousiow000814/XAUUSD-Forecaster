@@ -17,12 +17,12 @@ from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(MODULE_ROOT))
 
-from xauusd_forecaster.dashboard.status_resources import (
+from xauusd_news.dashboard.status_resources import (
     U5_CONTEXT_SAMPLE_LIMIT,
     _dashboard_payload,
     _optional_resource_payload,
 )
-from xauusd_forecaster.dashboard.news_resources import (
+from xauusd_news.dashboard.news_resources import (
     NewsProjectionSourcePending,
     _build_news_evidence_resource,
     _news_evidence_display_rows,
@@ -31,46 +31,46 @@ from xauusd_forecaster.dashboard.news_resources import (
     _news_projection_source_for_request,
     _serialize_news_rows,
 )
-from xauusd_forecaster.dashboard.payloads import critical_status_payload
-from xauusd_forecaster.dashboard.status_cache import (
+from xauusd_news.dashboard.payloads import critical_status_payload
+from xauusd_news.dashboard.status_cache import (
     StatusSnapshotCache,
     StatusSnapshotUnavailable,
 )
-from xauusd_forecaster.dashboard.health_projection import (
+from xauusd_news.dashboard.health_projection import (
     collector_component as _collector_component,
 )
-from xauusd_forecaster.dashboard.market_resources import (
+from xauusd_news.dashboard.market_resources import (
     MARKET_HISTORY_PAGE_LIMIT,
     _market_history_page,
     _recent_market_chart,
 )
-from xauusd_forecaster.dashboard.news_source_health import (
+from xauusd_news.dashboard.news_source_health import (
     news_source_health as _news_source_health,
 )
-from xauusd_forecaster.dashboard.storage_status import (
+from xauusd_news.dashboard.storage_status import (
     backup_lifecycle_status as _backup_lifecycle_status,
 )
-from xauusd_forecaster.dashboard.operator_bridge import (
+from xauusd_news.dashboard.operator_bridge import (
     apply_retry_overrides,
     operator_bridge_auth_error,
     retry_schedule_jobs,
 )
-from xauusd_forecaster.dashboard.read_models import (
+from xauusd_news.dashboard.read_models import (
     DashboardReadModelOwner,
     DashboardReadModelUnavailable,
     read_dashboard_read_model,
 )
-from xauusd_forecaster.dashboard.summaries import (
+from xauusd_news.dashboard.summaries import (
     dashboard_distinct_article_count,
     dashboard_table_counts,
 )
-from xauusd_forecaster.dashboard.resource_contracts import (
+from xauusd_news.dashboard.resource_contracts import (
     audit_briefs_snapshot,
     audit_snapshot,
     audit_stories_snapshot,
     market_chart_snapshot,
 )
-from xauusd_forecaster.runtime_paths import (
+from xauusd_news.runtime_paths import (
     authoritative_runtime_root,
     runtime_child_path,
 )
@@ -78,14 +78,14 @@ NEWS_ARCHIVE_PAGE_LIMIT = 20
 NEWS_EVIDENCE_PAGE_LIMIT = 50
 
 
-from xauusd_forecaster.factors import (
+from xauusd_news.factors import (
     factor_coverage,
 )
-from xauusd_forecaster.news.brief.product import (
+from xauusd_news.news.brief.product import (
     daily_brief_summary,
     recent_daily_briefs,
 )
-from xauusd_forecaster.news.annotation.product import (
+from xauusd_news.news.annotation.product import (
     DEFAULT_GEMINI_MODEL,
     DEFAULT_GEMMA_MODEL,
     FALLBACK_GEMINI_MODEL,
@@ -94,18 +94,18 @@ from xauusd_forecaster.news.annotation.product import (
     PROMPT_VERSION,
     pending_annotation_records,
 )
-from xauusd_forecaster.news.scheduler.state import (
+from xauusd_news.news.scheduler.state import (
     configured_api_credentials,
 )
-from xauusd_forecaster.news.semantics.evidence import (
+from xauusd_news.news.semantics.evidence import (
     EVIDENCE_POLICY_VERSION,
     event_evidence_rows_from_connection,
 )
-from xauusd_forecaster.news.scheduler.health import news_semantic_pipeline_health
-from xauusd_forecaster.runtime.operational_health import (
+from xauusd_news.news.scheduler.health import news_semantic_pipeline_health
+from xauusd_news.runtime.operational_health import (
     extend_with_component_alerts,
 )
-from xauusd_forecaster.news.annotation.impact import (
+from xauusd_news.news.annotation.impact import (
     IMPACT_MODEL,
     IMPACT_PROMPT_VERSION,
 )

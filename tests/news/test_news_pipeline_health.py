@@ -6,21 +6,21 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from xauusd_forecaster.evidence.ledger import ForwardLedger
-import xauusd_forecaster.news.scheduler.health as news_pipeline_health
-from xauusd_forecaster.news.annotation.product import DEFAULT_GEMINI_MODEL
-from xauusd_forecaster.news.annotation.product import PROMPT_VERSION
-from xauusd_forecaster.news.semantics.critical_state import record_annotation_completion
-from xauusd_forecaster.news.annotation.impact import IMPACT_MODEL
-from xauusd_forecaster.news.annotation.impact import IMPACT_PROMPT_VERSION
-from xauusd_forecaster.news.scheduler.state import ApiCredential
-from xauusd_forecaster.news.scheduler.state import CONTRACT_BACKFILL_LANE
-from xauusd_forecaster.news.scheduler.state import LIVE_LANE
-from xauusd_forecaster.news.scheduler.state import ROUTINE_POOL
-from xauusd_forecaster.news.scheduler.state import WorkProvenance
-from xauusd_forecaster.news.scheduler.state import claim_job
-from xauusd_forecaster.news.scheduler.state import enqueue_job
-from xauusd_forecaster.news.scheduler.state import record_job_attempt
+from xauusd_news.evidence.ledger import ForwardLedger
+import xauusd_news.news.scheduler.health as news_pipeline_health
+from xauusd_news.news.annotation.product import DEFAULT_GEMINI_MODEL
+from xauusd_news.news.annotation.product import PROMPT_VERSION
+from xauusd_news.news.semantics.critical_state import record_annotation_completion
+from xauusd_news.news.annotation.impact import IMPACT_MODEL
+from xauusd_news.news.annotation.impact import IMPACT_PROMPT_VERSION
+from xauusd_news.news.scheduler.state import ApiCredential
+from xauusd_news.news.scheduler.state import CONTRACT_BACKFILL_LANE
+from xauusd_news.news.scheduler.state import LIVE_LANE
+from xauusd_news.news.scheduler.state import ROUTINE_POOL
+from xauusd_news.news.scheduler.state import WorkProvenance
+from xauusd_news.news.scheduler.state import claim_job
+from xauusd_news.news.scheduler.state import enqueue_job
+from xauusd_news.news.scheduler.state import record_job_attempt
 
 
 def test_impact_health_joins_jobs_by_annotation_identity(tmp_path) -> None:

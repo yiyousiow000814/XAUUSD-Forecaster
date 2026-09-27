@@ -4,16 +4,16 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta
 import pytest
-from xauusd_forecaster.dashboard import news_resources
-from xauusd_forecaster.news.annotation.product import PROMPT_VERSION
-from xauusd_forecaster.evidence.ledger import ForwardLedger
+from xauusd_news.dashboard import news_resources
+from xauusd_news.news.annotation.product import PROMPT_VERSION
+from xauusd_news.evidence.ledger import ForwardLedger
 
 @pytest.fixture(autouse=True)
 def _isolated_dashboard_credentials(monkeypatch: pytest.MonkeyPatch):
     # API projections inspect quota configuration even when no provider request
     # is sent. Tests must not consult inherited or Windows User credentials;
     # credential-specific cases supply their own explicit fake source below.
-    import xauusd_forecaster.news.scheduler.state as news_scheduler
+    import xauusd_news.news.scheduler.state as news_scheduler
 
     # Each HTTP fixture represents a fresh process-owned News resource cache.
     monkeypatch.setattr(news_resources, "_NEWS_EVIDENCE_CACHE", {})

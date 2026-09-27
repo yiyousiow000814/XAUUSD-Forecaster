@@ -8,18 +8,18 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.ai.provider_registry import DEFAULT_GEMINI_MODEL
-from xauusd_forecaster.ai.provider_registry import DEFAULT_GEMMA_MODEL
-from xauusd_forecaster.ai.provider_registry import FALLBACK_GEMINI_MODEL
-from xauusd_forecaster.ai.provider_registry import GEMINI_EMBEDDING_MODEL
-from xauusd_forecaster.ai.model_gateway import GeminiModelGateway
-from xauusd_forecaster.ai.model_gateway import OllamaAssistantGateway
-from xauusd_forecaster.ai.model_gateway import ModelGatewayCapacityExhausted
-from xauusd_forecaster.ai.model_gateway import ModelGatewayRequestFailed
-from xauusd_forecaster.ai.model_gateway import ModelGatewayResponseInvalid
-from xauusd_forecaster.ai.model_gateway import ModelRequestAccountant
-from xauusd_forecaster.ai.model_gateway import ModelRequestUsage
-from xauusd_forecaster.ai.model_gateway import post_gemini_batch_embeddings
+from xauusd_news.ai.provider_registry import DEFAULT_GEMINI_MODEL
+from xauusd_news.ai.provider_registry import DEFAULT_GEMMA_MODEL
+from xauusd_news.ai.provider_registry import FALLBACK_GEMINI_MODEL
+from xauusd_news.ai.provider_registry import GEMINI_EMBEDDING_MODEL
+from xauusd_news.ai.model_gateway import GeminiModelGateway
+from xauusd_news.ai.model_gateway import OllamaAssistantGateway
+from xauusd_news.ai.model_gateway import ModelGatewayCapacityExhausted
+from xauusd_news.ai.model_gateway import ModelGatewayRequestFailed
+from xauusd_news.ai.model_gateway import ModelGatewayResponseInvalid
+from xauusd_news.ai.model_gateway import ModelRequestAccountant
+from xauusd_news.ai.model_gateway import ModelRequestUsage
+from xauusd_news.ai.model_gateway import post_gemini_batch_embeddings
 from tests.fixtures.model_accounting_fakes import CallbackModelAccountant
 
 
@@ -33,8 +33,8 @@ from tests.fixtures.model_accounting_fakes import CallbackModelAccountant
 def test_http_failure_keeps_actual_request_identity_without_provider_text(monkeypatch, tmp_path, code, body, status):
     import hashlib
     from datetime import datetime, UTC
-    from xauusd_forecaster.evidence.ledger import ForwardLedger
-    from xauusd_forecaster.news.annotation.product import _model_failure_details, _append_llm_failure
+    from xauusd_news.evidence.ledger import ForwardLedger
+    from xauusd_news.news.annotation.product import _model_failure_details, _append_llm_failure
 
     failure = urllib.error.HTTPError("https://provider.invalid", code, "failure", {}, io.BytesIO(body))
     def urlopen(_request, *, timeout):
@@ -587,7 +587,7 @@ def test_all_generation_families_share_the_same_usage_contract(monkeypatch) -> N
 
 def test_google_model_transport_has_one_source_of_truth() -> None:
     root = Path(__file__).resolve().parents[2]
-    package = root / "xauusd_forecaster"
+    package = root / "xauusd_news"
     owners = []
     constructors = []
     for base in (package, root / "scripts"):
@@ -599,8 +599,8 @@ def test_google_model_transport_has_one_source_of_truth() -> None:
                 constructors.append(path.relative_to(root).as_posix())
     annotation_source = (package / "news/annotation/product.py").read_text(encoding="utf-8")
 
-    assert owners == ["xauusd_forecaster/ai/provider_registry.py"]
-    assert constructors == ["xauusd_forecaster/news/annotation/product.py"]
+    assert owners == ["xauusd_news/ai/provider_registry.py"]
+    assert constructors == ["xauusd_news/news/annotation/product.py"]
     assert "def _call_gemini" not in annotation_source
     assert "x-goog-api-key" not in annotation_source
     gateway_source = (package / "ai/model_gateway.py").read_text(encoding="utf-8")

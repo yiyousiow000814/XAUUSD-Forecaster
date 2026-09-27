@@ -22,9 +22,9 @@ $dashboardUrl = $workerUrl
 $protectedDashboardUrl = $workerUrl
 $fixtureRealProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
 $script:fixtureDenyRoots = @(
-    (Join-Path $fixtureRealProfile 'XAUUSD-Forecaster'),
-    (Join-Path $fixtureRealProfile 'XAUUSD-Forecaster-runtime'),
-    (Join-Path $fixtureRealProfile 'XAUUSD-Forecaster.local')
+    (Join-Path $fixtureRealProfile 'xauusd-news'),
+    (Join-Path $fixtureRealProfile 'xauusd-news-runtime'),
+    (Join-Path $fixtureRealProfile 'xauusd-news.local')
 )
 function Assert-FixturePath {
     param([string]$Path)

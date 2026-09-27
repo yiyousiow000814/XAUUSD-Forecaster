@@ -1,9 +1,9 @@
 import pytest
 
-from xauusd_forecaster.news.semantics.contracts import CURRENT_NEWS_PROMPT_VERSION
-from xauusd_forecaster.news.annotation.storylines import LEGACY_POLICY_STATUS
-from xauusd_forecaster.news.annotation.storylines import storyline_rows
-from xauusd_forecaster.news.annotation.storylines import temporal_event_graph
+from xauusd_news.news.semantics.contracts import CURRENT_NEWS_PROMPT_VERSION
+from xauusd_news.news.annotation.storylines import LEGACY_POLICY_STATUS
+from xauusd_news.news.annotation.storylines import storyline_rows
+from xauusd_news.news.annotation.storylines import temporal_event_graph
 
 
 def event(key, time, headline, **overrides):
@@ -710,7 +710,7 @@ def test_complete_chain_survives_generation_and_dashboard_transport() -> None:
     import copy
     import json
     from datetime import datetime, timedelta, timezone
-    from xauusd_forecaster.dashboard.resource_contracts import audit_stories_snapshot
+    from xauusd_news.dashboard.resource_contracts import audit_stories_snapshot
     start = datetime(2026, 8, 6, tzinfo=timezone.utc)
     events = [event(str(i), (start + timedelta(days=i)).isoformat(), f"Fact {i}",
                     action=f"action {i}") for i in range(40)]

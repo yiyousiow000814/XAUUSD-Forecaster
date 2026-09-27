@@ -2,14 +2,14 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from xauusd_forecaster.market import BrokerMarketSession, MarketObservation
-from xauusd_forecaster.market_session import (
+from xauusd_news.market import BrokerMarketSession, MarketObservation
+from xauusd_news.market_session import (
     expected_weekly_closure,
     has_fresh_quote,
     horizon_crosses_weekly_closure,
     skipped_grid_reason,
 )
-from xauusd_forecaster.evidence.ledger import ForwardLedger
+from xauusd_news.evidence.ledger import ForwardLedger
 
 
 UTC = timezone.utc

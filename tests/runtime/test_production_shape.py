@@ -4,13 +4,13 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.ai.provider_registry import AI_QUOTA_SURFACES
-from xauusd_forecaster.news.scheduler.state import reserve_account_request
-from xauusd_forecaster.news.collection.source_registry import NEWS_SOURCE_REGISTRY
-from xauusd_forecaster.news.collection.intake import RUNTIME_NEWS_POLL_SOURCES
-from xauusd_forecaster.runtime.production_shape import production_contract_snapshot
-from xauusd_forecaster.runtime.production_shape import production_shape_violations
+from xauusd_news.evidence.ledger import ForwardLedger
+from xauusd_news.ai.provider_registry import AI_QUOTA_SURFACES
+from xauusd_news.news.scheduler.state import reserve_account_request
+from xauusd_news.news.collection.source_registry import NEWS_SOURCE_REGISTRY
+from xauusd_news.news.collection.intake import RUNTIME_NEWS_POLL_SOURCES
+from xauusd_news.runtime.production_shape import production_contract_snapshot
+from xauusd_news.runtime.production_shape import production_shape_violations
 
 
 NOW = datetime(2026, 8, 13, 3, 0, tzinfo=UTC)

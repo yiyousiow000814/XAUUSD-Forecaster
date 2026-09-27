@@ -18,11 +18,11 @@ from typing import Any
 MODULE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(MODULE_ROOT))
 
-from xauusd_forecaster.live_broadcast import (  # noqa: E402
+from xauusd_news.live_broadcast import (  # noqa: E402
     ContinuousLivePublisher,
     LiveSequenceStore,
 )
-from xauusd_forecaster.runtime_paths import authoritative_runtime_root  # noqa: E402
+from xauusd_news.runtime_paths import authoritative_runtime_root  # noqa: E402
 
 LOCAL_STATUS_URL = "http://127.0.0.1:8765/api/status"
 DEFAULT_INTERVAL_SECONDS = 30

@@ -10,52 +10,52 @@ from types import SimpleNamespace
 
 import pytest
 
-import xauusd_forecaster.news.scheduler.state as news_scheduler_module
-from xauusd_forecaster.news.scheduler.state import ApiCredential
-from xauusd_forecaster.news.scheduler.state import PREEMPTIBLE_POOL
-from xauusd_forecaster.news.scheduler.state import ROUTINE_POOL
-from xauusd_forecaster.news.scheduler.state import account_quota_snapshot
-from xauusd_forecaster.news.scheduler.state import apply_retry_schedule_override
-from xauusd_forecaster.news.scheduler.state import authorize_repairable_annotation_failures
-from xauusd_forecaster.news.scheduler.state import authorize_repairable_impact_failures
-from xauusd_forecaster.news.scheduler.state import backoff_job
-from xauusd_forecaster.news.scheduler.state import claim_job
-from xauusd_forecaster.news.scheduler.state import complete_job
-from xauusd_forecaster.news.scheduler.state import configured_api_credentials
-from xauusd_forecaster.news.scheduler.state import enqueue_job
-from xauusd_forecaster.news.scheduler.state import forecast_safe_backfill_budget
-from xauusd_forecaster.news.scheduler.state import install_scheduler_schema
-from xauusd_forecaster.news.scheduler.state import list_retry_schedule_jobs
-from xauusd_forecaster.news.scheduler.state import mark_account_request_attempted
-from xauusd_forecaster.news.scheduler.state import rank_accounts_for_models
-from xauusd_forecaster.news.scheduler.state import record_account_request_outcome
-from xauusd_forecaster.news.scheduler.state import record_scheduler_deferral
-from xauusd_forecaster.news.scheduler.state import record_provider_dispatch_outcome
-from xauusd_forecaster.news.scheduler.state import reconcile_completed_jobs
-from xauusd_forecaster.news.scheduler.state import reserve_account_request
-from xauusd_forecaster.news.scheduler.state import reserve_provider_dispatch
-from xauusd_forecaster.news.scheduler.state import rolling_account_usage
-from xauusd_forecaster.news.scheduler.state import RetryScheduleConflict
-from xauusd_forecaster.news.scheduler.state import scheduler_counts
-from xauusd_forecaster.news.scheduler.state import sync_pending_jobs
-from xauusd_forecaster.news.annotation.product import ANNOTATION_FAILURE_RECOVERY_VERSION
-from xauusd_forecaster.news.annotation.product import IMPACT_FAILURE_RECOVERY_VERSION
-from xauusd_forecaster.news.annotation.product import IMPACT_MODEL
-from xauusd_forecaster.news.annotation.product import IMPACT_PROMPT_VERSION
-from xauusd_forecaster.news.annotation.product import _append_impact_failure
-from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.news.semantics.contracts import CURRENT_NEWS_PROMPT_VERSION
-from xauusd_forecaster.news.semantics.contracts import PREVIOUS_NEWS_PROMPT_VERSION
-from xauusd_forecaster.news.semantics.transitions import ARCHIVAL_ONLY
-from xauusd_forecaster.news.semantics.transitions import DETERMINISTIC_MIGRATION
-from xauusd_forecaster.news.semantics.transitions import MODEL_REVIEW_REQUIRED
-from xauusd_forecaster.news.semantics.transitions import REUSE_COMPATIBLE
-from xauusd_forecaster.news.semantics.transitions import TRAINING_REQUIRED
-from xauusd_forecaster.news.semantics.transitions import SemanticTransition
-from xauusd_forecaster.news.semantics.transitions import demand_allows_scheduling
-from xauusd_forecaster.news.semantics.transitions import requires_model_review
-from xauusd_forecaster.news.semantics.transitions import provider_dispatches_for_transition
-from xauusd_forecaster.news.semantics.transitions import transition_for
+import xauusd_news.news.scheduler.state as news_scheduler_module
+from xauusd_news.news.scheduler.state import ApiCredential
+from xauusd_news.news.scheduler.state import PREEMPTIBLE_POOL
+from xauusd_news.news.scheduler.state import ROUTINE_POOL
+from xauusd_news.news.scheduler.state import account_quota_snapshot
+from xauusd_news.news.scheduler.state import apply_retry_schedule_override
+from xauusd_news.news.scheduler.state import authorize_repairable_annotation_failures
+from xauusd_news.news.scheduler.state import authorize_repairable_impact_failures
+from xauusd_news.news.scheduler.state import backoff_job
+from xauusd_news.news.scheduler.state import claim_job
+from xauusd_news.news.scheduler.state import complete_job
+from xauusd_news.news.scheduler.state import configured_api_credentials
+from xauusd_news.news.scheduler.state import enqueue_job
+from xauusd_news.news.scheduler.state import forecast_safe_backfill_budget
+from xauusd_news.news.scheduler.state import install_scheduler_schema
+from xauusd_news.news.scheduler.state import list_retry_schedule_jobs
+from xauusd_news.news.scheduler.state import mark_account_request_attempted
+from xauusd_news.news.scheduler.state import rank_accounts_for_models
+from xauusd_news.news.scheduler.state import record_account_request_outcome
+from xauusd_news.news.scheduler.state import record_scheduler_deferral
+from xauusd_news.news.scheduler.state import record_provider_dispatch_outcome
+from xauusd_news.news.scheduler.state import reconcile_completed_jobs
+from xauusd_news.news.scheduler.state import reserve_account_request
+from xauusd_news.news.scheduler.state import reserve_provider_dispatch
+from xauusd_news.news.scheduler.state import rolling_account_usage
+from xauusd_news.news.scheduler.state import RetryScheduleConflict
+from xauusd_news.news.scheduler.state import scheduler_counts
+from xauusd_news.news.scheduler.state import sync_pending_jobs
+from xauusd_news.news.annotation.product import ANNOTATION_FAILURE_RECOVERY_VERSION
+from xauusd_news.news.annotation.product import IMPACT_FAILURE_RECOVERY_VERSION
+from xauusd_news.news.annotation.product import IMPACT_MODEL
+from xauusd_news.news.annotation.product import IMPACT_PROMPT_VERSION
+from xauusd_news.news.annotation.product import _append_impact_failure
+from xauusd_news.evidence.ledger import ForwardLedger
+from xauusd_news.news.semantics.contracts import CURRENT_NEWS_PROMPT_VERSION
+from xauusd_news.news.semantics.contracts import PREVIOUS_NEWS_PROMPT_VERSION
+from xauusd_news.news.semantics.transitions import ARCHIVAL_ONLY
+from xauusd_news.news.semantics.transitions import DETERMINISTIC_MIGRATION
+from xauusd_news.news.semantics.transitions import MODEL_REVIEW_REQUIRED
+from xauusd_news.news.semantics.transitions import REUSE_COMPATIBLE
+from xauusd_news.news.semantics.transitions import TRAINING_REQUIRED
+from xauusd_news.news.semantics.transitions import SemanticTransition
+from xauusd_news.news.semantics.transitions import demand_allows_scheduling
+from xauusd_news.news.semantics.transitions import requires_model_review
+from xauusd_news.news.semantics.transitions import provider_dispatches_for_transition
+from xauusd_news.news.semantics.transitions import transition_for
 
 
 NOW = datetime(2026, 8, 12, 2, 0, tzinfo=UTC)
@@ -230,7 +230,7 @@ def test_contract_backfill_discovery_is_bounded_resumable_and_separate(tmp_path)
 def test_annotation_discovery_uses_exact_job_before_body_but_claim_can_resolve(
     tmp_path, job_state,
 ) -> None:
-    from xauusd_forecaster.news.annotation.product import pending_annotation_records
+    from xauusd_news.news.annotation.product import pending_annotation_records
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW - timedelta(days=1))
     body = "Declared complete XAUUSD macro evidence for the exact discovery job. " * 8
@@ -345,7 +345,7 @@ def test_protected_discovery_preserves_bounded_ordinary_progress_and_restart(
 
 
 def test_annotation_discovery_does_not_reuse_another_revision_or_prompt_job(tmp_path) -> None:
-    from xauusd_forecaster.news.annotation.product import pending_annotation_records
+    from xauusd_news.news.annotation.product import pending_annotation_records
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW - timedelta(days=1))
     for item, revision, received in (
@@ -962,7 +962,7 @@ def test_provider_dispatch_adapts_to_success_and_retry_after() -> None:
 def test_failed_task_rejoins_queue_without_repeating_in_the_same_batch(
     tmp_path, monkeypatch, task_type, concurrent,
 ) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
+    from xauusd_news.news.scheduler import runtime as runner
 
     ledger = ForwardLedger(tmp_path / "fair-queue.sqlite3", now=NOW)
     start = datetime.now(UTC) - timedelta(minutes=2)
@@ -1258,7 +1258,7 @@ def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path, leg
     delayed_until = datetime.now(UTC) + timedelta(hours=12)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     from tests.fixtures.dashboard_news_fixtures import _append_basic_annotation
-    from xauusd_forecaster.news.annotation.impact import pending_impact_records
+    from xauusd_news.news.annotation.impact import pending_impact_records
     body = "Complete source evidence for the current economic report. " * 12
     digest = hashlib.sha256(body.encode()).hexdigest()
     ledger.append_news_revision({
@@ -1350,7 +1350,7 @@ def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path, leg
 @pytest.mark.parametrize("retired", [False, True])
 @pytest.mark.parametrize("terminal,operator_wait,delay_state", [(True, False, "future"), (False, False, "future"), (False, True, "future"), (False, False, "expired"), (False, False, "immediate")])
 def test_contract_recovery_requeues_each_current_task_only_once(tmp_path, task_type, retired, terminal, operator_wait, delay_state) -> None:
-    from xauusd_forecaster.news.annotation.product import TITLE_PROMPT_VERSION, DEFAULT_GEMMA_MODEL, DEFAULT_GEMINI_MODEL, pending_title_translation_records, pending_annotation_records
+    from xauusd_news.news.annotation.product import TITLE_PROMPT_VERSION, DEFAULT_GEMMA_MODEL, DEFAULT_GEMINI_MODEL, pending_title_translation_records, pending_annotation_records
     model = DEFAULT_GEMINI_MODEL if task_type == "ANNOTATION" else DEFAULT_GEMMA_MODEL
     prompt = CURRENT_NEWS_PROMPT_VERSION if task_type == "ANNOTATION" else TITLE_PROMPT_VERSION
     job_type = "ACTIVE_ANNOTATION" if task_type == "ANNOTATION" else task_type
@@ -2321,7 +2321,7 @@ def test_protected_daily_brief_job_resolves_after_cross_date_dedup(
     )["source_item_id"] == "old-day"
     # A real finalization correction removes the prior day from protection;
     # ordinary global supersession must then remain effective.
-    from xauusd_forecaster.news.brief.product import BRIEF_RECOVERY_VERSION
+    from xauusd_news.news.brief.product import BRIEF_RECOVERY_VERSION
     with ledger.connection:
         ledger.connection.execute(
             """INSERT INTO daily_news_brief_finalization_corrections_v1
@@ -2406,7 +2406,7 @@ def test_sync_uses_v15_semantic_priority_not_headline_keywords(tmp_path) -> None
 def test_impact_discovery_advances_old_backfill_and_new_arrivals(
     tmp_path, monkeypatch,
 ) -> None:
-    import xauusd_forecaster.news.annotation.product as annotation
+    import xauusd_news.news.annotation.product as annotation
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     calls = []
@@ -2510,7 +2510,7 @@ def test_annotation_discovery_reserves_capacity_for_unfinished_brief_dates(
 def test_preemptible_quota_deferral_flows_to_routine_account(
     tmp_path, monkeypatch,
 ) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
+    from xauusd_news.news.scheduler import runtime as runner
 
     available_now = datetime.now(UTC) - timedelta(seconds=1)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
@@ -2595,7 +2595,7 @@ def test_claim_can_skip_a_capacity_blocked_task_route() -> None:
 
 
 def test_accounts_are_ranked_by_shared_live_model_headroom() -> None:
-    from xauusd_forecaster.news.annotation.impact import IMPACT_MODEL
+    from xauusd_news.news.annotation.impact import IMPACT_MODEL
 
     connection = _connection()
     credentials = (
@@ -2621,7 +2621,7 @@ def test_accounts_are_ranked_by_shared_live_model_headroom() -> None:
 def test_scheduler_tries_every_independent_account_before_waiting(
     tmp_path, monkeypatch,
 ) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
+    from xauusd_news.news.scheduler import runtime as runner
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     enqueue_job(
@@ -2663,8 +2663,8 @@ def test_scheduler_tries_every_independent_account_before_waiting(
 def test_embedding_catchup_is_deferred_without_trying_another_account(
     monkeypatch,
 ) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
-    from xauusd_forecaster.news.retrieval.search import NewsEmbeddingBackfillPending
+    from xauusd_news.news.scheduler import runtime as runner
+    from xauusd_news.news.retrieval.search import NewsEmbeddingBackfillPending
 
     def pending(*_args, **_kwargs):
         raise NewsEmbeddingBackfillPending(
@@ -2685,8 +2685,8 @@ def test_embedding_catchup_is_deferred_without_trying_another_account(
 def test_embedding_provider_throttle_wait_does_not_consume_impact_attempt(
     tmp_path, monkeypatch,
 ) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
-    from xauusd_forecaster.news.retrieval.gemini_embeddings import GeminiEmbeddingFailure
+    from xauusd_news.news.scheduler import runtime as runner
+    from xauusd_news.news.retrieval.gemini_embeddings import GeminiEmbeddingFailure
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     job_id = enqueue_job(
@@ -2737,7 +2737,7 @@ def test_embedding_provider_throttle_wait_does_not_consume_impact_attempt(
 def test_provider_dispatch_deferral_does_not_probe_accounts_or_consume_attempt(
     tmp_path, monkeypatch,
 ) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
+    from xauusd_news.news.scheduler import runtime as runner
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     job_id = enqueue_job(
@@ -2811,7 +2811,7 @@ def test_annotation_fallback_never_crosses_maintenance_deferral(
     tmp_path, monkeypatch, failure_code: str,
     expected_models: tuple[str, ...], expected_status: str, alternate_delay,
 ) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
+    from xauusd_news.news.scheduler import runtime as runner
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     job = SimpleNamespace(
@@ -2859,7 +2859,7 @@ def test_annotation_fallback_never_crosses_maintenance_deferral(
 def test_backfill_budget_deferral_is_non_attempt_healthy_pacing(
     tmp_path, monkeypatch,
 ) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
+    from xauusd_news.news.scheduler import runtime as runner
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     job_id = enqueue_job(
@@ -2970,8 +2970,8 @@ def test_scheduler_wakes_for_short_capacity_retry_without_busy_spin() -> None:
 def test_embedding_maintenance_does_not_consume_job_attempts_and_resumes(
     tmp_path, monkeypatch,
 ) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
-    from xauusd_forecaster.news.retrieval.search import NewsEmbeddingBackfillPending
+    from xauusd_news.news.scheduler import runtime as runner
+    from xauusd_news.news.retrieval.search import NewsEmbeddingBackfillPending
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     job_id = enqueue_job(
@@ -3036,7 +3036,7 @@ def test_embedding_maintenance_does_not_consume_job_attempts_and_resumes(
 def test_display_output_failure_does_not_trigger_account_fallback(
     tmp_path, monkeypatch,
 ) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
+    from xauusd_news.news.scheduler import runtime as runner
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     enqueue_job(
@@ -3074,7 +3074,7 @@ def test_display_output_failure_does_not_trigger_account_fallback(
 def test_capacity_blocked_route_is_skipped_for_the_rest_of_the_lane(
     tmp_path, monkeypatch,
 ) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
+    from xauusd_news.news.scheduler import runtime as runner
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     created = datetime.now(UTC) - timedelta(minutes=2)
@@ -3122,8 +3122,8 @@ def test_capacity_blocked_route_is_skipped_for_the_rest_of_the_lane(
 
 
 def test_every_scheduler_task_has_one_declared_semantic_route() -> None:
-    from xauusd_forecaster.news.scheduler.task_registry import AI_TASK_ROUTE_BY_TYPE
-    from xauusd_forecaster.news.scheduler.state import TASKS
+    from xauusd_news.news.scheduler.task_registry import AI_TASK_ROUTE_BY_TYPE
+    from xauusd_news.news.scheduler.state import TASKS
 
     assert set(TASKS).issubset(AI_TASK_ROUTE_BY_TYPE)
     assert AI_TASK_ROUTE_BY_TYPE["DAILY_BRIEF"].semantic_owner == "DISPLAY_ONLY"
@@ -3135,7 +3135,7 @@ def test_every_scheduler_task_has_one_declared_semantic_route() -> None:
 def test_extra_key_in_one_account_does_not_inflate_batch_capacity(
     tmp_path, monkeypatch,
 ) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
+    from xauusd_news.news.scheduler import runtime as runner
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     for index in range(12):
@@ -3165,7 +3165,7 @@ def test_extra_key_in_one_account_does_not_inflate_batch_capacity(
 def test_default_batch_runs_independent_accounts_concurrently(
     tmp_path, monkeypatch,
 ) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
+    from xauusd_news.news.scheduler import runtime as runner
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     for index in range(20):
@@ -3221,7 +3221,7 @@ def test_default_batch_runs_independent_accounts_concurrently(
 def test_concurrent_account_lanes_bound_capacity_probes_per_lane(
     tmp_path, monkeypatch,
 ) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
+    from xauusd_news.news.scheduler import runtime as runner
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     for index in range(4):
@@ -3267,7 +3267,7 @@ def test_concurrent_account_lanes_bound_capacity_probes_per_lane(
 def test_daily_brief_capacity_reserves_only_its_own_account(
     tmp_path, monkeypatch,
 ) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
+    from xauusd_news.news.scheduler import runtime as runner
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     for index in range(4):
@@ -3306,9 +3306,9 @@ def test_daily_brief_capacity_reserves_only_its_own_account(
 def test_display_route_does_not_fallback_when_gemma_capacity_is_full(
     monkeypatch,
 ) -> None:
-    import xauusd_forecaster.news.annotation.product as annotation
-    from xauusd_forecaster.ai.model_gateway import ModelGatewayCapacityExhausted
-    from xauusd_forecaster.ai.model_gateway import ModelRequestAccountant
+    import xauusd_news.news.annotation.product as annotation
+    from xauusd_news.ai.model_gateway import ModelGatewayCapacityExhausted
+    from xauusd_news.ai.model_gateway import ModelRequestAccountant
 
     class Accountant(ModelRequestAccountant):
         def reserve(self, _usage) -> bool:
@@ -3333,7 +3333,7 @@ def test_display_route_does_not_fallback_when_gemma_capacity_is_full(
 
 
 def test_repeated_pending_reader_misses_remain_recoverable(tmp_path, monkeypatch) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
+    from xauusd_news.news.scheduler import runtime as runner
     available = datetime.now(UTC) - timedelta(seconds=1)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     job_id = enqueue_job(
@@ -3365,7 +3365,7 @@ def test_repeated_pending_reader_misses_remain_recoverable(tmp_path, monkeypatch
 def test_scheduler_persists_structured_model_failure_without_credentials(
     tmp_path, monkeypatch,
 ) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
+    from xauusd_news.news.scheduler import runtime as runner
 
     available_now = datetime.now(UTC) - timedelta(seconds=1)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
@@ -3405,7 +3405,7 @@ def test_scheduler_persists_structured_model_failure_without_credentials(
 def test_provider_http_failure_uses_an_independent_account_failover(
     tmp_path, monkeypatch,
 ) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
+    from xauusd_news.news.scheduler import runtime as runner
 
     available_now = datetime.now(UTC) - timedelta(seconds=1)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
@@ -3456,7 +3456,7 @@ def test_provider_http_failure_uses_an_independent_account_failover(
 def test_failover_deferral_is_owned_by_the_account_that_deferred(
     tmp_path, monkeypatch,
 ) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
+    from xauusd_news.news.scheduler import runtime as runner
 
     available_now = datetime.now(UTC) - timedelta(seconds=1)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
@@ -3502,7 +3502,7 @@ def test_failover_deferral_is_owned_by_the_account_that_deferred(
 def test_job_safety_boundary_does_not_misclassify_database_failures(
     monkeypatch,
 ) -> None:
-    from xauusd_forecaster.news.scheduler import runtime as runner
+    from xauusd_news.news.scheduler import runtime as runner
 
     monkeypatch.setattr(
         runner, "_execute_job",
@@ -3547,7 +3547,7 @@ def test_annotator_retries_transient_writer_contention_without_exiting(
 @pytest.mark.parametrize("size", [1200, 20000])
 def test_structured_attempt_evidence_stays_valid_bounded_and_immutable(size):
     import json
-    from xauusd_forecaster.news.scheduler.state import record_job_attempt
+    from xauusd_news.news.scheduler.state import record_job_attempt
 
     connection = _connection()
     _enqueue(connection, "evidence", priority="NORMAL")

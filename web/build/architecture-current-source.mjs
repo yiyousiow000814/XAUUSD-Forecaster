@@ -242,7 +242,7 @@ export function projectCurrentSource(index) {
     disclosure: { default_mode: 'SELECTED_NODE', always_visible_edge_ids: [], secondary_edge_ids: [], allow_show_all: false } });
   const visibleNodes = new Set(views.flatMap(view => view.node_ids));
   const visibleEdges = new Set(views.flatMap(view => view.edge_ids));
-  const manifest = { schema: 'architecture-explorer-v2', repository: 'yiyousiow000814/XAUUSD-Forecaster',
+  const manifest = { schema: 'architecture-explorer-v2', repository: 'yiyousiow000814/xauusd-news',
     byte_limit: 300000, nodes: nodes.filter(node => visibleNodes.has(node.id)),
     edges: edges.filter(edge => visibleEdges.has(edge.id)), views, scenarios: [], failure_impacts: [], campaign: [] };
   if (Buffer.byteLength(JSON.stringify(manifest)) > manifest.byte_limit) throw new Error('ARCHITECTURE_EXPLORER_BUDGET_EXCEEDED');

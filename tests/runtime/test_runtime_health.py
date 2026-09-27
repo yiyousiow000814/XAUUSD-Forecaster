@@ -2,8 +2,8 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from xauusd_forecaster.runtime.health import RuntimeHeartbeatPulse
-from xauusd_forecaster.runtime.health import write_runtime_heartbeat
+from xauusd_news.runtime.health import RuntimeHeartbeatPulse
+from xauusd_news.runtime.health import write_runtime_heartbeat
 
 
 def test_runtime_heartbeat_is_atomic_and_identifies_service(tmp_path) -> None:

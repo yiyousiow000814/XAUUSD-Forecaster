@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from xauusd_forecaster.live_broadcast import (
+from xauusd_news.live_broadcast import (
     ContinuousLivePublisher,
     MAX_LIVE_BYTES,
     LiveBroadcastContractError,

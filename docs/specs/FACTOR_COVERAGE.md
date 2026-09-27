@@ -7,7 +7,7 @@ news-authority invariants owned by the
 [`FORWARD_ONLY`](../contracts/FORWARD_ONLY.md), and
 [`NEWS_EVIDENCE`](../contracts/NEWS_EVIDENCE.md) contracts.
 
-The forecaster must keep a broad view without pretending that every named
+The news dashboard must keep a broad view without pretending that every named
 driver is available, timely, or useful at a 30-minute horizon. Every domain is
 reported as `LIVE`, `COLLECTING`, `NEWS_ONLY`, `LIMITED_NEWS`, or
 `NOT_CONNECTED`. A missing domain is visible in the audit dashboard and cannot

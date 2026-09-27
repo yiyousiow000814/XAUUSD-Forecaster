@@ -161,8 +161,8 @@ clock, versions, source provenance where available, and reason codes.
 
 ## Storage isolation
 
-- Historical outputs: `src/XAUUSD-Forecaster/.local/replay/`.
-- Shadow state: `src/XAUUSD-Forecaster/.local/shadow/`.
+- Historical outputs: `src/xauusd-news/.local/replay/`.
+- Shadow state: `src/xauusd-news/.local/shadow/`.
 - Historical data uses year/month-partitioned Parquet and separate QA artifacts.
 - Shadow uses its own database and must never attach or mutate a historical
   Replay dataset.
