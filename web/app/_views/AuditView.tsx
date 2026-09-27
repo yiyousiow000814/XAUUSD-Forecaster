@@ -1192,14 +1192,10 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
       </section>
 
       {combinedErrors && <div className="error-banner">{combinedErrors}。{selectedAuditDetailState !== null && auditDetailError[view as AuditDetailView] && auditDetailResourceMode === "build-snapshot" ? "构建快照不会自动刷新；可手动重读当前快照，资料更新需要新构建。" : "可稍后重新载入页面。"}已有成功资料按各自资源保留。</div>}
-      <CurrentDataNotice
+      {!pageUsesBranchSnapshot && <CurrentDataNotice
         phase={currentPagePhase}
-        snapshotKind={pageUsesBranchSnapshot ? "branch" : "fallback"}
-        snapshotTime={pageUsesBranchSnapshot
-          ? payload?.preview?.branch_snapshot?.generated_at
-            ? time(payload.preview.branch_snapshot.generated_at) : null
-          : payload?.generated_at ? time(payload.generated_at) : null}
-      />
+        snapshotTime={payload?.generated_at ? time(payload.generated_at) : null}
+      />}
 
       <div className="audit-tabs-shell">
       <nav className="audit-tabs" aria-label="审计视图">
@@ -1220,7 +1216,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
           <option value="news">新闻 · {formatExactCount(readableNewsTotal)}</option>
           <option value="evidence">当前可用新闻事件 · {formatExactCount(newsMetrics.events.currently_model_eligible)}</option>
           <option value="stories">事件脉络 · {formatExactCount(activeEventTotal)}</option>
-          <option value="coverage">大视野覆盖 · {formatExactCount(payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length)}/11</option>
+          <option value="coverage">大视野覆盖 · {formatExactCount(payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length)}/11{coveragePhase === "snapshot" ? " · 分支快照" : ""}</option>
         </select>
       </label>
 

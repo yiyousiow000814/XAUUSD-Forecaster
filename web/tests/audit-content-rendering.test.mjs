@@ -399,3 +399,17 @@ test("story cards default to latest summary and reveal a newest-first complete c
   assert.ok(fallbackHtml.indexOf('headline-fallback')<fallbackHtml.indexOf('headline-new'));
   assert.ok(fallbackHtml.indexOf('headline-new')<fallbackHtml.indexOf('headline-unknown'));
 });
+
+
+test("branch coverage keeps compact provenance without a full-width snapshot notice", () => {
+  const status = {...baseline["/api/status"], preview: {
+    is_preview: true,
+    branch_snapshot: {generated_at: generatedAt, status_paths: ["factor_coverage"]},
+  }};
+  const html = render("coverage", {...baseline, "/api/status": status});
+  assert.doesNotMatch(html, /分支构建快照|此页使用分支重新计算/);
+  assert.match(html, /<small>分支快照<\/small>/);
+  assert.match(html, /<option value="coverage"[^>]*>[^<]*分支快照<\/option>/);
+  assert.match(html, /本页没有覆盖记录/);
+  assert.match(html, /所选资源时间[^<]*19:00:00/);
+});

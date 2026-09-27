@@ -122,7 +122,10 @@ product requirement.
 - Status prefers current read-only D1 and fall back
   to their immutable build snapshots. Machine-readable field provenance marks
   the status keys that remain branch build snapshots; factor coverage is the
-  current branch-recomputed example.
+  current branch-recomputed example. Its Audit page uses the compact snapshot
+  marker in the desktop tab or phone selector, without a separate full-width
+  branch-snapshot notice. The global PR identity and resource timestamp remain;
+  this presentation does not change data provenance or failure notices.
 - The build captures audit briefs, storylines, and news evidence from
   their independently owned public resources. While Stable predates those split
   audit routes, the builder may project only the matching fields from the legacy
