@@ -65,6 +65,14 @@ deadline it is stale; never refresh the timestamp of historical evidence.
 
 ## Grid boundaries
 
+The overview retains its quote banner and two equal news columns. Each of the
+latest three brief items shows its original headline and one line of the
+existing reader-safe summary. Current events show up to two headline lines and
+their media publication time in the fixed operator timezone; missing or invalid
+times remain explicitly unavailable. Neither list uses ranking numbers. Full
+text remains available through the existing brief and event destinations.
+Phone layouts stack the same sections without adding nested feature cards.
+
 - A bordered grid has one continuous outer boundary and one visible one-pixel
   divider at every logical row and column boundary.
 - A full-width row following metric cells, such as a technical-status
