@@ -424,40 +424,58 @@ function mergeNewsEvidenceByEvent(rows: NewsEvidence[]): NewsEvidence[] {
   }
   return sortNewsEvidenceByTime(merged.values());
 }
-const VISIBILITY_LABELS: Record<string, string> = {
-  MODEL_VISIBLE: "可用于模型",
-  IMPACT_PENDING: "等待 Gemma",
-  IMPACT_EXPIRED: "影响已结束",
-  NOT_YET_PARSED: "等待 Gemini",
-  WAITING_CONTENT: "等待正文",
-  DISPLAY_ONLY: "仅供查看",
-  COLLECT_ONLY: "仅收集",
-  MODEL_INELIGIBLE: "不可用于模型",
+const NEWS_READING_LABELS: Record<string, string> = {
+  IMPACT_PENDING: "待评估",
+  IMPACT_EXPIRED: "已过时效",
+  NOT_YET_PARSED: "待整理",
+  WAITING_CONTENT: "待补正文",
+  CONTENT_UNAVAILABLE: "正文缺失",
+  BACKING_OFF: "等待重试",
+  DEAD_LETTER: "待恢复处理",
+  DISPLAY_ONLY: "阅读参考",
+  COLLECT_ONLY: "采集留存",
+  MODEL_INELIGIBLE: "仅供参考",
 };
+
+export function newsReadingStatus(row: Pick<News, "model_visibility" | "impact_status">) {
+  if (row.model_visibility === "MODEL_VISIBLE") {
+    return row.impact_status === "ACTIVE"
+      ? { label: "时效内", tone: "current" }
+      : { label: "待评估", tone: "pending" };
+  }
+  if (row.model_visibility === "MODEL_INELIGIBLE") {
+    const reason = ({ DUPLICATE_REPORT: "重复报道", COMMENTARY_ONLY: "评论观点",
+      HISTORICAL_CONTEXT: "历史资料", BACKGROUND: "背景资料",
+      MISSING_PUBLICATION_TIME: "时间待核实" } as Record<string,string>)[row.impact_status ?? ""];
+    return { label: reason ?? "仅供参考", tone: "reference" };
+  }
+  return { label: NEWS_READING_LABELS[row.model_visibility] ?? "状态待确认",
+    tone: ["IMPACT_PENDING", "NOT_YET_PARSED", "WAITING_CONTENT", "BACKING_OFF", "DEAD_LETTER"].includes(row.model_visibility) ? "pending" : "reference" };
+}
 const ANNOTATION_REASON_LABELS: Record<string, string> = {
   DUPLICATE_CONTENT: "旧版重复内容",
   SEARCH_LEAD: "旧版搜索线索",
   HISTORICAL_MATERIAL: "历史资料",
-  STALE_AT_INTAKE: "收到时已过期",
+  STALE_AT_INTAKE: "收到时已过时效",
   INVALID_PUBLISHED_TIME: "发布时间无效",
   QUEUE_INVARIANT_MISMATCH: "队列异常",
   INTAKE_REJECTED: "采集条件未通过",
-  MODEL_OUTPUT_CONTRACT_FAILED: "模型输出未通过验证",
-  MODEL_OUTPUT_INVALID: "模型输出无法读取",
-  PROVIDER_HTTP_ERROR: "模型服务暂时失败",
-  MODEL_REQUEST_FAILED: "模型请求失败",
+  MODEL_OUTPUT_CONTRACT_FAILED: "AI 结果未通过复核",
+  MODEL_OUTPUT_INVALID: "AI 结果无法读取",
+  PROVIDER_HTTP_ERROR: "AI 服务暂时失败",
+  MODEL_REQUEST_FAILED: "AI 请求失败",
 };
 const IMPACT_STATUS_LABELS: Record<string, string> = {
-  PENDING_ANNOTATION: "等待 Gemini 阅读",
-  PENDING_IMPACT: "等待 Gemma 判断",
-  ACTIVE: "当前仍有效",
-  EXPIRED_ON_RECEIPT: "收到时已过期",
-  EXPIRED_BEFORE_AVAILABLE: "处理完成前已过期",
-  EXPIRED: "影响期已结束",
+  PENDING_ANNOTATION: "待整理",
+  PENDING_IMPACT: "待评估",
+  ACTIVE: "时效内",
+  EXPIRED_ON_RECEIPT: "收到时已过时效",
+  EXPIRED_BEFORE_AVAILABLE: "整理完成前已过时效",
+  EXPIRED: "已过时效",
   DUPLICATE_REPORT: "重复报道",
-  COMMENTARY_ONLY: "评论内容",
+  COMMENTARY_ONLY: "评论观点",
   HISTORICAL_CONTEXT: "历史资料",
-  BACKGROUND: "非当前影响",
+  BACKGROUND: "背景资料",
   MISSING_PUBLICATION_TIME: "缺少发布时间",
 };
 const IMPACT_CLASS_LABELS: Record<string, string> = {
@@ -524,12 +542,13 @@ export function NewsRow({
   const annotationReasonLabel = ANNOTATION_REASON_LABELS[
     current.annotation_reason_code ?? ""
   ] ?? "无需 AI 解析";
+  const readingStatus = newsReadingStatus(row);
   const impactLabel = IMPACT_STATUS_LABELS[current.impact_status ?? ""];
   const impactClassLabel = current.impact_class
     ? IMPACT_CLASS_LABELS[current.impact_class] ?? current.impact_class
     : null;
   const impactLabels = [...new Set([
-    impactLabel ?? "等待 Gemma 判断", impactClassLabel,
+    impactLabel ?? "待评估", impactClassLabel,
   ].filter((label): label is string => Boolean(label)))];
   const translated = Boolean(
     current.original_headline && current.headline !== current.original_headline,
@@ -577,11 +596,11 @@ export function NewsRow({
   }, [resolvedDetailState]);
   return <details ref={detailElement} className="news-row" onToggle={loadDetail} aria-busy={resolvedDetailState === "loading"}>
     <summary>
-      <div className="news-row-stamp"><b>{row.category}</b><time title="媒体发布时间；列表按此时间排序">发布 {row.source_published_time ? time(row.source_published_time) : "未知"}</time><small title="系统第一次收到；决定模型当时能否看见">收到 {time(row.collector_first_seen_time)}</small><small className={`eligibility-badge eligibility-${row.model_visibility.toLowerCase().replaceAll("_", "-")}`}>{VISIBILITY_LABELS[row.model_visibility] ?? row.model_visibility.replaceAll("_", " ")}</small></div>
+      <div className="news-row-stamp"><b>{row.category}</b><time title="媒体发布时间；列表按此时间排序">发布 {row.source_published_time ? time(row.source_published_time) : "未知"}</time><small title="系统首次采集到这篇新闻的时间">收到 {time(row.collector_first_seen_time)}</small><small className={`eligibility-badge news-reading-${readingStatus.tone}`} title="单篇新闻的整理与时效状态；不表示已纳入当前可用事件">{readingStatus.label}</small></div>
       <div className="news-row-title"><strong>{row.headline}</strong><small>{newsSourceLabel(row)}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}{(row.syndicated_source_count ?? 0) > 1 ? ` · ${row.syndicated_source_count} 个转载来源` : ""}</small></div>
       <div className={`news-row-state state-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
         <b>{row.content_status === "FULL_TEXT" ? `${formatExactCount(row.content_characters)} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "正文不可用" : row.content_fetch_status === "RETRYING" ? "自动重试中" : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
-        <small>{annotationStatus === "READY" ? (impactLabel ?? "等待 Gemma 判断") : annotationStatus === "NOT_REQUIRED" ? annotationReasonLabel : row.content_fetch_status === "UNAVAILABLE" ? "保留标题 · 不阻塞" : row.content_fetch_status === "RETRYING" ? "备用抓取中" : annotationStatus === "QUEUED" ? "AI 等待处理中" : annotationStatus === "BACKING_OFF" ? "失败后等待重试" : annotationStatus === "DEAD_LETTER" ? "待恢复处理" : "禁止判断"}</small>
+        <small>{annotationStatus === "READY" ? (impactLabel ?? "待评估") : annotationStatus === "NOT_REQUIRED" ? annotationReasonLabel : row.content_fetch_status === "UNAVAILABLE" ? "保留标题 · 不阻塞" : row.content_fetch_status === "RETRYING" ? "备用抓取中" : annotationStatus === "QUEUED" ? "AI 等待处理中" : annotationStatus === "BACKING_OFF" ? "失败后等待重试" : annotationStatus === "DEAD_LETTER" ? "待恢复处理" : "禁止判断"}</small>
       </div>
     </summary>
     <div className="news-row-detail">
@@ -592,7 +611,7 @@ export function NewsRow({
         {!!current.syndicated_sources?.length && <details className="news-syndicated-sources"><summary>查看 {current.syndicated_sources.length} 个转载来源</summary><ul>{current.syndicated_sources.map(source => <li key={`${source.source}:${source.source_item_id}`}><a href={safeSourceUrl(source.link)} target="_blank" rel="noreferrer">{safeSourceUrl(source.link) ? new URL(safeSourceUrl(source.link)!).hostname : source.source}</a><span> · 收到 {time(source.collector_first_seen_time)}{source.source_text_incomplete ? " · 原文部分可读" : ""}</span></li>)}</ul></details>}
         <div className="news-detail-top">
           <div className={`content-proof content-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
-            {row.content_status === "FULL_TEXT" ? `✓ 已读取正式正文 · ${formatExactCount(row.content_characters)} 字符` : row.content_status === "SOURCE_CONTENT" ? `已读取来源内容 · ${formatExactCount(row.content_characters)} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "发布网站拒绝自动读取或需要登录 · 仅保留标题，不进入模型" : row.content_fetch_status === "RETRYING" ? "首次抓取失败 · 系统将在退避结束后自动重试" : row.source === "google_news_gold_geopolitics" ? "Google News RSS 只提供聚合标题 · 未取得 publisher 正文" : "来源正文尚未抓取 · 禁止 Gemini 判断"}
+            {row.content_status === "FULL_TEXT" ? `✓ 已读取正式正文 · ${formatExactCount(row.content_characters)} 字符` : row.content_status === "SOURCE_CONTENT" ? `已读取来源内容 · ${formatExactCount(row.content_characters)} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "发布网站拒绝自动读取或需要登录 · 仅保留标题，等待正文恢复" : row.content_fetch_status === "RETRYING" ? "首次抓取失败 · 系统将在退避结束后自动重试" : row.source === "google_news_gold_geopolitics" ? "Google News RSS 只提供聚合标题 · 未取得 publisher 正文" : "来源正文尚未抓取 · 禁止 Gemini 判断"}
           </div>
           {current.link && <a className="source-link" href={current.link} target="_blank" rel="noreferrer">阅读来源 ↗</a>}
         </div>
@@ -606,20 +625,20 @@ export function NewsRow({
         </section> : annotationStatus === "DEAD_LETTER" ? <section className="gemini-summary summary-waiting">
           <span>{annotationReasonLabel}</span><p>{current.annotation_reason ?? "这是旧流程留下的停止记录，等待重新进入处理队列；原始新闻和失败原因均已保留。"}</p>
         </section> : annotationStatus === "NOT_REQUIRED" ? <section className="gemini-summary summary-queued">
-          <span>{annotationReasonLabel}</span><p>{current.annotation_reason ?? "该新闻不满足当前解析条件，不会消耗 AI 配额或进入模型。"}</p>
+          <span>{annotationReasonLabel}</span><p>{current.annotation_reason ?? "该新闻暂不需要进一步整理，保留原始记录供查阅。"}</p>
         </section> : row.content_fetch_status === "UNAVAILABLE" ? <section className="gemini-summary summary-waiting">
-          <span>来源正文不可自动读取</span><p>发布网站拒绝访问、要求登录或没有可提取正文；保留来源记录，稍后重新检查；正文恢复并完成复核前不会进入模型。</p>
+          <span>来源正文不可自动读取</span><p>发布网站拒绝访问、要求登录或没有可提取正文；保留来源记录，稍后重新检查；待正文恢复后重新整理。</p>
         </section> : <section className="gemini-summary summary-waiting">
-          <span>{row.content_fetch_status === "RETRYING" ? "正文自动重试中" : "等待来源正文"}</span><p>当前只有标题或短描述，不会进入模型，也不会假装已经理解内容。</p>
+          <span>{row.content_fetch_status === "RETRYING" ? "正文自动重试中" : "等待来源正文"}</span><p>当前只有标题或短描述，取得正文后再整理摘要和事件信息。</p>
         </section>}
         <button className="news-secondary-toggle" type="button" aria-expanded={showSupportingEvidence} onClick={() => setShowSupportingEvidence(value => !value)}>{showSupportingEvidence ? "收起证据与时间线" : "查看证据、分类与时间线"}</button>
         <div className={`news-secondary-evidence ${showSupportingEvidence ? "is-open" : ""}`}>
           {annotationStatus === "READY" && <section className={`gemini-summary ${current.impact_status === "ACTIVE" ? "" : "summary-queued"}`}>
             <span>{impactLabels.join(" · ")}</span>
-            <p>{publicImpactReason(current.impact_reason_zh) || "Gemma 将根据新闻内容判断它现在是否仍会影响市场。晚收到只影响可见时间，不会改写过去。"}</p>
+            <p>{publicImpactReason(current.impact_reason_zh) || "按新闻内容与事件时间评估阅读时效；时效结束不代表现实事件已经结束。"}</p>
           </section>}
           {current.emerging_topic_zh && <div className="news-classification"><b>{current.emerging_topic_zh}</b><span>鹰派 {impulse(current.hawkishness)}</span><span>通胀 {impulse(current.inflation_impulse)}</span><span>增长 {impulse(current.growth_impulse)}</span><span>地缘 {impulse(current.geopolitical_risk)}</span><span>美元 {impulse(current.usd_impulse)}</span><span>新颖 {number(current.novelty)}</span><span>置信 {number(current.confidence)}</span></div>}
-          <dl className="news-timeline"><div><dt>媒体发布时间</dt><dd>{time(row.source_published_time)}</dd></div><div><dt>系统首次收到</dt><dd>{time(row.collector_first_seen_time)}</dd></div><div><dt>Gemini 完成时间</dt><dd>{time(current.parsed_at)}</dd></div><div><dt>采集延迟</dt><dd>{current.collection_delay_seconds == null ? "—" : `${number(current.collection_delay_seconds, 1)} 秒`}</dd></div><div><dt>处理延迟</dt><dd>{current.processing_delay_seconds == null ? "—" : `${number(current.processing_delay_seconds, 1)} 秒`}</dd></div><div><dt>模型权限</dt><dd>{current.source_eligibility ?? "—"} · {row.model_visibility}</dd></div></dl>
+          <dl className="news-timeline"><div><dt>媒体发布时间</dt><dd>{time(row.source_published_time)}</dd></div><div><dt>系统首次收到</dt><dd>{time(row.collector_first_seen_time)}</dd></div><div><dt>Gemini 完成时间</dt><dd>{time(current.parsed_at)}</dd></div><div><dt>采集延迟</dt><dd>{current.collection_delay_seconds == null ? "—" : `${number(current.collection_delay_seconds, 1)} 秒`}</dd></div><div><dt>处理延迟</dt><dd>{current.processing_delay_seconds == null ? "—" : `${number(current.processing_delay_seconds, 1)} 秒`}</dd></div><div><dt>新闻状态</dt><dd>{readingStatus.label}</dd></div></dl>
           <footer className="card-footer"><span>{current.entities?.join(" · ") || "无实体"}</span><span>{current.llm_model_version ?? "未标注"} · 收到 {time(row.collector_first_seen_time)} · 标注 {time(current.parsed_at)}</span></footer>
         </div>
       </>}
@@ -1236,7 +1255,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
                 <ol>{remainingEvidence.map((item, index) => renderBriefItem(item, index + visibleEvidence.length))}</ol>
               </details>}
             </section>}
-            <footer>{phase === "FINAL" || phase === "DEGRADED" ? "该日期已完成" : "随已复核资料滚动更新"} · 第 {selected.revision_number} 版 · 仅供阅读，不进入模型训练</footer>
+            <footer>{phase === "FINAL" || phase === "DEGRADED" ? "该日期已完成" : "随已复核资料滚动更新"} · 第 {selected.revision_number} 版 · 仅供阅读参考</footer>
           </> : <p className="brief-empty">{phase === "EMPTY" ? `${shortBriefDate(selectedDate)} 没有符合简报范围的新闻。` : `等待 ${shortBriefDate(selectedDate)} 首批已复核新闻。系统会在有足够资料后生成，并随新资料持续更新。`}</p>}
         </section>;
       })()}

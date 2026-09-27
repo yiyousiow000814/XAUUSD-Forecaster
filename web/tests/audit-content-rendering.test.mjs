@@ -624,3 +624,36 @@ test("cached news remains visible while missing totals are refreshed", () => {
   assert.match(html,/Retained cached article/);
   assert.doesNotMatch(html,/class="news-list-skeleton"/);
 });
+
+test("article reading badges retain status distinctions without model permissions", () => {
+  const base={source:"wire",source_item_id:"reading-state",headline:"Original headline",
+    content_status:"FULL_TEXT",content_characters:500,annotation_status:"READY",summary_zh:"Original summary"};
+  for (const [visibility,impact,label,tone] of [
+    ["MODEL_VISIBLE","ACTIVE","时效内","current"],
+    ["MODEL_VISIBLE","PENDING_IMPACT","待评估","pending"],
+    ["MODEL_VISIBLE",undefined,"待评估","pending"],
+    ["MODEL_INELIGIBLE","DUPLICATE_REPORT","重复报道","reference"],
+    ["MODEL_INELIGIBLE","COMMENTARY_ONLY","评论观点","reference"],
+    ["MODEL_INELIGIBLE","HISTORICAL_CONTEXT","历史资料","reference"],
+    ["MODEL_INELIGIBLE","BACKGROUND","背景资料","reference"],
+    ["MODEL_INELIGIBLE","MISSING_PUBLICATION_TIME","时间待核实","reference"],
+    ["MODEL_INELIGIBLE",undefined,"仅供参考","reference"],
+    ["IMPACT_EXPIRED","EXPIRED","已过时效","reference"],
+    ["IMPACT_EXPIRED","EXPIRED_ON_RECEIPT","已过时效","reference"],
+    ["IMPACT_PENDING","PENDING_IMPACT","待评估","pending"],
+    ["NOT_YET_PARSED",undefined,"待整理","pending"],
+    ["WAITING_CONTENT",undefined,"待补正文","pending"],
+    ["CONTENT_UNAVAILABLE",undefined,"正文缺失","reference"],
+    ["DISPLAY_ONLY",undefined,"阅读参考","reference"],
+    ["COLLECT_ONLY",undefined,"采集留存","reference"],
+    ["FUTURE_STATE",undefined,"状态待确认","reference"],
+  ]) {
+    const row={...base,model_visibility:visibility,impact_status:impact};
+    const original=JSON.stringify(row),html=renderNews(row);
+    assert.match(html,new RegExp(`class="eligibility-badge news-reading-${tone}"[^>]*>${label}</small>`));
+    assert.match(html,/>新闻状态<\/dt>/);
+    assert.match(html,/Original headline/);assert.match(html,/Original summary/);
+    assert.doesNotMatch(html,/可用于模型|不可用于模型|模型权限|进入模型|影响已结束|FUTURE_STATE/);
+    assert.equal(JSON.stringify(row),original,"presentation must not rewrite eligibility evidence");
+  }
+});

@@ -1121,7 +1121,7 @@ test("prefetches bounded news details and avoids a fast loading-label flash", ()
   assert.doesNotMatch(source, /正在读取新闻详情/);
   assert.match(css, /\.news-detail-skeleton\.is-visible/);
   assert.match(css, /prefers-reduced-motion:reduce/);
-  assert.match(source, /BACKGROUND: "非当前影响"/);
+  assert.match(source, /BACKGROUND: "背景资料"/);
   assert.match(source, /new Set\(\[/);
   assert.doesNotMatch(source, /Gemini 中文标题/);
 });

@@ -1,5 +1,17 @@
 # Public dashboard design review
 
+## In progress: article reading status
+
+Presentation-only scope: NewsRow maps existing visibility and impact codes to
+processing/reference/validity labels. The article producer still calls
+apply_impact_status; consolidated event membership still uses identity,
+timeliness, evidence, topic, semantic relevance and event-clock/lifetime checks
+in news/semantics/evidence.py. No producer, stored code, API, review-state
+invariant or eligible-event query changes. An article validity badge must not
+assert consolidated event membership or real-world event completion. Verify
+active, pending, expired, reference and unknown states, unchanged input records,
+news expansion/pagination and current-event navigation on desktop and phones.
+
 ## Latest follow-up: header status and login placement
 
 Scope: public status-link selected/hover/focus presentation and the geometry

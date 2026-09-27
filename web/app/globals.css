@@ -671,9 +671,9 @@ body.modal-open { overflow:hidden; }
 .learning-summary-grid strong { display:block; margin:12px 0 7px; font-family:var(--font-display); font-size:42px; line-height:1; white-space:nowrap; }
 .learning-table td:nth-child(4) strong { color:var(--green); }
 .eligibility-badge { width:max-content; padding:4px 6px; border:1px solid var(--ink); background:#d9d2c1; font-size:9px!important; letter-spacing:.04em; }
-.eligibility-model-visible { background:var(--green); color:var(--paper)!important; }
-.eligibility-not-yet-parsed,.eligibility-waiting-content { border-color:var(--gold); color:#765414!important; }
-.eligibility-model-ineligible,.eligibility-collect-only { border-color:var(--red); color:var(--red)!important; }
+.news-reading-current { border-color:#b9ddd1; background:#eaf6f0; color:#256651!important; }
+.news-reading-pending { border-color:#e0d5b8; background:#faf5e8; color:#765414!important; }
+.news-reading-reference { border-color:#d5dfe7; background:#f2f5f8; color:#60718a!important; }
 .news-timeline { display:grid; grid-template-columns:repeat(3,1fr); gap:0; margin:16px 0 0; border:1px solid rgba(17,17,15,.35); }
 .news-timeline div { min-width:0; padding:10px 12px; background:var(--paper); }
 .news-timeline div:not(:nth-child(3n+1)) { border-left:1px solid rgba(17,17,15,.35); }

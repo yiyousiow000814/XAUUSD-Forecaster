@@ -4,6 +4,18 @@ This specification defines the required visual behavior of the dashboard's
 data-dense navigation, metric grids, tables, and expandable evidence panels.
 It applies to both desktop and phone layouts.
 
+## Article reading status
+
+Article badges describe processing, reference type and the existing validity
+window, not model access or confirmed membership in current events. Show an
+active assessed article as within its validity window; expired windows as past
+their validity window; and duplicate reports, commentary and background as
+reference material, without error styling. Pending assessment must not appear
+active. Unknown states remain unconfirmed rather than exposing storage codes.
+Current events retain their independent consolidation and eligibility rules.
+Keep stored visibility codes, APIs and filtering unchanged when changing these
+reader-facing labels. An expired window does not claim the real event is over.
+
 ## Header status and login placement
 
 The public status link owns hover, current-page and keyboard-focus treatment.
