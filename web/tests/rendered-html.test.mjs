@@ -466,7 +466,6 @@ test("keeps nested compact counts in each dashboard headline hierarchy", () => {
   for (const [selector, size] of [
     ["metric-grid strong", "44px"],
     ["quota-metric-grid strong", "40px"],
-    ["evidence-summary strong", "40px"],
     ["learning-summary-grid strong", "42px"],
     ["event-thread-summary b", "25px"],
     ["theme-streams article strong", "25px"],
@@ -479,7 +478,6 @@ test("keeps nested compact counts in each dashboard headline hierarchy", () => {
   for (const unsafeSelector of [
     /\.metric-grid span,\.metric-grid small/,
     /\.quota-metric-grid span,\.quota-metric-grid small/,
-    /\.evidence-summary span/,
     /\.learning-summary-grid span,\.learning-summary-grid small/,
     /\.event-thread-summary span/,
     /\.theme-streams article span/,
@@ -1606,24 +1604,10 @@ test("renders the news and decision audit route", async () => {
   const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   assert.match(source, />新闻 <b>/);
   assert.match(source, /当前可用新闻事件/);
-  assert.match(source, /模型真正用过哪些新闻/);
-  assert.match(source, /按独立事件说明模型用过什么、没用什么/);
   assert.match(source, /evidence-intro evidence-intro-compact/);
-  assert.match(source, /收到多少篇文章/);
-  assert.match(source, /历史上用过多少个事件/);
-  assert.match(source, /影响过多少次预测/);
-  assert.match(source, /模型一共读取多少次/);
-  assert.match(source, /现在仍可用于预测/);
-  assert.match(source, /本筛选已载入/);
-  assert.match(source, /完整总数保留在审计账本/);
-  assert.match(source, /这个分类有记录，但本页尚未载入明细/);
-  assert.match(source, /这不是新闻数量/);
   assert.doesNotMatch(source, /文章 \/ Revision/);
   assert.doesNotMatch(source, /当前达到 Broad 门槛/);
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(css, /\.evidence-summary \{[^}]*grid-template-columns:repeat\(3,1fr\)/);
-  assert.match(css, /\.evidence-filters button \{[^}]*min-height:44px/);
-  assert.match(source, /多源确认/);
   assert.match(source, /api\/news-content\?key=/);
   assert.match(source, /api\/news-index\?/);
   assert.match(source, /briefs: "\/api\/audit-briefs"/);
@@ -1638,7 +1622,6 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /row\.model_identities\.map/);
   assert.doesNotMatch(source, /row\.model_unseen_reason_codes\.map/);
   assert.doesNotMatch(source, /IDENTITY_LABELS/);
-  assert.match(source, /MODEL_LABELS\[identity\] \?\? identity/);
   assert.match(source, /读取中/);
   assert.match(source, /学习数据暂不可用|暂不可用/);
   assert.doesNotMatch(source, /payload\?\.system\.online && !error/);
@@ -1659,10 +1642,6 @@ test("renders the news and decision audit route", async () => {
   assert.match(newsIndexRoute, /action === "prepare"/);
   assert.match(newsIndexRoute, /action === "activate"/);
   assert.match(newsStore, /\(\$\{NEWS_REVIEW_STATE_CASE_SQL\}\)=\?/);
-  assert.match(source, /evidenceMode === "eligible"/);
-  assert.match(source, />当前可用 <b>/);
-  assert.match(source, />历史上用过 <b>/);
-  assert.match(source, />从未用过 <b>/);
   assert.doesNotMatch(source, /查看全部/);
   assert.doesNotMatch(source, /个 key 轮换|每分钟最多生成/);
   assert.ok(source.indexOf('<nav className="audit-tabs"') < source.indexOf('<section className="annotation-queue"'));
@@ -2041,7 +2020,6 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.audit-tabs-shell \{ display:none; \}/);
   assert.match(css, /\.audit-view-picker \{ position:sticky; top:0;[\s\S]*?grid-template-columns:auto minmax\(0,1fr\)/);
   assert.match(css, /\.audit-main \.audit-intro>div:first-child \{ display:none; \}/);
-  assert.match(css, /\.evidence-summary \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); gap:8px/);
   assert.match(css, /\.quota-capacity-grid \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); \}/);
   assert.match(css, /@media \(max-width:430px\)\{[\s\S]*?\.throughput-summary \{ grid-template-columns:1fr; \}/);
   assert.match(css, /\.graph-modal>nav \{ grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
@@ -2202,37 +2180,19 @@ test("live room reports articles without treating omitted event counts as zero",
   assert.equal(resolveNewsMetrics({ counts: { news_revisions: 0 } }).articles.stored_revisions, 0);
 });
 
-test("reflows news evidence into readable mobile cards", () => {
+test("curated events keep bounded paging and accessible source disclosure", () => {
   const view = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(view, /className="evidence-event-cell"/);
-  assert.match(view, /className="evidence-status-cell"/);
-  assert.match(view, /统一来源身份：/);
-  assert.match(view, /原始发布域名：/);
-  assert.match(view, /showAllEvidence/);
-  assert.match(view, /showEvidenceMetrics/);
-  assert.match(view, /className="evidence-metrics-toggle"/);
-  assert.match(view, /mergeNewsEvidenceByEvent/);
-  assert.match(view, /const evidenceArchiveReady = Boolean\([\s\S]*evidenceArchive\.snapshot_id && evidenceArchive\.mode === evidenceMode/);
-  assert.match(view, /evidenceArchiveReady[\s\S]*mergeNewsEvidenceByEvent\(evidenceArchive\.items\)/);
-  assert.doesNotMatch(view, /evidenceArchive\.items\.length > 0/);
+  assert.match(view, /const evidenceMode = "eligible" as const/);
+  assert.match(view, /evidenceArchive.snapshot_id && evidenceArchive.mode === evidenceMode/);
+  assert.match(view, /evidenceArchiveReady[\s\S]*mergeNewsEvidenceByEvent\(evidenceArchive.items\)/);
   assert.match(view, /!evidenceArchiveReady && evidencePayloadHasDuplicates/);
-  assert.match(view, /sortNewsEvidenceByTime\(merged\.values\(\)\)/);
-  assert.match(view, /new Map<string, NewsEvidence>/);
-  assert.match(view, /evidenceMode}:\$\{row\.event_key}/);
-  assert.doesNotMatch(view, /evidenceMode}:\$\{row\.event_key}:\$\{index}/);
-  assert.match(css, /@media \(max-width:640px\)[\s\S]*\.evidence-table thead \{ position:absolute/);
-  assert.match(css, /grid-template-areas:"event event" "status time" "usage usage"/);
-  assert.match(css, /\.evidence-event-cell \{ grid-area:event/);
-  assert.match(css, /\.evidence-status-cell \{ grid-area:status/);
-  assert.match(css, /\.evidence-usage-cell \{ grid-area:usage/);
-  assert.match(css, /\.evidence-time-cell \{ grid-area:time/);
-  assert.match(css, /\.evidence-status-copy \{ display:none!important/);
-  assert.match(css, /\.evidence-model-list \{ display:none!important/);
-  assert.match(css, /\.evidence-table-wrap:not\(\.show-all-mobile-items\) \.evidence-table tbody>tr:nth-child\(n\+9\)/);
-  assert.match(css, /\.evidence-desk>\.mobile-reveal-button \{ display:block;[^}]*min-height:48px/);
-  assert.match(css, /\.evidence-metrics-block \{ display:none/);
-  assert.match(css, /grid-template-areas:"event" "status" "time" "usage"/);
+  assert.match(view, /sortNewsEvidenceByTime\(merged.values\(\)\)/);
+  assert.match(view, /!evidenceArchiveReady \|\| !evidenceArchive.has_more \|\| !evidenceArchive.next_cursor/);
+  assert.doesNotMatch(view, /showEvidenceMetrics|showAllEvidence|MODEL_LABELS|evidenceReason/);
+  assert.match(css, /\.current-event-sources>summary \{[^}]*min-height:44px/);
+  assert.match(css, /\.current-event\+\.current-event \{ border-top:1px solid var\(--line\)/);
+  assert.match(css, /\.current-event h3 \{ margin:7px 0 1px; font-size:15px/);
 });
 
 test("sorts every news evidence filter by publication time before status", () => {
@@ -2967,8 +2927,6 @@ test("standalone mobile audit notices have a top edge while stacked notices shar
 
 test("public reading grids own complete responsive boundaries", () => {
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(css, /\.is-public \.evidence-summary article:nth-child\(3n\) \{ border-right:0/);
-  assert.match(css, /\.is-public \.evidence-summary article:nth-child\(2n\) \{ border-right:0/);
   assert.match(css, /\.is-public \.news-row\+\.news-row \{ border-top:1px solid var\(--line\)/);
 });
 

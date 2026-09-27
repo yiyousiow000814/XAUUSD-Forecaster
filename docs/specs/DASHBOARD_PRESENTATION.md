@@ -334,3 +334,21 @@ Story reading omits deployment hashes and version-verdict banners. Release
 identity and operational diagnosis belong to their existing owners, not a
 story card. Removing the presentation does not fabricate a matching revision
 or weaken deployment checks.
+
+
+## Current news event reading
+
+The retained `当前可用新闻事件` destination presents the existing current,
+consolidated event selection as a compact reading list, newest publication
+first. Headlines and categories are visible immediately; reporting domains,
+independent-source counts and receipt time are available in a native disclosure.
+Headlines remain complete on phones. Source disclosures and pagination retain
+44px targets and keyboard operation.
+
+This reader omits model use, prediction counts, training statistics, eligibility
+badges, historical-use filters and the prediction-audit table. The existing
+`eligible` transport selector and retained selection policy remain unchanged;
+this presentation change does not change event admission or delete historical
+records. `新闻` remains the full article archive. The current event payload does
+not supply article summaries or original article URLs, so the reader must not
+invent those fields or promise a nonexistent full-article destination.

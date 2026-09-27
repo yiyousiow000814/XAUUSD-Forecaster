@@ -16,7 +16,7 @@ const resourcesPath = fileURLToPath(new URL("../app/_lib/dashboard-resource.ts",
 const temporaryRoot = mkdtempSync(join(tmpdir(), "aurum-audit-content-"));
 test.after(() => rmSync(temporaryRoot, { recursive: true, force: true }));
 
-const resourceUrls = ["/api/status", "/api/audit", "/api/audit-briefs", "/api/audit-stories"];
+const resourceUrls = ["/api/status", "/api/audit", "/api/audit-briefs", "/api/audit-stories", "/api/news-evidence?mode=eligible&page=1&limit=20"];
 const built = await build({
   bundle: true, write: false, platform: "node", format: "esm", jsx: "automatic",
   define: {__AURUM_DEPLOYMENT__: JSON.stringify({is_preview: false})},
@@ -468,4 +468,43 @@ test("story reading never displays deployment diagnostics including Preview snap
     assert.doesNotMatch(html, /deployment-proof|版本正常|版本暂时无法核对|版本需要更新|abcd1234/);
     assert.match(html, /事件脉络/);
   }
+});
+
+const curatedEvent = (id, published, extra = {}) => ({
+  event_key: id, canonical_headline: `整理后的事件-${id}`, canonical_source: "wire",
+  source_published_time: published, collector_first_seen_time: published,
+  broad_model_eligible: true, topics: ["rates_fed"], member_count: 3,
+  independent_publishers: 2, publisher_domains: ["publisher.test", "second.test"],
+  ...extra,
+});
+function renderEvents(items, total = items.length, extras = {}) {
+  return selectedBody(render("evidence", {...baseline,
+    "/api/status": {...baseline["/api/status"], news_evidence: items,
+      news_evidence_summary: {broad_model_eligible: total}, ...extras},
+  }));
+}
+test("curated events read newest first without model audit concepts", () => {
+  const old = curatedEvent("old", "2026-09-26T01:00:00Z");
+  const latest = curatedEvent("new", "2026-09-27T01:00:00Z", {
+    model_seen: true, frozen_decisions: 999, frozen_model_uses: 999,
+    model_identities: ["FULL"], model_unseen_reason_codes: ["NEEDS_CONFIRMATION"],
+  });
+  const html = renderEvents([old, latest, latest,
+    curatedEvent("excluded", "2026-09-28T01:00:00Z", {broad_model_eligible:false})]);
+  assert.match(html, /已整理、合并重复报道，最新在前/);
+  assert.ok(html.indexOf("整理后的事件-new") < html.indexOf("整理后的事件-old"));
+  assert.equal((html.match(/整理后的事件-new/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /整理后的事件-excluded|模型|预测|训练|历史上用过|从未用过|NEWS USED|SHADOW|35%/);
+  assert.match(html, /3 篇报道 · 2 个独立来源/);
+  assert.match(html, /publisher.test · second.test/);
+  assert.match(html, /09\/27 09:00:00/);
+  assert.match(html, /<details class="current-event-sources">/);
+  assert.doesNotMatch(html, /<details[^>]* open/);
+  assert.match(html, /aria-label="新闻事件翻页"/);
+});
+test("event source fallbacks stay readable and do not invent links or times", () => {
+  const html = renderEvents([curatedEvent("missing", null, {publisher_domains:[],
+    source_identity_organizations:["A reporting organization"], topics:null})]);
+  assert.match(html, /发布时间未提供|A reporting organization/);
+  assert.doesNotMatch(html, /href="https:|Invalid Date|模型|预测/);
 });

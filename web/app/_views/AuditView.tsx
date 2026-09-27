@@ -101,7 +101,6 @@ type NewsEvidence = {
   topics?: string[] | null;
   evidence_grade: "PRIMARY" | "CORROBORATED" | "SINGLE_RELIABLE" | "DISCOVERY_ONLY";
   broad_model_eligible: boolean;
-  model_permission: "BROAD_MODEL" | "DISPLAY_ONLY";
   member_count: number;
   independent_publishers: number;
   source_names: string[];
@@ -109,15 +108,7 @@ type NewsEvidence = {
   source_identity_organizations?: string[];
   publisher_domains: string[];
   reason_codes: string[];
-  model_seen: boolean;
-  frozen_model_uses: number;
-  frozen_decisions: number;
-  frozen_versions?: number;
-  first_model_decision_time: string | null;
-  last_model_decision_time: string | null;
-  model_identities?: string[] | null;
-  model_versions: string[];
-  model_unseen_reason_codes?: string[] | null;
+
 };
 type NewsEvidenceResponse = {
   items: NewsEvidence[];
@@ -382,63 +373,26 @@ export function MacroData({ rows }: { rows: Payload["factor_coverage"] }) {
   </section>;
 }
 
-const MODEL_LABELS: Record<string, string> = {
-  CHAMPION_0: "零收益安全基准",
-  MARKET_ONLY: "黄金自身 Ridge",
-  NEWS_RESIDUAL: "核心新闻修正 Ridge",
-  FULL: "黄金＋核心新闻 Ridge",
-  BROAD_NEWS_RESIDUAL: "大视野新闻修正量 Ridge",
-  BROAD_FULL: "黄金＋大视野新闻 Ridge",
-  NEWS_ONLY: "纯新闻方向 Ridge",
-};
 const TOPIC_LABELS: Record<string, string> = {
   rates_fed: "利率 / Fed", inflation: "通胀", employment: "就业", inflation_employment: "通胀 / 就业",
   growth_economy: "增长 / 经济", usd_liquidity: "美元 / 流动性",
   oil_energy: "油价 / 能源", war_geopolitics: "战争 / 地缘",
   central_bank_gold: "央行购金", risk_sentiment: "风险情绪 / 避险", regulation_other: "监管 / 其他",
 };
-const EVIDENCE_LABELS: Record<string, string> = {
-  PRIMARY: "一手完整证据", CORROBORATED: "多源确认",
-  SINGLE_RELIABLE: "单一可靠来源 · 35%权重", DISCOVERY_ONLY: "线索来源",
-};
-const EVIDENCE_REASON_LABELS: Record<string, string> = {
-  CURRENT_EVENT: "当前事件",
-  NOT_YET_VISIBLE: "决策时尚未收到",
-  PUBLISHED_TIME_MISSING: "缺少可靠发布时间",
-  PRE_FORWARD_PUBLICATION: "系统启动前的旧档案",
-  PUBLISHED_AFTER_DECISION: "决策时尚未发布",
-  IMPACT_NOT_ASSESSED: "等待 Gemma 判断有效期",
-  IMPACT_EXPIRED: "新闻影响期已结束",
-  IMPACT_DUPLICATE_REPORT: "重复报道，不延长影响期",
-  STALE_EVENT: "按有效交易时间计算，影响期已结束",
-  CATEGORY_NOT_ACTIONABLE: "非黄金方向类别",
-  NEEDS_CONFIRMATION: "尚未达到模型证据门槛",
-  NO_ACTION_TOPIC: "与方向主题无关",
-  EVIDENCE_PRIMARY: "一手来源",
-  EVIDENCE_CORROBORATED: "多源确认",
-  EVIDENCE_SINGLE_RELIABLE: "单一可靠来源",
-  EVIDENCE_DISCOVERY_ONLY: "线索来源",
-  RELIABLE_SINGLE_SOURCE_PROVISIONAL: "可靠单一来源，已降低权重",
-  RELIABLE_PUBLISHER_TIME_PROXY: "以媒体发布时间作为公开时间",
-  EDITORIAL_OR_INVESTMENT_GUIDE: "投资建议或评论，不进入模型",
-  ELIGIBLE_AWAITING_FROZEN_PREDICTION: "已达模型门槛，等待下一次冻结预测",
-  LEGACY_ANNOTATION_SCHEMA: "旧版标注，不进入当前模型",
-  RECORD_KIND_NOT_ACTIONABLE: "行情报道，不是新的事实事件",
-  EVIDENCE_ROLE_NOT_ACTIONABLE: "证据角色不参与方向学习",
-  LOW_MATERIALITY: "事件重要性不足",
-};
-const EVIDENCE_REASON_PRIORITY = [
-  "RECORD_KIND_NOT_ACTIONABLE", "EDITORIAL_OR_INVESTMENT_GUIDE",
-  "IMPACT_DUPLICATE_REPORT", "LOW_MATERIALITY", "IMPACT_EXPIRED",
-  "STALE_EVENT", "IMPACT_NOT_ASSESSED", "NEEDS_CONFIRMATION",
-  "NO_ACTION_TOPIC", "CATEGORY_NOT_ACTIONABLE",
-];
-function evidenceReason(row: NewsEvidence): string {
-  const codes = row.model_unseen_reason_codes ?? [];
-  const code = EVIDENCE_REASON_PRIORITY.find(candidate => codes.includes(candidate))
-    ?? codes.find(candidate => EVIDENCE_REASON_LABELS[candidate]);
-  return code ? (EVIDENCE_REASON_LABELS[code] ?? code) : "当时未达到使用条件";
+export function CurrentEvent({ row }: { row: NewsEvidence }) {
+  const sources = row.publisher_domains?.length ? row.publisher_domains
+    : row.source_identity_organizations?.length ? row.source_identity_organizations
+      : row.source_names?.length ? row.source_names : [row.canonical_source].filter(Boolean);
+  return <article className="current-event">
+    <div className="current-event-meta"><span>{(row.topics ?? []).map(topic => TOPIC_LABELS[topic] ?? topic).join(" · ") || "新闻事件"}</span><time>{row.source_published_time ? time(row.source_published_time) : "发布时间未提供"}</time></div>
+    <h3>{row.canonical_headline}</h3>
+    <details className="current-event-sources">
+      <summary><span>{formatExactCount(row.member_count)} 篇报道 · {formatExactCount(row.independent_publishers)} 个独立来源</span><span className="current-event-source-action">来源详情 <ChevronRightIcon aria-hidden="true" /></span></summary>
+      <div className="current-event-source-body"><dl><div><dt>报道来源</dt><dd>{sources.join(" · ") || "未提供"}</dd></div><div><dt>首次收录</dt><dd>{time(row.collector_first_seen_time)}</dd></div></dl></div>
+    </details>
+  </article>;
 }
+
 function mergeUnique(values: Array<string[] | null | undefined>): string[] {
   return Array.from(new Set(values.flatMap(value => value ?? []).filter(Boolean))).sort();
 }
@@ -455,9 +409,6 @@ function mergeNewsEvidenceByEvent(rows: NewsEvidence[]): NewsEvidence[] {
       ...latest,
       event_key: row.event_key,
       broad_model_eligible: previous.broad_model_eligible || row.broad_model_eligible,
-      model_permission: previous.model_permission === "BROAD_MODEL" || row.model_permission === "BROAD_MODEL"
-        ? "BROAD_MODEL"
-        : "DISPLAY_ONLY",
       member_count: Math.max(previous.member_count, row.member_count),
       independent_publishers: Math.max(previous.independent_publishers, row.independent_publishers),
       source_names: mergeUnique([previous.source_names, row.source_names]),
@@ -468,19 +419,6 @@ function mergeNewsEvidenceByEvent(rows: NewsEvidence[]): NewsEvidence[] {
       publisher_domains: mergeUnique([previous.publisher_domains, row.publisher_domains]),
       topics: mergeUnique([previous.topics, row.topics]),
       reason_codes: mergeUnique([previous.reason_codes, row.reason_codes]),
-      model_seen: previous.model_seen || row.model_seen,
-      frozen_model_uses: previous.frozen_model_uses + row.frozen_model_uses,
-      frozen_decisions: previous.frozen_decisions + row.frozen_decisions,
-      frozen_versions: (previous.frozen_versions ?? 1) + (row.frozen_versions ?? 1),
-      first_model_decision_time: [previous.first_model_decision_time, row.first_model_decision_time]
-        .filter((value): value is string => Boolean(value)).sort()[0] ?? null,
-      last_model_decision_time: [previous.last_model_decision_time, row.last_model_decision_time]
-        .filter((value): value is string => Boolean(value)).sort().at(-1) ?? null,
-      model_identities: mergeUnique([previous.model_identities, row.model_identities]),
-      model_versions: mergeUnique([previous.model_versions, row.model_versions]),
-      model_unseen_reason_codes: mergeUnique([
-        previous.model_unseen_reason_codes, row.model_unseen_reason_codes,
-      ]),
     });
   }
   return sortNewsEvidenceByTime(merged.values());
@@ -755,8 +693,6 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     setNewsPageNotice(null);
   };
   const [newsReviewState, setNewsReviewState] = useState<NewsReviewState>("COMPLETED");
-  const [showAllEvidence, setShowAllEvidence] = useState(false);
-  const [showEvidenceMetrics, setShowEvidenceMetrics] = useState(false);
   const [showAllStoryEvents, setShowAllStoryEvents] = useState(false);
   const [showAllStorylines, setShowAllStorylines] = useState(false);
   const [expandedStorylines, setExpandedStorylines] = useState<Set<string>>(() => new Set());
@@ -796,7 +732,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     setStatusError(null);
   }), []);
 
-  const [evidenceMode, setEvidenceMode] = useState<"eligible" | "seen" | "unseen">("eligible");
+  const evidenceMode = "eligible" as const;
   const [evidencePage, setEvidencePage] = useState(1);
   const [evidencePageCursors, setEvidencePageCursors] = useState<Record<number, string | null>>({ 1: null });
   const evidenceCursor = evidencePageCursors[evidencePage] ?? null;
@@ -1146,33 +1082,9 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
   const repairLegacyDuplicateSummary = (
     !evidenceArchiveReady && evidencePayloadHasDuplicates
   );
-  const seenEvidenceCount = canonicalEvidence.filter(row => row.model_seen).length;
-  const unseenEvidenceCount = canonicalEvidence.length - seenEvidenceCount;
-  const eligibleEvidenceCount = canonicalEvidence.filter(row => row.broad_model_eligible).length;
-  const evidenceDecisionExposures = canonicalEvidence.reduce(
-    (total, row) => total + row.frozen_decisions, 0,
-  );
-  const evidenceModelUses = canonicalEvidence.reduce(
-    (total, row) => total + row.frozen_model_uses, 0,
-  );
-  const evidenceSummarySeenCount = repairLegacyDuplicateSummary ? seenEvidenceCount : newsMetrics.events.used_in_predictions;
-  const evidenceSummaryUnseenCount = repairLegacyDuplicateSummary ? unseenEvidenceCount : newsMetrics.events.never_used;
-  const evidenceSummaryEligibleCount = repairLegacyDuplicateSummary ? eligibleEvidenceCount : newsMetrics.events.currently_model_eligible;
-  const evidenceSummaryDecisionExposures = repairLegacyDuplicateSummary ? evidenceDecisionExposures : newsMetrics.prediction_usage.decision_event_exposures;
-  const evidenceSummaryModelUses = repairLegacyDuplicateSummary ? evidenceModelUses : newsMetrics.prediction_usage.frozen_model_uses;
-  const visibleEvidence = canonicalEvidence.filter(row => (
-    evidenceMode === "eligible" ? row.broad_model_eligible
-      : evidenceMode === "seen" ? row.model_seen : !row.model_seen
-  ));
-  const evidenceModeTotal = evidenceMode === "eligible" ? evidenceSummaryEligibleCount
-    : evidenceMode === "seen" ? evidenceSummarySeenCount : evidenceSummaryUnseenCount;
-  const evidenceWindowPartial = visibleEvidence.length < evidenceModeTotal;
-  const selectEvidenceMode = (mode: "eligible" | "seen" | "unseen") => {
-    setEvidenceMode(mode);
-    setEvidencePage(1);
-    setEvidencePageCursors({ 1: null });
-    setShowAllEvidence(false);
-  };
+  const visibleEvidence = canonicalEvidence.filter(row => row.broad_model_eligible);
+  const evidenceModeTotal = repairLegacyDuplicateSummary
+    ? visibleEvidence.length : newsMetrics.events.currently_model_eligible;
   const storylinesUnavailable = Boolean(
     payload?.preview?.is_preview
     && payload.preview.resources?.audit_stories?.availability
@@ -1418,47 +1330,16 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         </nav>}
       </>}
 
-      {view === "evidence" && <section className="evidence-desk">
-        <header className="evidence-intro evidence-intro-compact">
-          <div><p className="eyebrow">NEWS USED BY MODEL</p><h2>模型真正用过哪些新闻？</h2><p>按独立事件说明模型用过什么、没用什么。</p></div>
-        </header>
-        <button className="evidence-metrics-toggle" type="button" aria-expanded={showEvidenceMetrics} onClick={() => setShowEvidenceMetrics(value => !value)}>{showEvidenceMetrics ? "收起统计口径" : "查看统计口径"}<span>{formatExactCount(evidenceSummarySeenCount)} 个事件历史上用过 · {formatExactCount(evidenceSummaryEligibleCount)} 个现在可用</span></button>
-        <div className={`evidence-metrics-block ${showEvidenceMetrics ? "is-open" : ""}`}>
-          <div className="evidence-summary">
-            <article><span>收到多少篇文章</span><strong><CountValue value={newsMetrics.articles.received} /></strong><small>共保存 {formatExactCount(newsMetrics.articles.stored_revisions)} 个版本；文章更新不会算成新文章</small></article>
-            <article><span>历史上用过多少个事件</span><strong><CountValue value={evidenceSummarySeenCount} /></strong><small>每个都确实参加过至少一次预测</small></article>
-            <article><span>影响过多少次预测</span><strong><CountValue value={evidenceSummaryDecisionExposures} /></strong><small>同一事件可以连续影响多个 5 分钟预测</small></article>
-            <article><span>模型一共读取多少次</span><strong><CountValue value={evidenceSummaryModelUses} /></strong><small>5 套模型分别记账；这不是新闻数量</small></article>
-            <article><span>从未进入预测的事件</span><strong><CountValue value={evidenceSummaryUnseenCount} /></strong><small>可在下方逐条查看没有使用的原因</small></article>
-            <article><span>现在仍可用于预测</span><strong><CountValue value={evidenceSummaryEligibleCount} /></strong><small>等待下一次预测读取；不代表历史上用过</small></article>
-          </div>
-          <p className="evidence-count-note"><b>{formatExactCount(newsMetrics.training.current_contract_rows)} 条训练记录</b> 来自 <b>{formatExactCount(newsMetrics.training.distinct_events)} 个当前契约事件</b>；文章、独立事件、预测读取和训练记录是四种不同口径。</p>
-        </div>
-        <nav className="evidence-filters" aria-label="模型新闻可见性筛选">
-          <button type="button" className={evidenceMode === "eligible" ? "active" : ""} onClick={() => selectEvidenceMode("eligible")}>当前可用 <b><CountValue value={evidenceSummaryEligibleCount} /></b></button>
-          <button type="button" className={evidenceMode === "seen" ? "active" : ""} onClick={() => selectEvidenceMode("seen")}>历史上用过 <b><CountValue value={evidenceSummarySeenCount} /></b></button>
-          <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => selectEvidenceMode("unseen")}>从未用过 <b><CountValue value={evidenceSummaryUnseenCount} /></b></button>
-        </nav>
-        <p className="evidence-window-note">
-          {evidenceWindowPartial
-            ? <>本筛选已载入 <b>{formatExactCount(visibleEvidence.length)}</b> / {formatExactCount(evidenceModeTotal)} 个；完整总数保留在审计账本。</>
-            : <>已显示全部 <b>{formatExactCount(evidenceModeTotal)}</b> 个。</>}
-        </p>
-        <div className={`evidence-table-wrap ${showAllEvidence ? "show-all-mobile-items" : ""}`}><table className="evidence-table">
-          <thead><tr><th>是否用于预测</th><th>新闻事件</th><th>用了多少次 / 为什么没用</th><th>发布时间 / 收到时间</th></tr></thead>
-          <tbody>{visibleEvidence.length === 0 && evidenceModeTotal > 0 && <tr className="evidence-unavailable-row"><td colSpan={4}>这个分类有记录，但本页尚未载入明细。总数不会被当成空结果。</td></tr>}{visibleEvidence.map(row => <tr key={`${evidenceMode}:${row.event_key}`}>
-            <td className="evidence-status-cell"><span className={`model-seen-badge ${row.model_seen ? "is-seen" : "is-unseen"}`}>{row.model_seen ? "已用于预测" : "未用于预测"}</span><small><span className="evidence-grade-label">{EVIDENCE_LABELS[row.evidence_grade] ?? row.evidence_grade}</span><span className="evidence-status-copy">{row.model_seen ? "当时确实参与了模型输入" : row.broad_model_eligible ? "现在符合条件，等待下一次预测" : "现在也不符合使用条件"}</span></small></td>
-            <td className="evidence-event-cell"><strong>{row.canonical_headline}</strong><div className="evidence-topics">{(row.topics ?? []).map(topic => <span key={topic}>{TOPIC_LABELS[topic] ?? topic}</span>)}</div><small className="evidence-source-identity"><span>统一来源身份：{(row.source_identity_organizations ?? []).join(" · ") || "未确认"}</span><span>原始发布域名：{row.publisher_domains.join(" · ") || "未记录"}</span></small></td>
-            <td className="evidence-usage-cell">{row.model_seen ? <><strong>参与 {formatExactCount(row.frozen_decisions)} 次预测 · 模型读取 {formatExactCount(row.frozen_model_uses)} 次</strong><small><span className="evidence-model-list">{(row.model_identities ?? []).map(identity => MODEL_LABELS[identity] ?? identity).join(" · ") || "模型名称未记录"}</span><span className="evidence-use-window">首次 {time(row.first_model_decision_time)} · 最近 {time(row.last_model_decision_time)}</span></small></> : <><strong>从未进入任何预测</strong><small>{evidenceReason(row)}</small></>}</td>
-            <td className="evidence-time-cell"><time><span>发布</span>{row.source_published_time ? time(row.source_published_time) : "时间未知"}</time><small><span>收到 {time(row.collector_first_seen_time)}</span><span>{formatExactCount(row.independent_publishers)} 个独立来源 · {formatExactCount(row.member_count)} 篇新闻</span></small></td>
-          </tr>)}</tbody>
-        </table></div>
-        <nav className="market-history-nav" aria-label="新闻证据翻页">
+      {view === "evidence" && <section className="current-events" aria-label="当前可用新闻事件">
+        <header className="current-events-heading"><div><h2>当前可用新闻事件</h2><p>已整理、合并重复报道，最新在前。</p></div><span>{formatExactCount(evidenceModeTotal)} 个事件</span></header>
+        {visibleEvidence.length === 0 ? <p className="current-events-empty" role="status">{evidenceError ? "新闻事件暂时无法读取，请重试。" : !evidenceArchiveReady ? "正在读取新闻事件…" : evidenceModeTotal > 0 ? "当前列表暂无明细，请稍后重试。" : "暂无当前事件，有新进展时会显示在这里。"}</p>
+          : <div className="current-events-list">{visibleEvidence.map(row => <CurrentEvent key={`${evidencePage}:${row.event_key}`} row={row} />)}</div>}
+        <nav className="market-history-nav current-events-pagination" aria-label="新闻事件翻页">
           <PaginationButton direction="previous" disabled={evidencePage <= 1} onClick={() => setEvidencePage(page => Math.max(1, page - 1))} />
           <span aria-live="polite" aria-label={`第 ${formatExactCount(evidencePage)} 页`}>{formatExactCount(evidencePage)}</span>
           <PaginationButton direction="next" disabled={!evidenceArchiveReady || !evidenceArchive.has_more || !evidenceArchive.next_cursor} onClick={() => setEvidencePage(page => page + 1)} />
         </nav>
-        {visibleEvidence.length > 8 && <button className="mobile-reveal-button" type="button" aria-expanded={showAllEvidence} onClick={() => setShowAllEvidence(value => !value)}>{showAllEvidence ? "收起证据" : `显示本页其余 ${formatExactCount(visibleEvidence.length - 8)} 个事件`}</button>}
+        {visibleEvidence.length > 0 && <p className="current-events-count">本页 {formatExactCount(visibleEvidence.length)} 个 · 共 {formatExactCount(evidenceModeTotal)} 个事件</p>}
       </section>}
 
       {view === "stories" && selectedAuditDetailState === "ready" && <section className="story-desk">
@@ -1488,7 +1369,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         <MacroData rows={payload?.factor_coverage ?? []} />
       </>}
 
-      <footer className="audit-footer"><span>{view === "search" ? "搜索结果按本次查询显示" : `所选资源时间 ${selectedResourceTime ? time(selectedResourceTime) : "尚未提供"}`}</span><span>SHADOW ONLY · APPEND ONLY</span></footer>
+      <footer className="audit-footer"><span>{view === "search" ? "搜索结果按本次查询显示" : `所选资源时间 ${selectedResourceTime ? time(selectedResourceTime) : "尚未提供"}`}</span>{view !== "evidence" && <span>SHADOW ONLY · APPEND ONLY</span>}</footer>
     </main>
   );
 }
