@@ -86,7 +86,7 @@ test("one complete HTTP baseline precedes push and recurring status polling is s
   const previewBanner = readFileSync(new URL("../app/_components/PreviewBanner.tsx", import.meta.url), "utf8");
   assert.match(liveRoom, /DASHBOARD_REFRESH_INTERVALS\.live,[\s\S]*"current",[\s\S]*"status"/);
   assert.doesNotMatch(liveRoom, /"live-status"/);
-  assert.match(liveRoom, /effectiveQuoteAgeSeconds\([\s\S]*payload[\s\S]*now/);
+  assert.match(liveRoom, /报价时间 <time>\{localTime\(latest\?\.source_received_time\)\}/);
   assert.match(liveRoom, /!current\.preview_status_summary\) setRefreshing\(false\)/);
   for (const consumer of [liveRoom, audit]) {
     assert.match(consumer, /subscribeDashboardResource\("\/api\/status"/);

@@ -11,6 +11,7 @@ const dependencyPackage = process.env.AURUM_TEST_DEPENDENCY_PACKAGE
 const require = createRequire(dependencyPackage);
 const { build } = require("esbuild");
 const viewPath = fileURLToPath(new URL("../app/_views/AuditView.tsx", import.meta.url));
+const overviewPath = fileURLToPath(new URL("../app/_components/OverviewNews.tsx", import.meta.url));
 const resourcesPath = fileURLToPath(new URL("../app/_lib/dashboard-resource.ts", import.meta.url));
 const temporaryRoot = mkdtempSync(join(tmpdir(), "aurum-audit-content-"));
 test.after(() => rmSync(temporaryRoot, { recursive: true, force: true }));
@@ -28,6 +29,9 @@ const built = await build({
       import AuditView, {NewsRow} from ${JSON.stringify(viewPath)};
       import PreviewBanner from ${JSON.stringify(fileURLToPath(new URL("../app/_components/PreviewBanner.tsx", import.meta.url)))};
       import LiveRoomView from ${JSON.stringify(fileURLToPath(new URL('../app/_views/LiveRoomView.tsx', import.meta.url)))};
+      import {OverviewCards,validOverviewBriefs,validOverviewEvents} from ${JSON.stringify(fileURLToPath(new URL('../app/_components/OverviewNews.tsx', import.meta.url)))};
+      export {validOverviewBriefs,validOverviewEvents};
+      export function renderOverview(props) {return renderToStaticMarkup(React.createElement(OverviewCards,props));}
       import StatusView from ${JSON.stringify(fileURLToPath(new URL("../app/_views/StatusView.tsx", import.meta.url)))};
       import {clearDashboardResource,updateDashboardResource} from ${JSON.stringify(resourcesPath)};
       export function renderPreview(payload) { updateDashboardResource("/api/status",()=>payload); return renderToStaticMarkup(React.createElement(PreviewBanner)); }
@@ -43,7 +47,7 @@ const built = await build({
 });
 const renderedModule = join(temporaryRoot, "audit.mjs");
 writeFileSync(renderedModule, built.outputFiles[0].contents);
-const { render, renderNews, renderStatus, renderLive, renderPreview } = await import(pathToFileURL(renderedModule).href);
+const { render, renderNews, renderStatus, renderLive, renderPreview, renderOverview, validOverviewBriefs, validOverviewEvents } = await import(pathToFileURL(renderedModule).href);
 
 test("article row expands publisher provenance with one coherent public label", () => {
   const row = {headline: "政策会议展望", emerging_topic_zh: "政策会议展望", event_type: "macro_preview",
@@ -137,7 +141,7 @@ test("actual Audit detail effects poll current data but never immutable Preview 
     nodePaths: [join(dependencyPackage, "..", "node_modules")],
     banner: {js: "import {createRequire} from 'node:module'; const require=createRequire(import.meta.url);"},
     plugins: [{name: "audit-effect-boundary", setup(builder) {
-      builder.onResolve({filter: /^react$/}, args => args.importer === viewPath
+      builder.onResolve({filter: /^react$/}, args => [viewPath,overviewPath].includes(args.importer)
         ? {path: "react", namespace: "audit-effects"} : null);
       builder.onLoad({filter: /.*/, namespace: "audit-effects"}, () => ({
         contents: `export * from ${JSON.stringify(require.resolve("react"))};
@@ -152,7 +156,7 @@ test("actual Audit detail effects poll current data but never immutable Preview 
           export function useEffect(effect) { globalThis.__auditEffects.push(effect); }`,
         loader: "js", resolveDir: fileURLToPath(new URL("..", import.meta.url)),
       }));
-      builder.onResolve({filter: /^\.\.\/_lib\/dashboard-refresh$/}, args => args.importer === viewPath
+      builder.onResolve({filter: /^\.\.\/_lib\/dashboard-refresh$/}, args => [viewPath,overviewPath].includes(args.importer)
         ? {path: "refresh", namespace: "audit-refresh"} : null);
       builder.onLoad({filter: /.*/, namespace: "audit-refresh"}, () => ({
         contents: `export * from ${JSON.stringify(refreshPath)};
@@ -173,11 +177,12 @@ test("actual Audit detail effects poll current data but never immutable Preview 
       resolveDir: fileURLToPath(new URL("..", import.meta.url)), loader: "tsx",
       contents: `import React from 'react'; import {renderToStaticMarkup} from 'react-dom/server';
         import AuditView from ${JSON.stringify(viewPath)};
+        import OverviewNews from ${JSON.stringify(overviewPath)};
         import {clearDashboardResource,updateDashboardResource} from ${JSON.stringify(resourcesPath)};
         export function renderState(view) {
           globalThis.__auditStateIndex = 0;
           globalThis.__auditEffects = [];
-          return renderToStaticMarkup(React.createElement(AuditView,{initialView:view}));
+          return renderToStaticMarkup(React.createElement(view === "overview" ? OverviewNews : AuditView,{initialView:view,snapshot:globalThis.__auditDeployment.is_preview}));
         }
         export function mountEffects(view, resources) {
           for (const url of ${JSON.stringify(resourceUrls)}) clearDashboardResource(url);
@@ -195,7 +200,7 @@ test("actual Audit detail effects poll current data but never immutable Preview 
   const original = new Map(names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
   const originalNow = Date.now;
   try {
-    for (const preview of [false, true]) for (const statusMissing of [false, true]) for (const failure of [false, true]) for (const view of Object.keys(details)) {
+    for (const preview of [false, true]) for (const statusMissing of [false, true]) for (const failure of [false, true]) for (const view of [...Object.keys(details), "overview"]) {
       const timers = new Map();
       const intervals = new Map();
       const storage = new Map();
@@ -216,17 +221,45 @@ test("actual Audit detail effects poll current data but never immutable Preview 
         requests.push(String(url));
         return failure
           ? Response.json({error: "等待审计详情", availability: "UNAVAILABLE_IN_BUILD_SNAPSHOT"}, {status: 503})
-          : Response.json(details[view]);
+          : Response.json(view === "overview" ? String(url).includes("news-evidence") ? {mode:"eligible",snapshot_id:"snapshot",items:[]} : details.briefs : details[view]);
       };
       globalThis.__auditEffects = [];
       globalThis.__auditSchedules = [];
       globalThis.__auditTimerKey = null;
       globalThis.__auditDeployment = {is_preview: preview};
       const cleanups = mountEffects(view, {...baseline,
+        "/api/news-evidence?mode=eligible&page=1&limit=3": null,
         "/api/status": statusMissing ? null : {...baseline["/api/status"], preview: {is_preview: preview}},
         [`/api/audit-${view}`]: failure ? null : details[view],
       });
       try {
+        if (view === "overview") {
+          const schedules = globalThis.__auditSchedules;
+          assert.equal(schedules.length,2);
+          for (const schedule of schedules) {
+            assert.equal(schedule.mode,preview ? "build-snapshot" : "current");
+            assert.equal(schedule.interval,300_000);
+          }
+          for (const timer of [...timers.values()]) if (timer.key) timer.callback();
+          await new Promise(resolve => setImmediate(resolve));
+          assert.equal(requests.length,2);
+          assert.match(renderState(view), failure ? /暂时无法读取/ : /暂无可用事件/);
+          now += 300_001;
+          for (const timer of intervals.values()) timer.callback();
+          await new Promise(resolve => setImmediate(resolve));
+          assert.equal(requests.length,preview ? 2 : 4);
+          // The same resource can recover after a rejected response.
+          globalThis.fetch = async url => Response.json(String(url).includes("news-evidence")
+            ? {mode:"eligible",snapshot_id:"snapshot",items:[]} : details.briefs);
+          if (!preview && failure) {
+            now += 300_001;
+            for (const timer of intervals.values()) timer.callback();
+            await new Promise(resolve => setImmediate(resolve));
+            const recovered=renderState(view);
+            assert.match(recovered,/暂无可用事件/);
+            assert.doesNotMatch(recovered,/暂时无法读取/);
+          }
+        } else {
         const key = `audit-detail:${view}`;
         const schedule = globalThis.__auditSchedules.find(item => item.key === key);
         assert.equal(schedule.mode, preview ? "build-snapshot" : "current");
@@ -253,6 +286,7 @@ test("actual Audit detail effects poll current data but never immutable Preview 
             assert.match(html, /可稍后重新载入页面/);
             assert.doesNotMatch(html, /资料更新需要新构建/);
           }
+        }
         }
       } finally {
         for (const cleanup of cleanups.reverse()) if (typeof cleanup === "function") cleanup();
@@ -295,7 +329,7 @@ test("brief prose hides packet refs in every field without rewriting evidence", 
 test("overview links to current events without asserting omitted status counts", () => {
   const html = renderLive({generated_at: "2026-09-26T08:00:00Z", system: {online:false,quote_age_seconds:null}, counts:{}, sources:{}, news_metrics:{articles:{received:10,stored_revisions:12},events:{independent:0,currently_model_eligible:0}}});
   assert.match(html, /href="\/audit\?view=evidence"/);
-  assert.match(html, /<strong>新闻事件<\/strong>/);
+  assert.match(html, /<h2>当前事件<\/h2>/);
   assert.doesNotMatch(html, /0.*个独立事件/);
 });
 
@@ -304,4 +338,39 @@ test("preview hydration starts identically even after another server route prime
   assert.equal(renderPreview({}), "");
   assert.equal(renderPreview({preview:{is_preview:true,branch:"review",commit_sha:"abc12345"}}), "");
   assert.equal(renderPreview({}), "");
+});
+
+
+test("overview retains only three original headlines from latest date and revision", () => {
+  const row = (date,rev,title) => ({brief_date:date,revision_number:rev,model_version:"test",brief:{items:Array.from({length:4},(_,i)=>({headline:`${title}${i} [E01]`,summary:"LONG SUMMARY",evidence_ids:["E01"]}))}});
+  const data = {daily_news_briefs:[row("2026-09-25",99,"OLDER"),row("2026-09-26",1,"OLDREV"),row("2026-09-26",2,"LATEST")]};
+  const events = {mode:"eligible",snapshot_id:"snapshot",items:Array.from({length:4},(_,i)=>({event_key:String(i),canonical_headline:`EVENT${i}`,broad_model_eligible:true}))};
+  assert.equal(validOverviewBriefs(data),true);
+  assert.equal(validOverviewEvents(events),true);
+  assert.equal(validOverviewEvents({...events,mode:"unseen"}),false);
+  assert.equal(validOverviewEvents({...events,items:[{...events.items[0],broad_model_eligible:false}]}),false);
+  assert.equal(validOverviewBriefs({daily_news_briefs:[{...data.daily_news_briefs[0],brief_date:null}]}),false);
+  const before=JSON.stringify(data);
+  const html=renderOverview({briefs:{data,error:null},events:{data:events,error:null},snapshot:true});
+  assert.match(html,/2026\/09\/26/);
+  assert.match(html,/LATEST2/); assert.match(html,/EVENT2/);
+  assert.doesNotMatch(html,/LATEST3|EVENT3|OLDER|OLDREV|LONG SUMMARY|E01|今日/);
+  assert.match(html,/预览快照/);
+  assert.equal((html.match(/<li>/g)||[]).length,6);
+  assert.match(html,/href="\/audit\?view=briefs"/);
+  assert.match(html,/href="\/audit\?view=evidence"/);
+  assert.equal(JSON.stringify(data),before);
+});
+
+test("overview distinguishes loading, confirmed empty, failure and retained content", () => {
+  const empty={daily_news_briefs:[],projection_contract:"audit-detail-source-v1"};
+  assert.equal(validOverviewBriefs(empty),true);
+  assert.equal(validOverviewBriefs({daily_news_briefs:[]}),false);
+  const pending={data:null,error:null};
+  assert.match(renderOverview({briefs:pending,events:pending}),/正在读取/);
+  const html=renderOverview({briefs:{data:empty,error:null},events:{data:{items:[]},error:null}});
+  assert.match(html,/简报尚未生成/);assert.match(html,/暂无可用事件/);assert.doesNotMatch(html,/正在读取|重试/);
+  const failed=renderOverview({briefs:{data:null,error:new Error("provider")},events:{data:{items:[{event_key:"one",canonical_headline:"KEPT"}]},error:new Error("refresh")}});
+  assert.match(failed,/暂时无法读取/);assert.match(failed,/显示上次内容/);assert.match(failed,/KEPT/);
+  assert.equal((failed.match(/>重试</g)||[]).length,2);
 });
