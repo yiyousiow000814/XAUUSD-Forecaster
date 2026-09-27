@@ -1,4 +1,60 @@
-# Selected C overview fidelity review
+# Public dashboard design review
+
+## Current review: continuity across public pages
+
+Final result: passed for implementation and branch Preview verification.
+User visual acceptance and production activation are not implied.
+
+Verified application revision: `2f6b8ec7b204646fe01239d7b986be6dd8cbf4f1`.
+Immutable Preview: https://f3ca2187-aurum-signal-room.yiyousiow1234.workers.dev/.
+The following overview-only review is retained as historical context; its
+Preview and test totals are superseded by this section.
+
+The overview, all six news/event subpages and health now share the selected C
+brand, sans typography, white header, cool background, teal navigation and
+rounded panels. Public phone navigation and footer reuse the existing route
+authority. Private administrator controls retain their existing behavior.
+
+### Responsive and interaction evidence
+
+- Desktop 1280x900, phones 390x844 and 360x800 were inspected in deployed
+  branch Previews. The final application revision was rechecked after the
+  coverage-grid edge repair. No unintended horizontal overflow was found.
+- Overview/news headers have matching desktop geometry: x=92.5, y=36.5,
+  width=1080, height=88 CSS pixels. Phone menus retain 44px minimum targets;
+  opening, navigation dismissal, Escape and focus return were exercised.
+- News: category selection, next/previous pagination and expanded article
+  detail were exercised on phones. Daily brief date selection changed the
+  displayed brief. Search controls and the explicit empty-result state were
+  checked; this does not claim a matching result for the test query.
+- Stories remain collapsed initially. Expanded story nodes were confirmed
+  newest first, with the complete six-node chain reachable before collapsing.
+- Evidence metric boundaries were checked at desktop and phone widths.
+  Coverage has 11 cards: the final desktop card spans the remaining columns;
+  all phone cards reset to one column with complete internal/outer edges.
+  News, brief, story, search, evidence and coverage surfaces were inspected.
+- Actual screenshots: `C:/Users/yiyou/AppData/Local/Temp/unified-news-desktop.png`
+  and `C:/Users/yiyou/AppData/Local/Temp/unified-news-390.png`, captured from the
+  final immutable Preview. Capture scaling excludes the scrollbar; CSS
+  viewport dimensions were verified independently using DOM geometry.
+- No browser console warnings or errors were recorded. The task tab was
+  closed and the viewport override reset. Final task browser session count: **0**.
+
+### Final review and checks
+
+- `npm test`: 399 passed, 6 skipped, 0 failed. Production and Preview builds
+  passed. Changed shell lint: 0 errors, 2 existing navigation warnings.
+- Architecture compilation/check, architecture documentation check and
+  `git diff --check` passed. Architecture digest remained unchanged.
+- Final diff inspection covered public/private shell callers, navigation
+  active state, native menu event cleanup, shared status subscriptions,
+  responsive sibling grid edges and rendered-shell regression coverage.
+  No API, data authority, refresh ownership, model or collection behavior changed.
+- No unresolved blocking finding remains within this visual-continuity scope.
+  Operational warnings, snapshot provenance and existing content remain real.
+  Production was not replaced; PR #562 remains a draft for visual review.
+
+## Historical selected C overview fidelity review
 
 final result: passed
 
