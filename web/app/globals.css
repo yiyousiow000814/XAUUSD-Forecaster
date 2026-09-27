@@ -1843,7 +1843,7 @@ body:has(.assistant-main) > .operational-alert-banner { flex:0 0 auto; }
 .dashboard-shell>main ,
 .dashboard-shell>.dashboard-view-content>main { padding-top:0; }
 .dashboard-header.topbar { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:24px; }
-.dashboard-brand { color:var(--ink); text-decoration:none; }
+.dashboard-brand { display:flex; align-items:center; min-height:44px; color:var(--ink); text-decoration:none; }
 .dashboard-brand:focus-visible { outline:3px solid var(--acid); outline-offset:4px; }
 .dashboard-global-nav { min-width:0; display:flex; align-items:center; justify-content:flex-end; gap:8px; }
 .dashboard-global-link { min-height:44px; display:inline-flex; align-items:center; justify-content:center; border:1px solid var(--ink); padding:9px 14px; background:var(--paper); color:var(--ink); font-family:var(--font-sans),sans-serif; font-size:13px; font-weight:800; letter-spacing:.04em; text-decoration:none; position:relative; cursor:pointer; }
@@ -2361,7 +2361,7 @@ html,body,* { scrollbar-width:none; }
 
 /* Admin keeps its controls and data ownership inside the same product shell. */
 .dashboard-shell.is-product .admin-section-nav { max-width:1080px; margin:0 auto; gap:6px; padding:0 0 12px; flex-wrap:wrap; }
-.dashboard-shell.is-product .admin-section-nav a { flex:0 1 auto; min-height:44px; border:0; border-radius:8px; padding:10px 16px; color:var(--muted); font-size:14px; font-weight:500; transition:background-color .16s ease; }
+.dashboard-shell.is-product .admin-section-nav a { flex:0 1 auto; min-width:44px; min-height:44px; border:0; border-radius:8px; padding:10px 16px; color:var(--muted); font-size:14px; font-weight:500; transition:background-color .16s ease; }
 .dashboard-shell.is-product .admin-section-nav a:hover { background:#f1f7f8; outline:none; }
 .dashboard-shell.is-product .admin-section-nav a:focus-visible { outline:2px solid var(--acid); outline-offset:-2px; }
 .dashboard-shell.is-product .admin-section-nav a.is-active { background:#e8f4f5; color:#007887; font-weight:700; }
