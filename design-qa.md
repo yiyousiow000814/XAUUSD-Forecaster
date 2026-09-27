@@ -1,5 +1,42 @@
 # Public dashboard design review
 
+## Latest follow-up: curated event reading
+
+Verified application revision: `6fcd4a28` (UI implementation `89b60f45`).
+Preview: https://8773889f-aurum-signal-room.yiyousiow1234.workers.dev/audit?view=evidence.
+The current-events destination is now a compact reading list. Headlines,
+categories and publication times appear immediately; native source disclosures
+show reporting domains and receipt times. Prediction-use tables, six statistics,
+historical-use filters, model badges and their dedicated CSS are removed.
+The existing eligible event selection, grouping and bounded cursor transport
+are unchanged. No stored records, API contracts or processing owners changed.
+The source payload has no summary/article URL; the UI does not fabricate either.
+
+Final checks: full web suite 408 passed / 6 skipped / 0 failed; production and
+Preview builds passed. The 117 affected rendering/content tests passed. Generated
+architecture evidence was refreshed after the source change and its exact-input
+check passed; architecture documentation and whitespace checks passed.
+Final diff review traced current-event rendering to the existing paged reader,
+confirmed publication ordering and event-key grouping, and checked legacy payload
+fallback, absent timestamps/sources, loading/empty notices, retained retry/cursor
+handling and shared story/news CSS selectors. No model-use field is rendered by
+the current-event reader; retired view-only accounting and reason maps are gone.
+
+Deployed Preview checked at desktop 1280x900, phones 390x844 and 360x800. Complete
+outer edges and row dividers were inspected, including expanded first/last rows.
+Full headlines wrap without clipping; document widths equal viewport widths.
+Source disclosures are 44px high and pagination targets are 44x44. On phone,
+expanded a source, closed it with Enter, navigated to news and back, scrolled to
+the final row and opened its source. The bounded Preview has five detail rows
+against 41 reported events and no next cursor: the displayed partial count and
+disabled next button were verified. Another event page was unavailable in this
+snapshot. No browser warnings/errors. Task tab closed and viewport reset;
+remaining task-created browser sessions: **0**.
+
+Screenshots: `C:/Users/yiyou/AppData/Local/Temp/current-events-desktop.png` and
+`C:/Users/yiyou/AppData/Local/Temp/current-events-360.png`.
+Production is unchanged. PR #562 remains a draft for visual review.
+
 ## Latest follow-up: observed macro data and story diagnostics
 
 Verified application revision: `5a19d234`.
