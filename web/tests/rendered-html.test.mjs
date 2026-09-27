@@ -2973,3 +2973,15 @@ test("standalone mobile audit notices have a top edge while stacked notices shar
   assert.match(css, /@media \(max-width:850px\)\{[^}]*[\s\S]*?\.audit-main > \.current-data-notice \{ border-top:1px solid var\(--ink\); \}/);
   assert.match(css, /\.audit-main > \.current-data-notice \+ \.current-data-notice \{ border-top:0; \}/);
 });
+
+test("public reading grids own complete responsive boundaries", () => {
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.is-public \.coverage-grid \{[^}]*gap:0;[^}]*border:1px solid var\(--line\)/);
+  assert.match(css, /\.is-public \.coverage-card:nth-child\(n\+4\) \{ border-top:1px solid var\(--line\)/);
+  assert.match(css, /\.is-public \.coverage-card:last-child:nth-child\(3n\+1\) \{ grid-column:span 3; border-right:0/);
+  assert.match(css, /\.is-public \.coverage-card:last-child:nth-child\(3n\+2\) \{ grid-column:span 2; border-right:0/);
+  assert.match(css, /\.is-public \.coverage-card:last-child:nth-child\(n\) \{ grid-column:auto/);
+  assert.match(css, /\.is-public \.evidence-summary article:nth-child\(3n\) \{ border-right:0/);
+  assert.match(css, /\.is-public \.evidence-summary article:nth-child\(2n\) \{ border-right:0/);
+  assert.match(css, /\.is-public \.news-row,\.is-public \.news-row:last-child \{ border:1px solid var\(--line\)/);
+});
