@@ -2174,13 +2174,10 @@ test("loads market history by bounded range without model decisions", () => {
 test("live room reports articles without treating omitted event counts as zero", async () => {
   const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
   const payloads = readFileSync(new URL("../../xauusd_forecaster/dashboard/payloads.py", import.meta.url), "utf8");
-  assert.match(source, /NEWS ARTICLES/);
-  assert.match(source, /newsMetrics\.articles\.received/);
-  assert.doesNotMatch(source, /newsMetrics\.events\./);
+  assert.match(source, /OverviewNews/);
+  assert.doesNotMatch(source, /newsMetrics|metric-grid|source-panel/);
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(source, /workspace-grid news-workspace/);
-  assert.match(css, /\.workspace-grid\.news-workspace\s*\{[^}]*grid-template-columns:1fr/);
-  assert.match(css, /\.metric-grid article > a\s*\{[^}]*min-height:44px/);
+  assert.match(css, /\.overview-more[^}]*min-height:48px/);
   assert.match(payloads, /"counts", "news_metrics", "news_source_health"/);
   assert.doesNotMatch(source, /NEWS REVISIONS/);
   assert.doesNotMatch(source, /counts\.news_revisions/);

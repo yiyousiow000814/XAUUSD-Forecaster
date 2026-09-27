@@ -335,7 +335,7 @@ test("serves canonical public shells and favicon as static assets before Worker 
   const config = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
   const redirects = readFileSync(new URL("../dist/client/_redirects", import.meta.url), "utf8");
   const staticPages = [
-    ["index.html", "当前可用新闻事件"],
+    ["index.html", "每日简报"],
     ["health.html", "系统健康状态"],
     ["audit.html", "证据台页面"],
   ];
