@@ -1679,7 +1679,8 @@ test("switches dashboard rooms locally and reuses client data between views", ()
   assert.match(app, /lazy\(loadRetryView\)/);
   assert.match(app, /<RetryView \/>/);
   assert.match(app, /<DashboardShell location=\{location\}>/);
-  assert.match(css, /\.dashboard-global-link\.is-navigating::after/);
+  assert.doesNotMatch(css, /is-navigating::after|nav-progress/);
+  assert.match(css, /\.dashboard-view-content\[hidden\] \{ display:none/);
   assert.match(css, /prefers-reduced-motion:reduce/);
   assert.match(cache, /const resources = new Map/);
   assert.match(cache, /if \(entry\.pending\)/);
@@ -2493,7 +2494,7 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell form \{[^}]*grid-template-columns:minmax\(0,1fr\) 52px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell \{[^}]*min-height:69px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell textarea \{[^}]*height:52px;[^}]*max-height:52px/);
-  assert.match(css, /\.dashboard-shell\.is-admin>\.assistant-main \{[^}]*height:auto; min-height:0/);
+  assert.match(css, /\.dashboard-shell\.is-admin>\.assistant-main[^{}]*\{[^}]*height:auto; min-height:0/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-thread-heading h1 \{[^}]*font-size:clamp\(18px,4\.8vw,20px\)/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-message\.is-user>p \{[^}]*font-size:15px; line-height:1\.68/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-news-card-trigger>strong \{[^}]*font-size:19px; line-height:1\.22/);

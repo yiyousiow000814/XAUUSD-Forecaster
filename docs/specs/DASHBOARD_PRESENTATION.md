@@ -4,6 +4,16 @@ This specification defines the required visual behavior of the dashboard's
 data-dense navigation, metric grids, tables, and expandable evidence panels.
 It applies to both desktop and phone layouts.
 
+## Navigation loading
+
+Room imports show a bounded skeleton inside the content area, below the shared
+header. Do not use travelling navigation underlines or viewport-height loading
+lines. Keep the previous view mounted but hidden until the active navigation
+succeeds; restore it with the existing retry action on failure. Superseded
+requests cannot clear or replace the current pending state. The initial empty
+news read uses list skeletons; cached rows remain readable during refresh.
+Skeletons announce loading once, respect reduced motion, and fit phone widths.
+
 ## Retry tasks
 
 The retry page shows supported unresolved failed jobs and active manual schedule

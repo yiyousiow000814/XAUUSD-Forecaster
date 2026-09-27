@@ -16,7 +16,8 @@ const resourcesPath = fileURLToPath(new URL("../app/_lib/dashboard-resource.ts",
 const temporaryRoot = mkdtempSync(join(tmpdir(), "aurum-audit-content-"));
 test.after(() => rmSync(temporaryRoot, { recursive: true, force: true }));
 
-const resourceUrls = ["/api/status", "/api/audit", "/api/audit-briefs", "/api/audit-stories", "/api/news-evidence?mode=eligible&page=1&limit=20"];
+const newsIndexUrl = `/api/news-index?page=1&limit=${JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url))).newsPageSize}&review_state=COMPLETED`;
+const resourceUrls = [newsIndexUrl,"/api/status", "/api/audit", "/api/audit-briefs", "/api/audit-stories", "/api/news-evidence?mode=eligible&page=1&limit=20"];
 const built = await build({
   bundle: true, write: false, platform: "node", format: "esm", jsx: "automatic",
   loader: { ".webp": "dataurl" },
@@ -31,6 +32,8 @@ const built = await build({
       import PreviewBanner from ${JSON.stringify(fileURLToPath(new URL("../app/_components/PreviewBanner.tsx", import.meta.url)))};
       import LiveRoomView from ${JSON.stringify(fileURLToPath(new URL('../app/_views/LiveRoomView.tsx', import.meta.url)))};
       import {OverviewCards,validOverviewBriefs,validOverviewEvents} from ${JSON.stringify(fileURLToPath(new URL('../app/_components/OverviewNews.tsx', import.meta.url)))};
+      import DashboardPageSkeleton from ${JSON.stringify(fileURLToPath(new URL('../app/_components/DashboardPageSkeleton.tsx', import.meta.url)))};
+      export function renderSkeleton(room) {return renderToStaticMarkup(React.createElement(DashboardPageSkeleton,{location:{room,auditView:"news"}}));}
       export {validOverviewBriefs,validOverviewEvents};
       export function renderOverview(props) {return renderToStaticMarkup(React.createElement(OverviewCards,props));}
       import StatusView from ${JSON.stringify(fileURLToPath(new URL("../app/_views/StatusView.tsx", import.meta.url)))};
@@ -51,7 +54,7 @@ const built = await build({
 });
 const renderedModule = join(temporaryRoot, "audit.mjs");
 writeFileSync(renderedModule, built.outputFiles[0].contents);
-const { renderMacro, renderPageButton, render, renderNews, renderStatus, renderLive, renderPreview, renderOverview, renderStory, validOverviewBriefs, validOverviewEvents } = await import(pathToFileURL(renderedModule).href);
+const { renderSkeleton, renderMacro, renderPageButton, render, renderNews, renderStatus, renderLive, renderPreview, renderOverview, renderStory, validOverviewBriefs, validOverviewEvents } = await import(pathToFileURL(renderedModule).href);
 
 test("overview decorations arrive with the view instead of separate image requests", () => {
   const html = renderLive({system:{online:false},counts:{},sources:{},latest:null});
@@ -521,4 +524,103 @@ test("event source fallbacks stay readable and do not invent links or times", ()
     source_identity_organizations:["A reporting organization"], topics:null})]);
   assert.match(html, /发布时间未提供|A reporting organization/);
   assert.doesNotMatch(html, /href="https:|Invalid Date|模型|预测/);
+});
+
+
+test("room loading renders bounded content skeletons with one accessible status", () => {
+  for (const room of ["audit", "live", "health"]) {
+    const html = renderSkeleton(room);
+    assert.equal((html.match(/role="status"/g) || []).length, 1);
+    assert.equal((html.match(/class="news-skeleton-row"/g) || []).length, 6);
+    assert.match(html, /aria-busy="true"/);
+    assert.match(html, /aria-hidden="true"/);
+    assert.equal(html.includes('class="skeleton-navigation"'), room === "audit");
+  }
+});
+
+test("an empty initial news read shows list skeletons instead of blank rows", () => {
+  const html = selectedBody(render("news", baseline));
+  assert.match(html, /class="news-list-skeleton" role="status"/);
+  assert.equal((html.match(/class="news-skeleton-row"/g) || []).length, 6);
+});
+
+test("navigation skeleton tracks current imports and recovers from failures", async () => {
+  const appPath = fileURLToPath(new URL("../app/_components/DashboardApp.tsx", import.meta.url));
+  const output = await build({
+    bundle:true, write:false, platform:"node", format:"esm", jsx:"automatic",
+    nodePaths:[join(dependencyPackage,"..","node_modules")],
+    banner:{js:"import {createRequire} from 'node:module'; const require=createRequire(import.meta.url);"},
+    plugins:[{name:"navigation-boundary",setup(b){
+      b.onResolve({filter:/^react$/}, a=>a.importer===appPath?{path:"hooks",namespace:"nav"}:null);
+      b.onLoad({filter:/.*/,namespace:"nav"},()=>({contents:`
+        export * from ${JSON.stringify(require.resolve("react"))};
+        export function useState(v){const h=globalThis.__navHarness,i=h.index++;if(!(i in h.state))h.state[i]=v;
+          return [h.state[i],n=>h.state[i]=typeof n==='function'?n(h.state[i]):n];}
+        export function useRef(v){return useState({current:v})[0];}
+        export function useCallback(v){return v;} export function useMemo(fn){return fn();}
+        export function useEffect(fn){globalThis.__navHarness.effects.push(fn);} export function useLayoutEffect(){}
+      `,loader:"js",resolveDir:fileURLToPath(new URL("..",import.meta.url))}));
+      b.onResolve({filter:/_views\//},a=>a.importer===appPath?{path:a.path,namespace:"nav-view"}:null);
+      b.onLoad({filter:/.*/,namespace:"nav-view"},a=>({contents:a.path.endsWith("LiveRoomView")
+        ? `export default function View(){return <main>Preserved overview</main>}`
+        : `await globalThis.__navHarness.gates[${JSON.stringify(a.path.split('/').pop())}].promise;
+           export default function View(){return <main>Loaded destination</main>}`,
+        loader:"tsx",resolveDir:fileURLToPath(new URL("..",import.meta.url))}));
+      b.onResolve({filter:/^\.\/Dashboard(Shell|ContentBoundary|Navigation)$/},a=>a.importer===appPath?{path:a.path,namespace:"nav-shell"}:null);
+      b.onLoad({filter:/.*/,namespace:"nav-shell"},()=>({contents:`
+        export default function Pass({children}){return children;}
+        export function DashboardNavigationProvider({value,children}){globalThis.__navHarness.navigation=value;return children;}
+      `,loader:"js",resolveDir:fileURLToPath(new URL("..",import.meta.url))}));
+    }}],
+    stdin:{resolveDir:fileURLToPath(new URL("..",import.meta.url)),loader:"tsx",contents:`
+      import React from 'react';import {renderToStaticMarkup} from 'react-dom/server';
+      import DashboardApp from ${JSON.stringify(appPath)};
+      export function render(){const h=globalThis.__navHarness;h.index=0;h.effects=[];
+        return renderToStaticMarkup(<DashboardApp initialLocation={{room:'live',auditView:'news'}}/>);}
+    `},
+  });
+  const path=join(temporaryRoot,"navigation.mjs");writeFileSync(path,output.outputFiles[0].contents);
+  const {render:draw}=await import(pathToFileURL(path).href);
+  const original=globalThis.window;
+  const gate=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};};
+  const h={index:0,state:[],effects:[],gates:{AuditView:gate(),HealthView:gate(),RetryView:gate()}};
+  globalThis.__navHarness=h;
+  const history=[];let popstate;
+  globalThis.window={location:{href:"https://dashboard.test/"},scrollY:0,
+    history:{pushState(a,b,href){history.push(href);},replaceState(a,b,href){history.push(href);}},
+    addEventListener(name,fn){if(name==='popstate')popstate=fn;},removeEventListener(){}};
+  try {
+    assert.match(draw(),/Preserved overview/);
+    const first=h.navigation.navigate('/audit?view=news');
+    assert.match(draw(),/新闻与事件加载中/);
+    assert.match(draw(),/hidden=""[^>]*><main>Preserved overview/);
+    const second=h.navigation.navigate('/health');
+    h.gates.AuditView.resolve();await first;
+    assert.match(draw(),/aria-label="页面加载中"/);
+    assert.deepEqual(history,[]);
+    h.gates.HealthView.reject(new Error('test import failure'));await second;
+    assert.match(draw(),/目标页面暂不可用/);assert.match(draw(),/Preserved overview/);
+    assert.doesNotMatch(draw(),/hidden=""|page-skeleton/);
+    h.effects.at(-1)();window.location.href='https://dashboard.test/admin/retry-jobs';popstate();
+    assert.match(draw(),/page-skeleton/);
+    h.gates.RetryView.reject(new Error('test popstate failure'));
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.doesNotMatch(draw(),/hidden=""|page-skeleton/);assert.equal(history.at(-1),'/');
+    await h.navigation.navigate('/audit?view=news');draw();
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.match(draw(),/Loaded destination/);
+    assert.doesNotMatch(draw(),/hidden=""|page-skeleton|目标页面暂不可用/);
+    assert.equal(history.at(-1),'/audit?view=news');
+  } finally {globalThis.window=original;delete globalThis.__navHarness;}
+});
+
+
+test("cached news remains visible while missing totals are refreshed", () => {
+  const html = selectedBody(render("news", {...baseline, [newsIndexUrl]: {
+    items:[{source:"wire",source_item_id:"cached",headline:"Retained cached article",model_visibility:"MODEL_INELIGIBLE",content_status:"FULL_TEXT",annotation_status:"READY",category:"利率/Fed"}],
+    total:1,all_total:1,category_counts:{},page:1,page_size:12,totals_scope:"LOADING",
+    review_state:"COMPLETED",review_state_counts:{COMPLETED:1,PROCESSING:0},
+  }}));
+  assert.match(html,/Retained cached article/);
+  assert.doesNotMatch(html,/class="news-list-skeleton"/);
 });

@@ -1,5 +1,19 @@
 # Public dashboard design review
 
+## In progress: navigation loading presentation
+
+Boundary: transient dashboard navigation presentation only. DashboardApp remains
+the owner of route selection, the navigation sequence and load failure recovery.
+Actors: link clicks, preloads, browser popstate and dynamic-import completion.
+The existing sequence rejects stale completions. Pending destination is cleared
+only by the current success/failure; the prior view stays mounted but hidden so
+failure restores its local state. No API, persistence, background owner, schema,
+authentication or release authority changes. Reload follows existing routing.
+The Suspense fallback and empty initial news read reuse a bounded skeleton;
+cached content and explicit failures remain readable. Verify slow import/data,
+success, failure, superseded requests, back/forward, reduced motion and phone
+layout. Source/test review plus deployed Preview rehearsal are required.
+
 ## Latest follow-up: overview image arrival
 
 Verified application revision: `21f4eb5e`.

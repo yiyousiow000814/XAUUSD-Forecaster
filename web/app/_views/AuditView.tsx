@@ -19,6 +19,7 @@ import { formatExactCount } from "../_lib/count-format";
 import { publicImpactReason, publicBriefText } from "../_lib/public-news-copy";
 import { validAuditDetailPayload } from "../_lib/audit-detail-contract";
 import { sortNewsEvidenceByTime } from "../_lib/news-evidence-order";
+import { NewsListSkeleton } from "../_components/DashboardPageSkeleton";
 
 declare const __AURUM_DEPLOYMENT__: { is_preview: boolean };
 
@@ -1314,13 +1315,14 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         </section>
         <section className="news-table">
           <header className="news-table-head"><span>分类 / 发布时间</span><span>新闻与来源</span><span>正文 / 状态</span></header>
+          {newsPhase === "loading" && visibleNews.length === 0 && <NewsListSkeleton />}
           {archiveTotals && visibleNews.length === 0 && !newsError && <div className="current-data-notice" role="status"><b>本页没有符合筛选条件的新闻</b><span>这是当前审核区域与分类的查询结果，不代表所有新闻或事件数量为零。</span></div>}
           {visibleNews.map(row => <NewsRow
             key={`${row.source}-${row.source_item_id}-${row.revision_number}`}
             row={row}
             prefetchedDetail={newsDetails[row.detail_key]}
           />)}
-          {Array.from({ length: emptyNewsRows }, (_, index) => <div className="news-row-placeholder" aria-hidden="true" key={`empty-news-row-${index}`} />)}
+          {newsPhase !== "loading" && Array.from({ length: emptyNewsRows }, (_, index) => <div className="news-row-placeholder" aria-hidden="true" key={`empty-news-row-${index}`} />)}
         </section>
         {newsPageNotice && <p role="status">{newsPageNotice}</p>}
         {newsPageCount > 1 && <nav className="news-pagination" aria-label="新闻分页">
