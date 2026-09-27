@@ -375,7 +375,7 @@ def install_dashboard_critical_activity_schema(
 
 
 READ_MODEL_CONTRACTS = {
-    "audit": "dashboard-audit-resources-v2",
+    "audit": "dashboard-audit-resources-v3-complete-stories",
     "market_chart": "dashboard-market-chart-summary-v1",
 }
 

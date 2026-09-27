@@ -1375,6 +1375,32 @@ def test_existing_read_model_schema_gains_snapshot_provenance(tmp_path) -> None:
     } <= columns
 
 
+def test_sampled_audit_cache_rebuilds_on_upgrade_without_new_source_data(monkeypatch, tmp_path) -> None:
+    database = tmp_path / "forward.sqlite3"
+    ForwardLedger(database).close()
+    nodes = 6
+
+    def build(snapshot):
+        return {"generated_at": snapshot.started_at.isoformat(),
+                "storylines": [{"event_count": 40, "timeline": list(range(nodes))}]}
+
+    builders = {resource: build for resource in READ_MODEL_CONTRACTS}
+    with monkeypatch.context() as prior:
+        prior.setitem(READ_MODEL_CONTRACTS, "audit", "dashboard-audit-resources-v2")
+        assert DashboardReadModelOwner(database, builders).refresh_once() == {"audit": 1, "market_chart": 1}
+        _, old_metadata = read_dashboard_read_model(database, "audit")
+    nodes = 40
+    restarted = DashboardReadModelOwner(database, builders)
+    with pytest.raises(DashboardReadModelUnavailable, match="contract mismatch"):
+        read_dashboard_read_model(database, "audit")
+    assert restarted.refresh_once() == {"audit": 1, "market_chart": 0}
+    body, metadata = read_dashboard_read_model(database, "audit")
+    assert metadata["source_revision"] == old_metadata["source_revision"]
+    story = json.loads(body)["storylines"][0]
+    assert story["event_count"] == len(story["timeline"]) == 40
+    assert restarted.refresh_once() == {"audit": 0, "market_chart": 0}
+
+
 def test_optional_read_model_validation_and_concurrent_reads(tmp_path) -> None:
     database = tmp_path / "forward.sqlite3"
     ForwardLedger(database).close()
