@@ -139,7 +139,7 @@ function DashboardHeader({
 }: { location: DashboardLocation; adminAuthenticated: boolean; openAdminLogin: () => void }) {
   const activeDestination = activeDashboardDestination(location.room);
   return <header className="dashboard-header topbar">
-    <DashboardBrand overview={activeDestination === "live"} />
+    <DashboardBrand overview={activeDestination !== "admin"} />
     <GlobalNavigation
       activeDestination={activeDestination}
       adminAuthenticated={adminAuthenticated}
@@ -151,11 +151,12 @@ function DashboardHeader({
       openAdminLogin={openAdminLogin}
     />
     <GlobalSystemState active={location.room === "health"} />
-    {activeDestination === "live" && <OverviewMobileMenu adminAuthenticated={adminAuthenticated} openAdminLogin={openAdminLogin} />}
+    {activeDestination !== "admin" && <PublicMobileMenu activeDestination={activeDestination} adminAuthenticated={adminAuthenticated} openAdminLogin={openAdminLogin} />}
   </header>;
 }
 
-function OverviewMobileMenu({ adminAuthenticated, openAdminLogin }: {
+function PublicMobileMenu({ activeDestination, adminAuthenticated, openAdminLogin }: {
+  activeDestination: ReturnType<typeof activeDashboardDestination>;
   adminAuthenticated: boolean; openAdminLogin: () => void;
 }) {
   const menu = useRef<HTMLDetailsElement>(null);
@@ -178,20 +179,20 @@ function OverviewMobileMenu({ adminAuthenticated, openAdminLogin }: {
       element.removeEventListener("click", closeOnNavigation);
     };
   }, []);
-  return <details className="overview-mobile-menu" ref={menu}>
+  return <details className="public-mobile-menu" ref={menu}>
     <summary aria-label="打开或关闭导航"><HamburgerMenuIcon className="menu-open-icon" aria-hidden="true" /><Cross2Icon className="menu-close-icon" aria-hidden="true" /></summary>
-    <div className="overview-menu-content">
-      <GlobalNavigation activeDestination="live" adminAuthenticated={adminAuthenticated} openAdminLogin={openAdminLogin} />
-      <DashboardLink href="/health">运行状态</DashboardLink>
+    <div className="public-menu-content">
+      <GlobalNavigation activeDestination={activeDestination} adminAuthenticated={adminAuthenticated} openAdminLogin={openAdminLogin} />
+      <DashboardLink href="/health" ariaCurrent={activeDestination === "system" ? "page" : undefined}>运行状态</DashboardLink>
     </div>
   </details>;
 }
 
-function OverviewFooter() {
-  return <footer className="overview-site-footer">
+function PublicFooter({ active }: { active: boolean }) {
+  return <footer className="public-site-footer">
     <div><span className="overview-footer-name">黄金资讯</span><span className="overview-footer-note">关注黄金市场的重要信息</span></div>
-    <nav aria-label="总览页脚"><DashboardLink href="/audit?view=briefs">每日简报</DashboardLink><DashboardLink href="/audit?view=evidence">当前事件</DashboardLink><DashboardLink href="/health">运行状态</DashboardLink></nav>
-    <div className="overview-footer-state"><GlobalSystemState active={false} /></div>
+    <nav aria-label="页面页脚"><DashboardLink href="/audit?view=briefs">每日简报</DashboardLink><DashboardLink href="/audit?view=evidence">当前事件</DashboardLink><DashboardLink href="/health">运行状态</DashboardLink></nav>
+    <div className="overview-footer-state"><GlobalSystemState active={active} /></div>
   </footer>;
 }
 
@@ -323,7 +324,7 @@ export default function DashboardShell({ children, location }: { children: React
       void completeAdminLogin();
     }, 500);
   };
-  return <div className={`dashboard-shell is-${activeDestination}`}>
+  return <div className={`dashboard-shell is-${activeDestination}${activeDestination !== "admin" ? " is-public" : ""}`}>
     <div className="grain" />
     <div className="dashboard-shell-header">
       <DashboardHeader
@@ -334,7 +335,7 @@ export default function DashboardShell({ children, location }: { children: React
       <AdminSectionNavigation location={location} />
     </div>
     {children}
-    {activeDestination === "live" && <OverviewFooter />}
+    {activeDestination !== "admin" && <PublicFooter active={location.room === "health"} />}
     <dialog
       className="admin-login-dialog"
       onClose={() => setAdminLoginOpen(false)}

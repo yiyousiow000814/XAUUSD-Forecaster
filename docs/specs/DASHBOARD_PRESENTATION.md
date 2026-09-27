@@ -139,12 +139,14 @@ The dashboard has one product shell. `DashboardApp` supplies the current
 location and page content to that shell; individual Views do not recreate any
 part of it.
 
-1. The canonical product brand is `AU`, `AURUM SIGNAL ROOM`, and
-   `XAUUSD · Forward-only intelligence`. It is identical on every top-level
-   View and links to the realtime room.
-2. The public global destination order is `总览`, `新闻与事件`, `系统`, and
-   `管理员登录`. The first three stable entry routes are `/`,
-   `/audit?view=news`, and `/health`. `管理员登录` first opens a local
+1. The canonical product brand is `黄金资讯` and links to the overview.
+   Public overview, news and health share the C visual system: gold/navy brand,
+   white header, cool light background, sans-serif typography, teal selection
+   and rounded white content panels. Public route changes preserve header
+   geometry and navigation controls. Content density may differ by page.
+2. The public global destination order is `总览`, `新闻与事件`, and
+   `管理员登录`. The public reading routes are `/` and `/audit?view=news`.
+   The shell status link opens `/health`. `管理员登录` first opens a local
    explanation dialog; only its explicit Google login action performs a normal
    browser navigation to the Access-protected `/admin` route.
 3. Desktop and mobile navigation derive labels, order, routes, and active
@@ -163,9 +165,13 @@ part of it.
    (`/admin/ai-usage`).
 7. Global destination labels and order are product contracts. A back-style
    action such as `返回实时室` is not a global destination.
-8. The global system-state indicator has one shell-owned location and consumes
-   the shared `/api/status` dashboard resource. It must not create a competing
-   polling or interpretation path.
+8. The global system-state indicator is shell-owned: public desktop header
+   and public phone footer. Both consume the same `/api/status` resource and
+   interpretation owner; responsive placement must not add a polling owner.
+   Public phones use the same native disclosure menu on all reading routes.
+   The current destination is marked; Escape closes the menu and returns focus,
+   and selecting a destination closes it. Audit section selection remains
+   subordinate inside the page. Private Admin retains its workspace controls.
 9. New top-level Views plug into the canonical shell. Copying an existing
    shell-level structure instead of extending its owner is design drift.
 10. Deterministic source and rendered-route contracts must prevent design

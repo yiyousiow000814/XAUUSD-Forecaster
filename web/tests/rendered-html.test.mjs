@@ -596,6 +596,7 @@ test("renders static public shell and path-specific admin shells with one invari
   const routes = [
     ["/", "总览"],
     ["/audit?view=news", "新闻与事件"],
+    ...["briefs", "search", "evidence", "stories", "coverage"].map(view => [`/audit?view=${view}`, "新闻与事件"]),
     ["/audit?view=league", "新闻与事件"],
     ["/health", "系统"],
     ["/admin", "管理员登录"],
@@ -614,10 +615,15 @@ test("renders static public shell and path-specific admin shells with one invari
     assert.doesNotMatch(header, /class="brand-mark"/, path);
     assert.match(header.replace(/<[^>]+>/g, ""), /黄金资讯/, path);
     assert.match(header, /<small>行情与新闻<\/small>/, path);
-    // Overview has a closed phone menu sharing the desktop destination authority.
-    assert.equal(header.match(/aria-current="page"/g)?.length, path === "/" ? 2 : 1, path);
-    if (path === "/") {
-      const menu = header.match(/<details class="overview-mobile-menu">[\s\S]*?<\/details>/)?.[0];
+    // Every public route shares the same closed phone menu and brand authority.
+    const publicRoute = !path.startsWith("/admin");
+    if (publicRoute) {
+      assert.match(html, /class="dashboard-shell [^"]*is-public"/);
+      assert.match(header, /class="brand-gold">黄金<\/span>资讯/);
+    }
+    assert.equal(header.match(/aria-current="page"/g)?.length, publicRoute ? 2 : 1, path);
+    if (publicRoute) {
+      const menu = header.match(/<details class="public-mobile-menu">[\s\S]*?<\/details>/)?.[0];
       assert.ok(menu);
       assert.doesNotMatch(menu, /<details[^>]*\sopen/);
       assert.match(menu, /<summary aria-label="打开或关闭导航"/);
@@ -2187,8 +2193,8 @@ test("live room reports articles without treating omitted event counts as zero",
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /\.overview-more[^}]*min-height:48px/);
   // The overview phone header must override the shared stacked topbar.
-  assert.match(css, /@media\(max-width:850px\)[\s\S]*\.dashboard-shell\.is-live \.dashboard-header \{[^}]*flex-direction:row;[^}]*flex-wrap:nowrap;/);
-  assert.match(css, /\.dashboard-shell\.is-live \.overview-site-footer \{[^}]*flex-direction:row;/);
+  assert.match(css, /@media\(max-width:850px\)[\s\S]*\.dashboard-shell\.is-public \.dashboard-header \{[^}]*flex-direction:row;[^}]*flex-wrap:nowrap;/);
+  assert.match(css, /\.dashboard-shell\.is-public \.public-site-footer \{[^}]*flex-direction:row;/);
   // Desktop owns one panel boundary and one divider; phones own two complete cards.
   assert.match(css, /\.overview-news \{[^}]*border:1px solid/);
   assert.match(css, /\.overview-news-card\+\.overview-news-card \{[^}]*border-left:1px solid/);
