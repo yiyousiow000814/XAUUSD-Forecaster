@@ -1,74 +1,97 @@
-# Selected C overview review
+# Selected C overview fidelity review
 
 final result: passed
 
-## Target and evidence
+## Scope and source
 
-Selected target: generated image `exec-9cb92b84-63de-4d1a-81c5-9a26f50c6944.png`
-under `C:/Users/yiyou/.codex/generated_images/01a0dc7e-55de-7cc3-a2a3-cfeba8d25a8f/`.
-The 1536x1024 design board contains both desktop and phone compositions.
-The board title, device frame and promotional footer are not application UI.
+This replaces the earlier report, which incorrectly accepted the omission of
+major elements of the selected C design. That interpretation was rejected by
+the user. This review evaluates the implemented page against the actual image.
 
-Verified code: `31cff97dff652eb90e933e9106bb00411acf9659`.
-Immutable Preview: https://ee0b50f9-aurum-signal-room.yiyousiow1234.workers.dev/
+Source: `C:/Users/yiyou/.codex/generated_images/01a0dc7e-55de-7cc3-a2a3-cfeba8d25a8f/exec-9cb92b84-63de-4d1a-81c5-9a26f50c6944.png`.
+The 1536x1024 board contains desktop and phone frames. Board labels and device
+frames are excluded; application content is compared at corresponding widths.
 
-Saved implementation captures in `C:/Users/yiyou/AppData/Local/Temp/`:
+Verified application revision: `84d2d61bdd3b061fe8afd1068a6814c9b8dab488`.
+Immutable Preview: https://13da393b-aurum-signal-room.yiyousiow1234.workers.dev/.
+Production was not changed. The PR remains a draft for visual review.
 
-| Capture | CSS viewport | Image pixels |
+## Captures and comparison
+
+Captures are saved under `C:/Users/yiyou/AppData/Local/Temp/`.
+
+| Capture | CSS viewport | PNG pixels |
 | --- | --- | --- |
-| overview-c-desktop.png | 1280x900 | 1265x889 |
-| overview-c-390.png | 390x844 | 375x812 |
-| overview-c-390-bottom.png | 390x844, scrolled | 375x812 |
-| overview-c-360.png | 360x800 | 345x767 |
+| c-match-desktop.png | 1120x840 | 1105x829 |
+| c-match-390.png | 390x844 | 375x812 |
+| c-match-360.png | 360x800 | 345x767 |
+| c-match-360-bottom.png | 360x800, scrolled | 345x767 |
 
-The in-app screenshot output excludes the scrollbar and scales its capture;
-CSS geometry was measured separately. Source and implementation images were
-opened together in one comparison input. Compare the app-owned card regions
-at their corresponding width, excluding the board frame and Preview banner,
-rather than treating this generated board as a pixel-exact browser capture.
-The browser does not expose a deviceScaleFactor setting in its viewport API.
+The in-app capture excludes the scrollbar and scales the image. Layout metrics
+were read separately from the DOM. Reference and final rendered screenshots
+were opened in the same comparison input, including desktop and phone content.
+The Preview banner and provenance labels are retained and excluded from visual
+alignment with the production-oriented concept. Browser density is not an
+exposed setting, so this is a composition review, not a pixel-difference score.
 
-## Visual comparison
+## Findings resolved
 
-The desktop composition keeps the warm quote strip above one white news panel
-with a single interior divider. Phones use independently bordered, rounded
-cards with a clear gap. Source and rendered headers, price/bid/ask groups,
-numbered rows and footer links were also examined as focused regions in the
-full-resolution captures, where those details are readable.
+- P1: missing gold bullion and pale gold landscape. Both now use transparent
+  generated raster assets, optimized to 9.8 KB and 32.7 KB WebP files.
+- P1: undersized branding and typography. The gold/navy brand, bold sans price,
+  navy headings, teal icons and links now follow the reference hierarchy.
+- P1: incorrect phone header. The overview uses a single brand/menu row while
+  reusing the existing navigation destinations and administrator login.
+- P2: phone header and footer inherited shared column direction. Explicit row
+  layout fixes both; the footer brand and status share a row. Regression
+  assertions extend the existing responsive presentation contract.
+- P2: desktop and phone card rhythm. Desktop has one white rounded panel with
+  an internal divider; phones have separate white cards. Outer edges, header
+  dividers, last rows, links and footer were inspected, including by scrolling.
+- P2: decorative arrows without working targets were avoided. Headline rows,
+  section links and footer links open existing briefs, events or health pages.
+  The complete original headline remains in accessible text and the title;
+  overview display is one line with ellipsis.
 
-- Typography: system Chinese sans type, compact tabular price and readable
-  headline hierarchy. No display-serif oversized price or black feature block.
-- Rhythm: adjacent price and bid/ask; aligned desktop panel tops and link rows;
-  separate phone cards with intact first/last borders. Long real headlines wrap
-  to at most two lines and full content remains reachable through the footer.
-- Colors: cool light background, white news surface, warm neutral quote surface,
-  navy text and teal section headings/links. Focus is visible.
-- Images: the agreed simplified implementation omits decorative gold bars,
-  background waves and promotional copy. No raster assets or substitute artwork.
-- Content: actual API data replaces concept placeholders. Existing administrator
-  login, operational warning and phone selects remain functional. The generated
-  hamburger, fake footer pages and per-item arrows are omitted because this
-  existing application uses section navigation rather than individual deep links.
+Remaining P3 differences: generated bullion facets and wave contours are not
+pixel-identical to the concept; library icon strokes and system font metrics
+also differ slightly. Real headlines are longer than the concept examples.
+The application retains actual operational status, administrator access and
+Preview labels, and uses real footer destinations instead of invented pages.
+No claim of exact pixel reproduction is made. No unresolved P0/P1/P2 finding
+remains for this overview correction.
 
-No actionable P0/P1/P2 discrepancy remained in the scoped C interpretation.
-The source's shorter example titles do not justify rewriting actual news.
+## Interaction and final review
 
-## Interaction and responsive evidence
+- Desktop, 390x844 and 360x800: document scroll width equals client width
+  (1105, 375 and 345 CSS pixels respectively).
+- Menu toggle is 44x44; menu links are at least 46px high; headline and section
+  links are 48px high; footer links are at least 44px high.
+- Open/close, Escape and focus return, administrator dialog open/cancel and
+  navigation dismissal were exercised. Event listeners have unmount cleanup.
+- Opened full brief and current events, returned to overview, scrolled to the
+  footer and opened health. Retained pages use their existing shell and show
+  no horizontal overflow at phone widths. Final footer-only repair was then
+  checked on the final immutable Preview.
+- No browser console errors or warnings were recorded. Browser tab was closed
+  and viewport reset. Final task-created browser session count: **0**.
+- Final diff review checked DashboardShell callers, DashboardLink navigation,
+  OverviewNews resource subscriptions and cleanup, LiveRoomView quote data,
+  retained-route CSS scoping, generated assets and existing rendering tests.
+  No resource URL, refresh policy, data authority or backend contract changed.
 
-All three viewports had no horizontal overflow. Overview links measured 48px
-high; primary phone select and status link measured 44px. Desktop panel outer
-edges and divider, phone card edges, and the incomplete fifth story row were
-inspected. Empty/loading/error/retained-content states have rendering coverage.
+## Checks
 
-On phones, opened full brief, returned to overview, scrolled to current events,
-opened events, selected stories, expanded and collapsed a story, and showed the
-remaining story. The 360px expanded detail had equal client/scroll heights
-(1224px), proving no nested clipped scroll region. Timeline timestamps were
-newest first. Older Preview rows explicitly displayed the 6/10 partial notice.
-Desktop expansion and the preserved administrator dialog open/cancel passed.
-No browser console errors or warnings were recorded. Browser tab closed and
-viewport reset; final task-created browser session count: **0**.
+- Final revision: `npm test` passed, 398 passed / 6 skipped / 0 failed.
+- Production and branch Preview builds passed.
+- Changed TSX files: ESLint 0 errors, 4 warnings (two existing navigation
+  warnings and two image-component recommendations; images are already sized
+  and optimized WebP assets).
+- Architecture evidence check and `git diff --check` passed.
+- A supplementary test invocation against a branch-Preview build hit the
+  existing health fixture/banner assumption. The canonical clean-environment
+  suite passed; deployed health navigation and Preview identity were checked
+  in the browser. Tests were not weakened to suppress that discrepancy.
 
-The Preview embeds an older source snapshot; complete-chain producer evidence
-is the separate 112,029-byte read-only runtime rehearsal and regression suite.
-Final production synchronization must be checked after the normal main update.
+This report establishes implementation and Preview evidence. It does not claim
+production activation or user visual acceptance.
