@@ -1,6 +1,6 @@
 # Public dashboard design review
 
-## In progress: article reading status
+## Latest follow-up: article reading status
 
 Presentation-only scope: NewsRow maps existing visibility and impact codes to
 processing/reference/validity labels. The article producer still calls
@@ -11,6 +11,31 @@ invariant or eligible-event query changes. An article validity badge must not
 assert consolidated event membership or real-world event completion. Verify
 active, pending, expired, reference and unknown states, unchanged input records,
 news expansion/pagination and current-event navigation on desktop and phones.
+
+Verified application revision: `26b266f0`.
+Preview: https://7fa118c8-aurum-signal-room.yiyousiow1234.workers.dev/audit?view=news.
+Production/Preview builds and 170 rendering, content, event-store and news
+projection checks passed. The rendered-row regression covers 18 combinations,
+including pending assessment under MODEL_VISIBLE, known reference reasons,
+missing content and unknown codes. It verifies unchanged input records and no
+public prediction-model permission wording. Architecture source/input and doc
+checks passed. Final diff review confirmed all executable changes are confined
+to NewsRow presentation and badge CSS; event eligibility and persistence are
+unchanged. The brief footer's obsolete training disclaimer is now reading copy.
+
+Deployed Preview checks: desktop 1280x900, phones 390x844 and 360x800, no horizontal
+overflow. Inspected the full list's first/last rows and dividers; active, expired,
+duplicate, background and commentary labels are present. Expanded article detail
+shows News Status with the same label, without model-access copy. Phone flow
+included article open, supporting-evidence expand/collapse, close, next/previous
+news page, current-events selection and return. The retained event view still
+reports 41 events and renders its available snapshot details. A desktop attempt
+to select the phone-only supporting-evidence button was corrected after observing
+that desktop already displays this section. No browser warnings/errors.
+Task tab closed and viewport reset; remaining task-created sessions: 0.
+Screenshots: `C:/Users/yiyou/AppData/Local/Temp/news-reading-labels.png` and
+`C:/Users/yiyou/AppData/Local/Temp/news-reading-phone.png`.
+Production has not been activated.
 
 ## Latest follow-up: header status and login placement
 
