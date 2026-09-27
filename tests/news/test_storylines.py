@@ -704,3 +704,23 @@ def test_market_reports_are_quarantined_as_narrative_candidate():
     graph = temporal_event_graph(rows)
     assert graph["stories"] == []
     assert graph["market_narrative_candidates"] == []
+
+
+def test_complete_chain_survives_generation_and_dashboard_transport() -> None:
+    import copy
+    import json
+    from datetime import datetime, timedelta, timezone
+    from xauusd_forecaster.dashboard.resource_contracts import audit_stories_snapshot
+    start = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    events = [event(str(i), (start + timedelta(days=i)).isoformat(), f"Fact {i}",
+                    action=f"action {i}") for i in range(40)]
+    original = copy.deepcopy(events)
+    stories = storyline_rows(events)
+    assert len(stories) == 1
+    story = stories[0]
+    assert story["event_count"] == len(story["timeline"]) == 40
+    assert story["timeline"][0]["relation"] == "STARTS"
+    encoded = audit_stories_snapshot({"storylines": stories})
+    delivered = json.loads(encoded)["storylines"][0]
+    assert delivered["timeline"] == story["timeline"]
+    assert events == original

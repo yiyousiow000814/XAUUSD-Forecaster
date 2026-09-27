@@ -297,13 +297,15 @@ the main-only release contract; data preservation and transport invariants remai
   An old ambiguous empty split row cannot hide complete legacy detail merely
   because its `received_at` is newer. Valid legacy detail retains the legacy
   source time and bounded projection; no fresh timestamp is synthesized.
-- The storyline display projection retains at most 12 current storylines, 12
-  candidates per candidate family, eight streams per stream family, and six
-  first/last timeline events per storyline. Exact aggregate totals remain in
-  `storyline_summary`. The same limits govern the Python split producer and the
-  Worker legacy projection so a fresh authoritative legacy snapshot cannot be
-  displaced by an older validation-shaped split row merely because its former
-  display selection exceeded the 120,000-byte transport envelope.
+- The storyline display projection admits at most 12 current storylines, 12
+  candidates per candidate family and eight streams per stream family. Every
+  admitted storyline retains its complete generated core timeline; exact
+  aggregate totals remain in `storyline_summary`. The 120,000-byte transport
+  limit remains unchanged. If needed, remove secondary rows and then oldest
+  whole cards, never sample timeline nodes within a retained card. A single
+  oversized card fails explicitly and preserves the last accepted snapshot.
+  During update, older sampled rows remain readable but must be labelled as
+  partial by comparing delivered timeline length with `event_count`.
 - The coordinated migration seeds a missing fixed `news_metrics` aggregate from
   the last valid legacy audit owner into the bounded audit summary. This is a
   one-time, reverse-compatible handover write: Stable ignores the split row,

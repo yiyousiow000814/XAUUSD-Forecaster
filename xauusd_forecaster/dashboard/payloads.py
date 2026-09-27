@@ -27,7 +27,6 @@ AUDIT_STORY_FIELDS = (
     "storyline_summary",
 )
 AUDIT_STORYLINE_LIMIT = 12
-AUDIT_STORY_TIMELINE_LIMIT = 6
 AUDIT_STORY_CANDIDATE_LIMIT = 12
 AUDIT_STORY_STREAM_LIMIT = 8
 AUDIT_DETAIL_SOURCE_CONTRACT = "audit-detail-source-v1"
@@ -175,13 +174,9 @@ def valid_audit_detail_payload(payload: Any, family: str, *, renderable: bool = 
     )
 
 
-def _bounded_storyline(row: Any, *, timeline_limit: int) -> Any:
+def _bounded_storyline(row: Any) -> Any:
     if not isinstance(row, dict):
         return row
-    timeline = row.get("timeline")
-    if isinstance(timeline, list) and len(timeline) > timeline_limit:
-        first = timeline_limit // 2
-        row["timeline"] = timeline[:first] + timeline[-(timeline_limit - first):]
     for field in ("market_reactions", "commentary", "background"):
         values = row.get(field)
         if isinstance(values, list):
@@ -192,37 +187,28 @@ def _bounded_storyline(row: Any, *, timeline_limit: int) -> Any:
 def audit_stories_payload(
     payload: Mapping[str, Any], *,
     storyline_limit: int = AUDIT_STORYLINE_LIMIT,
-    timeline_limit: int = AUDIT_STORY_TIMELINE_LIMIT,
     candidate_limit: int = AUDIT_STORY_CANDIDATE_LIMIT,
     stream_limit: int = AUDIT_STORY_STREAM_LIMIT,
 ) -> dict[str, Any]:
-    """Project bounded story presentation detail and retain exact totals."""
+    """Retain complete timelines for admitted cards and exact source totals."""
     if not _audit_detail_source_present(payload, "stories"):
         return {"generated_at": payload.get("generated_at")}
+    row_limits = {
+        "storylines": storyline_limit, "market_narrative_candidates": storyline_limit,
+        "archived_storylines": storyline_limit,
+        "archived_story_event_candidates": candidate_limit,
+        "story_event_candidates": candidate_limit, "unassigned_story_events": candidate_limit,
+        "market_reaction_streams": stream_limit, "theme_streams": stream_limit,
+    }
     snapshot = {
-        key: copy.deepcopy(payload[key])
+        key: copy.deepcopy(payload[key][:row_limits[key]]
+                           if key in row_limits and isinstance(payload[key], list)
+                           else payload[key])
         for key in AUDIT_STORY_FIELDS if key in payload
     }
-    for field in (
-        "storylines", "market_narrative_candidates", "archived_storylines",
-    ):
-        rows = snapshot.get(field)
-        if isinstance(rows, list):
-            snapshot[field] = [
-                _bounded_storyline(row, timeline_limit=timeline_limit)
-                for row in rows[:storyline_limit]
-            ]
-    for field in (
-        "archived_story_event_candidates", "story_event_candidates",
-        "unassigned_story_events",
-    ):
-        rows = snapshot.get(field)
-        if isinstance(rows, list):
-            snapshot[field] = rows[:candidate_limit]
-    for field in ("market_reaction_streams", "theme_streams"):
-        rows = snapshot.get(field)
-        if isinstance(rows, list):
-            snapshot[field] = rows[:stream_limit]
+    for field in ("storylines", "market_narrative_candidates", "archived_storylines"):
+        if isinstance(snapshot.get(field), list):
+            snapshot[field] = [_bounded_storyline(row) for row in snapshot[field]]
     snapshot["generated_at"] = payload.get("generated_at")
     snapshot["projection_contract"] = AUDIT_DETAIL_SOURCE_CONTRACT
     return snapshot

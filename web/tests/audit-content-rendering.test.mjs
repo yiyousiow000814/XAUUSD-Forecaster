@@ -392,6 +392,8 @@ test("story cards default to latest summary and reveal a newest-first complete c
   assert.match(open,/首次进展/);assert.match(open,/随后发生/);
   assert.equal(JSON.stringify(story),original);
   assert.equal(renderStory(story),closed);
+  assert.match(renderStory({...story,event_count:17},true),/当前仅载入 3 \/ 17 条进展/);
+  assert.doesNotMatch(open,/完整记录尚未同步/);
   const fallback={...story,timeline:[event("unknown",null,"STARTS"),{...event("fallback",null,"FOLLOWED_BY"),source_published_time:"2026-09-28T00:00:00Z"},story.timeline[1]]};
   const fallbackHtml=renderStory(fallback,true);
   assert.ok(fallbackHtml.indexOf('headline-fallback')<fallbackHtml.indexOf('headline-new'));

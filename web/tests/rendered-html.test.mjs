@@ -2178,6 +2178,11 @@ test("live room reports articles without treating omitted event counts as zero",
   assert.doesNotMatch(source, /newsMetrics|metric-grid|source-panel/);
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /\.overview-more[^}]*min-height:48px/);
+  // Desktop owns one panel boundary and one divider; phones own two complete cards.
+  assert.match(css, /\.overview-news \{[^}]*border:1px solid/);
+  assert.match(css, /\.overview-news-card\+\.overview-news-card \{[^}]*border-left:1px solid/);
+  assert.match(css, /@media\(max-width:700px\)[\s\S]*\.overview-news \{[^}]*border:0/);
+  assert.match(css, /\.overview-news-card,\.overview-news-card\+\.overview-news-card \{[^}]*border:1px solid/);
   assert.match(payloads, /"counts", "news_metrics", "news_source_health"/);
   assert.doesNotMatch(source, /NEWS REVISIONS/);
   assert.doesNotMatch(source, /counts\.news_revisions/);

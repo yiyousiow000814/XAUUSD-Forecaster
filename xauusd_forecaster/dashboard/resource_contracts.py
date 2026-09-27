@@ -263,11 +263,24 @@ def audit_briefs_snapshot(
 def audit_stories_snapshot(
     payload: dict, producer_revision: str | None = None,
 ) -> bytes:
-    return _audit_detail_snapshot(
-        _with_projection_producer(
-            audit_stories_payload(payload), producer_revision,
-        ), family="stories",
-    )
+    snapshot = _with_projection_producer(audit_stories_payload(payload), producer_revision)
+    if not valid_audit_detail_payload(snapshot, "stories"):
+        raise PayloadContractError("audit stories source detail is unavailable or invalid")
+    # Shed secondary rows, then oldest complete cards. Never sample timeline nodes.
+    families = ("unassigned_story_events", "archived_story_event_candidates",
+                "market_reaction_streams", "theme_streams", "story_event_candidates",
+                "archived_storylines", "market_narrative_candidates", "storylines")
+    for field in families:
+        while True:
+            try:
+                return _audit_detail_snapshot(snapshot, family="stories")
+            except PayloadContractError:
+                rows = snapshot.get(field)
+                if not isinstance(rows, list) or not rows or (field == "storylines" and len(rows) == 1):
+                    break
+                rows.pop()
+    return _audit_detail_snapshot(snapshot, family="stories")
+
 
 
 def _audit_detail_snapshot(payload: dict, *, family: str) -> bytes:
