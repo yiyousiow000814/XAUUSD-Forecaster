@@ -53,13 +53,13 @@ function harness() {
     if (!deferred.has(name)) return Promise.resolve({ default: name });
     return new Promise((resolve, reject) => pending.push({ resolve, reject }));
   };
-  const module = { exports: {} };
-  new Function("require", "module", "exports", "window", "load", compiled.code.replace(/import\(("[^"]+")\)/g, "load($1)"))(require, module, module.exports, window, load);
+  const compiledModule = { exports: {} };
+  new Function("require", "module", "exports", "window", "load", compiled.code.replace(/import\(("[^"]+")\)/g, "load($1)"))(require, compiledModule, compiledModule.exports, window, load);
   const cleanups = [];
   function render() {
     cleanups.splice(0).forEach(cleanup => cleanup?.());
     cursor = 0; effects.length = 0;
-    tree = module.exports.default({ initialLocation: { room: "audit", auditView: "news" } });
+    tree = compiledModule.exports.default({ initialLocation: { room: "audit", auditView: "news" } });
     effects.forEach(effect => cleanups.push(effect()));
     return tree;
   }
