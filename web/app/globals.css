@@ -2290,7 +2290,7 @@ html,body,* { scrollbar-width:none; }
   .is-public .news-review-zones button span { font-size:14px; }
   .is-public .news-review-zones button b { font-size:14px; }
   .is-public .news-browser { border:0; border-radius:0; margin-bottom:12px; padding:0; background:transparent; }
-  .is-public .news-table { border:1px solid var(--line); border-radius:10px; overflow:hidden; background:#fff; }
+  .is-public .news-table { gap:0; border:1px solid var(--line); border-radius:10px; overflow:hidden; background:#fff; }
   .is-public .news-row,.is-public .news-row:last-child { margin:0; border:0; border-radius:0; overflow:hidden; }
   .is-public .news-row+.news-row { border-top:1px solid var(--line); }
   .is-public .news-row>summary { position:relative; padding:12px 14px; gap:6px; }
@@ -2337,8 +2337,11 @@ html,body,* { scrollbar-width:none; }
   .is-public .news-review-zones button:before { display:none; }
   .is-public .news-browser>div { display:none; }
   .is-public .news-category-picker { margin:0; }
-  .is-public .news-category-picker>span { display:none; }
+  .is-public .news-category-picker>span { position:absolute; width:1px; height:1px; padding:0; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
   .is-public .news-category-picker select { min-height:44px; padding:8px 12px; font-size:14px; }
+  .is-public .news-row>summary::after { content:""; position:absolute; right:15px; bottom:20px; width:6px; height:6px; border-right:1.5px solid var(--muted); border-bottom:1.5px solid var(--muted); transform:rotate(45deg); }
+  .is-public .news-row[open]>summary::after { transform:rotate(225deg); }
+  .is-public .news-row-stamp { padding-right:20px; }
   .is-public .news-row-title { order:0; }
   .is-public .news-row-stamp { order:1; gap:6px; font-size:11px; }
   .is-public .news-row-stamp b { padding:0; border:0; font-size:11px; font-weight:400; color:#007887; }
@@ -2372,4 +2375,25 @@ html,body,* { scrollbar-width:none; }
   .overview-news-card h2 { font-size:16px; gap:10px; }
   .overview-news-card h2 svg { width:20px; height:20px; }
   .overview-headline { font-size:14px; }
+  .is-public .evidence-intro,.is-public .evidence-intro-compact { padding:2px 0 12px; }
+  .is-public .evidence-intro h2,.is-public .evidence-intro-compact h2 { font-size:20px; line-height:1.4; }
+  .is-public .evidence-intro .eyebrow { font-size:11px; margin-bottom:4px; }
+  .is-public .daily-brief-desk>header { padding:14px; gap:10px; }
+  .is-public .daily-brief-desk h2 { font-size:20px; }
+  .is-public .daily-brief-desk>header .eyebrow { font-size:10px; letter-spacing:.04em; }
+  .is-public .daily-brief-desk button { flex-direction:row; align-items:center; gap:5px; font-size:13px; }
+  .is-public .brief-phase { margin-top:6px; font-size:11px; }
+  .is-public .brief-progress { padding:10px 14px; gap:4px; font-size:12px; }
+  .is-public .brief-overview { margin:12px 14px; padding:12px; border-left-width:3px; }
+  .is-public .brief-overview-head { margin-bottom:10px; }
+  .is-public .brief-overview-head strong { font-size:18px; }
+  .is-public .brief-overview-lead { font-size:15px; font-weight:500; line-height:1.65; }
+  .is-public .brief-overview-points { margin-top:12px; }
+  .is-public .brief-overview-points section { padding:12px; }
+  .is-public .brief-overview-points li,.is-public .brief-overview-points p { font-size:14px; }
+  .is-public .brief-evidence ol>li { grid-template-columns:24px minmax(0,1fr); gap:8px; padding:12px 14px; }
+  .is-public .brief-evidence ol>li>span { font-size:18px; }
+  .is-public .brief-evidence h3 { font-size:16px; }
+  .is-public .brief-evidence li p { font-size:14px; }
+
 }
