@@ -8,6 +8,8 @@ import {
   loadDashboardResource, readDashboardResource, subscribeDashboardResource,
 } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import overviewGold from "../../public/images/overview-gold.webp?inline";
+import overviewWaves from "../../public/images/overview-waves.webp?inline";
 
 type Payload = {
   preview_status_summary?: boolean;
@@ -96,7 +98,7 @@ export default function LiveRoomView() {
   return (
     <main className="overview-page">
       <section className="overview-quote" aria-label="黄金行情">
-        <img className="overview-gold" src="/images/overview-gold.webp" width="88" height="88" alt="" />
+        <img className="overview-gold" src={overviewGold} width="88" height="88" alt="" />
         <div className="overview-quote-primary">
           <p className="eyebrow">现货黄金 <span>（USD）</span></p>
           <div className="overview-price">
@@ -109,7 +111,7 @@ export default function LiveRoomView() {
           <span>卖价 <b>{fmt(latest?.ask)}</b></span>
           <span>报价时间 <time>{localTime(latest?.source_received_time)}</time></span>
         </div>
-        <div className="overview-quote-art" aria-hidden="true"><img src="/images/overview-waves.webp" alt="" /><p>把握全球视野<br />关注黄金动向</p></div>
+        <div className="overview-quote-art" aria-hidden="true"><img src={overviewWaves} alt="" /><p>把握全球视野<br />关注黄金动向</p></div>
       </section>
 
       {error && <div className="error-banner">{error}。行情采集可能仍在运行，但网页数据服务已停止。</div>}

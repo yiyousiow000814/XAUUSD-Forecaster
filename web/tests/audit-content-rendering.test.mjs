@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
@@ -19,6 +19,7 @@ test.after(() => rmSync(temporaryRoot, { recursive: true, force: true }));
 const resourceUrls = ["/api/status", "/api/audit", "/api/audit-briefs", "/api/audit-stories", "/api/news-evidence?mode=eligible&page=1&limit=20"];
 const built = await build({
   bundle: true, write: false, platform: "node", format: "esm", jsx: "automatic",
+  loader: { ".webp": "dataurl" },
   define: {__AURUM_DEPLOYMENT__: JSON.stringify({is_preview: false})},
   nodePaths: [join(dependencyPackage, "..", "node_modules")],
   banner: { js: "import {createRequire} from 'node:module'; const require=createRequire(import.meta.url);" },
@@ -51,6 +52,19 @@ const built = await build({
 const renderedModule = join(temporaryRoot, "audit.mjs");
 writeFileSync(renderedModule, built.outputFiles[0].contents);
 const { renderMacro, renderPageButton, render, renderNews, renderStatus, renderLive, renderPreview, renderOverview, renderStory, validOverviewBriefs, validOverviewEvents } = await import(pathToFileURL(renderedModule).href);
+
+test("overview decorations arrive with the view instead of separate image requests", () => {
+  const html = renderLive({system:{online:false},counts:{},sources:{},latest:null});
+  const sources = [...html.matchAll(/<img[^>]+src="(data:image\/webp;base64,[^"]+)"/g)].map(match => match[1]);
+  const originals = ["overview-gold.webp", "overview-waves.webp"].map(name =>
+    readFileSync(new URL(`../public/images/${name}`, import.meta.url)));
+  assert.equal(sources.length, 2);
+  sources.forEach((url,index) => assert.deepEqual(Buffer.from(url.split(",")[1],"base64"), originals[index]));
+  assert.ok(originals.reduce((bytes,original) => bytes + original.length,0) < 50_000,
+    "Only these small decorations should be carried in the view bundle");
+  assert.doesNotMatch(html, /src="\/images\/overview-/);
+  assert.match(html, /class="overview-gold"[^>]*width="88" height="88"/);
+});
 
 test("article row expands publisher provenance with one coherent public label", () => {
   const row = {headline: "政策会议展望", emerging_topic_zh: "政策会议展望", event_type: "macro_preview",
