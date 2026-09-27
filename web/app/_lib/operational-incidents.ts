@@ -401,10 +401,6 @@ export function correlateOperationalEvents(input: OperationalAlert[]): Operation
   ));
 }
 
-export const globalOperationalIncidents = (incidents: OperationalIncident[]) => incidents.filter(
-  incident => incident.blocking || incident.severity === "ERROR",
-);
-
 export const affectedOperationalScopeCount = (incidents: OperationalIncident[]) => new Set(
   incidents.flatMap(incident => [incident.root_event.scope, ...incident.affected_scopes]),
 ).size;

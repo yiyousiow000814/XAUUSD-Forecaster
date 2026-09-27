@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { affectedOperationalScopeCount, correlateOperationalEvents, globalOperationalIncidents } from "../app/_lib/operational-incidents.ts";
+import { affectedOperationalScopeCount, correlateOperationalEvents } from "../app/_lib/operational-incidents.ts";
 
 const event = (code, scope, evidence = {}, overrides = {}) => ({
   code, scope, evidence,
@@ -11,19 +11,18 @@ const event = (code, scope, evidence = {}, overrides = {}) => ({
   ...overrides,
 });
 
-test("eligible transient provider retries stay in details; a stalled pipeline remains global", () => {
+test("eligible transient provider retries recover; a stalled pipeline remains blocking", () => {
   const retry = event("OPS_AI_JOB_RETRY_LOOP", "ACTIVE_ANNOTATION", {
     latest_failure_code: "PROVIDER_HTTP_ERROR", claimable: true,
     automatic_provider_retry: true,
   });
   const incidents = correlateOperationalEvents([retry]);
-  assert.equal(globalOperationalIncidents(incidents).length, 0);
   assert.equal(incidents[0].state, "RECOVERING");
   assert.equal(incidents[0].action_state, "AUTO_RECOVERING");
   const stalled = correlateOperationalEvents([retry,
     event("OPS_AI_PIPELINE_STALLED", "ACTIVE_ANNOTATION", {}, {severity: "ERROR", blocking: true}),
   ]);
-  assert.equal(globalOperationalIncidents(stalled).length, 1);
+  assert.equal(stalled[0].blocking, true);
 });
 
 function capacityChain(componentReasons = ["ACTIONABLE_NEWS_IMPACT_PENDING"]) {
@@ -57,7 +56,6 @@ test("correlates the Gemma local-capacity chain without losing technical events"
   const fiveEvents = correlateOperationalEvents(capacityChain().slice(0, 5));
   assert.equal(fiveEvents.length, 1);
   assert.equal(fiveEvents[0].technical_event_count, 5);
-  assert.equal(globalOperationalIncidents(fiveEvents).length, 1);
   assert.equal(
     correlateOperationalEvents(capacityChain().toReversed())[0].incident_key,
     incidents[0].incident_key,
@@ -213,7 +211,6 @@ test("keeps an unattributable aggregate component error visible without blocking
   assert.deepEqual([impact.severity, impact.blocking, impact.action_state], ["WARNING", false, "AUTO_RECOVERING"]);
   assert.deepEqual([annotation.severity, annotation.blocking, annotation.action_state], ["WARNING", false, "MONITORING"]);
   assert.deepEqual([component.severity, component.blocking, component.action_state], ["ERROR", true, "ACTION_REQUIRED"]);
-  assert.deepEqual(globalOperationalIncidents(incidents), [component]);
   const rawComponents = incidents.flatMap(item => [
     item.root_event, ...item.related_events, ...item.technical_events,
   ]).filter(item => item.code === "OPS_COMPONENT_UNHEALTHY");
@@ -235,7 +232,6 @@ test("keeps an unrelated component fault separate from an Impact retry projectio
   const heartbeat = incidents.find(item => item.root_event.code === "OPS_COMPONENT_UNHEALTHY");
   assert.deepEqual([impact.severity, impact.blocking, impact.action_state], ["WARNING", false, "AUTO_RECOVERING"]);
   assert.deepEqual([heartbeat.severity, heartbeat.blocking, heartbeat.action_state], ["ERROR", true, "ACTION_REQUIRED"]);
-  assert.deepEqual(globalOperationalIncidents(incidents), [heartbeat]);
   assert.equal(incidents.flatMap(item => [
     item.root_event, ...item.related_events, ...item.technical_events,
   ]).filter(item => item.code === "OPS_COMPONENT_UNHEALTHY").length, 1);
@@ -360,7 +356,6 @@ test("finalizes a scheduled retry from terminal or overdue blocking component st
       { label: "待处理", value: "4" },
       { label: "15 分钟失败", value: "2" },
     ], reason);
-    assert.deepEqual(globalOperationalIncidents(incidents), incidents, reason);
   }
 });
 
@@ -405,5 +400,4 @@ test("keeps unknown events visible and marks taxonomy drift", () => {
     event("OPS_FUTURE_UNREGISTERED", "test", {}, { severity: "ERROR", blocking: true }),
   ]);
   assert.equal(incident.root_event.evidence.taxonomy_error, "UNREGISTERED_OPERATIONAL_CODE:OPS_FUTURE_UNREGISTERED");
-  assert.deepEqual(globalOperationalIncidents([incident]), [incident]);
 });

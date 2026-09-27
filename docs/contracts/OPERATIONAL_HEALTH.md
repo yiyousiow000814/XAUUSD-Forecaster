@@ -269,12 +269,11 @@ or a reproduced browser check. This is an explicit observability boundary, not
 a claim that the client surface is healthy.
 ## Visibility
 
-Warnings and errors must be visible without expanding a diagnostic control.
-Production pages show a global incident banner linking to the health page. The
-Health page leads with correlated incident cards and keeps raw codes, scopes,
-evidence, local scheduler progress, and Assistant D1 queue evidence in
-accessible technical disclosures. Banner counts use blocking/error incident
-count, not raw event count; a blocking child keeps its incident globally visible.
+Warnings and errors are visible on the Health page without expanding a
+diagnostic control. The shared status entry links to that page; public reading
+pages do not display a global incident banner. The Health page leads with
+correlated incident cards and keeps raw codes, scopes, evidence, local scheduler
+progress, and Assistant D1 queue evidence in accessible technical disclosures.
 The operator-facing header counts every unique affected scope/component,
 including each incident root, but not same-scope symptoms, retries, or technical
 events more than once.
