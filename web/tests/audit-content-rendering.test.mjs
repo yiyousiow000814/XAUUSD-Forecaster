@@ -330,7 +330,7 @@ test("brief prose hides packet refs in every field without rewriting evidence", 
 test("overview links to current events without asserting omitted status counts", () => {
   const html = renderLive({generated_at: "2026-09-26T08:00:00Z", system: {online:false,quote_age_seconds:null}, counts:{}, sources:{}, news_metrics:{articles:{received:10,stored_revisions:12},events:{independent:0,currently_model_eligible:0}}});
   assert.match(html, /href="\/audit\?view=evidence"/);
-  assert.match(html, /<h2>当前事件<\/h2>/);
+  assert.match(html, /<h2>[\s\S]*?当前事件<\/h2>/);
   assert.doesNotMatch(html, /0.*个独立事件/);
 });
 
@@ -353,7 +353,7 @@ test("overview retains only three original headlines from latest date and revisi
   assert.equal(validOverviewBriefs({daily_news_briefs:[{...data.daily_news_briefs[0],brief_date:null}]}),false);
   const before=JSON.stringify(data);
   const html=renderOverview({briefs:{data,error:null},events:{data:events,error:null},snapshot:true});
-  assert.match(html,/2026\/09\/26/);
+  assert.match(html,/<time dateTime="2026-09-26" title="2026-09-26">09\/26<\/time>/i);
   assert.match(html,/LATEST2/); assert.match(html,/EVENT2/);
   assert.doesNotMatch(html,/LATEST3|EVENT3|OLDER|OLDREV|LONG SUMMARY|E01|今日/);
   assert.match(html,/预览快照/);

@@ -612,9 +612,17 @@ test("renders static public shell and path-specific admin shells with one invari
     const header = html.match(/<header class="dashboard-header topbar">[\s\S]*?<\/header>/)?.[0];
     assert.ok(header, path);
     assert.doesNotMatch(header, /class="brand-mark"/, path);
-    assert.match(header, /<strong>黄金资讯<\/strong>/, path);
+    assert.match(header.replace(/<[^>]+>/g, ""), /黄金资讯/, path);
     assert.match(header, /<small>行情与新闻<\/small>/, path);
-    assert.equal(header.match(/aria-current="page"/g)?.length, 1, path);
+    // Overview has a closed phone menu sharing the desktop destination authority.
+    assert.equal(header.match(/aria-current="page"/g)?.length, path === "/" ? 2 : 1, path);
+    if (path === "/") {
+      const menu = header.match(/<details class="overview-mobile-menu">[\s\S]*?<\/details>/)?.[0];
+      assert.ok(menu);
+      assert.doesNotMatch(menu, /<details[^>]*\sopen/);
+      assert.match(menu, /<summary aria-label="打开或关闭导航"/);
+      assert.match(menu, /新闻与事件[\s\S]*管理员登录[\s\S]*运行状态/);
+    }
     if (path === "/health") assert.match(header, /aria-current="page"[^>]*aria-label="查看系统运行状态"[^>]*href="\/health"/, path);
     else assert.match(header, new RegExp(`aria-current="page"[^>]*>(?:<span[^>]*></span>)?${activeLabel}</(?:a|button)>`), path);
     assert.equal(header.match(/class="dashboard-global-state"/g)?.length, 1, path);

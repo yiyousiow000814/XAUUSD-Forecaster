@@ -1,5 +1,7 @@
 "use client";
 
+import { HamburgerMenuIcon, Cross2Icon } from "@radix-ui/react-icons";
+
 import {
   useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode,
 } from "react";
@@ -49,10 +51,10 @@ type ShellStatusPayload = {
   operational_health?: { status?: "HEALTHY" | "WARNING" | "ERROR" };
 };
 
-function DashboardBrand() {
+function DashboardBrand({ overview = false }: { overview?: boolean }) {
   return <DashboardLink ariaLabel="打开总览" className="dashboard-brand brand brand-button" href="/" replace>
     <span>
-      <strong>黄金资讯</strong>
+      <strong>{overview ? <><span className="brand-gold">黄金</span>资讯</> : "黄金资讯"}</strong>
       <small>行情与新闻</small>
     </span>
   </DashboardLink>;
@@ -137,7 +139,7 @@ function DashboardHeader({
 }: { location: DashboardLocation; adminAuthenticated: boolean; openAdminLogin: () => void }) {
   const activeDestination = activeDashboardDestination(location.room);
   return <header className="dashboard-header topbar">
-    <DashboardBrand />
+    <DashboardBrand overview={activeDestination === "live"} />
     <GlobalNavigation
       activeDestination={activeDestination}
       adminAuthenticated={adminAuthenticated}
@@ -149,7 +151,37 @@ function DashboardHeader({
       openAdminLogin={openAdminLogin}
     />
     <GlobalSystemState active={location.room === "health"} />
+    {activeDestination === "live" && <OverviewMobileMenu adminAuthenticated={adminAuthenticated} openAdminLogin={openAdminLogin} />}
   </header>;
+}
+
+function OverviewMobileMenu({ adminAuthenticated, openAdminLogin }: {
+  adminAuthenticated: boolean; openAdminLogin: () => void;
+}) {
+  const menu = useRef<HTMLDetailsElement>(null);
+  return <details className="overview-mobile-menu" ref={menu}
+    onKeyDown={event => {
+      if (event.key === "Escape" && menu.current) {
+        menu.current.open = false;
+        menu.current.querySelector("summary")?.focus();
+      }
+    }}>
+    <summary aria-label="打开或关闭导航"><HamburgerMenuIcon className="menu-open-icon" aria-hidden="true" /><Cross2Icon className="menu-close-icon" aria-hidden="true" /></summary>
+    <div className="overview-menu-content" onClick={event => {
+      if ((event.target as HTMLElement).closest("a,button") && menu.current) menu.current.open = false;
+    }}>
+      <GlobalNavigation activeDestination="live" adminAuthenticated={adminAuthenticated} openAdminLogin={openAdminLogin} />
+      <DashboardLink href="/health">运行状态</DashboardLink>
+    </div>
+  </details>;
+}
+
+function OverviewFooter() {
+  return <footer className="overview-site-footer">
+    <div><span className="overview-footer-name">黄金资讯</span><span className="overview-footer-note">关注黄金市场的重要信息</span></div>
+    <nav aria-label="总览页脚"><DashboardLink href="/audit?view=briefs">每日简报</DashboardLink><DashboardLink href="/audit?view=evidence">当前事件</DashboardLink><DashboardLink href="/health">运行状态</DashboardLink></nav>
+    <div className="overview-footer-state"><GlobalSystemState active={false} /></div>
+  </footer>;
 }
 
 function AdminSectionNavigation({ location }: { location: DashboardLocation }) {
@@ -291,6 +323,7 @@ export default function DashboardShell({ children, location }: { children: React
       <AdminSectionNavigation location={location} />
     </div>
     {children}
+    {activeDestination === "live" && <OverviewFooter />}
     <dialog
       className="admin-login-dialog"
       onClose={() => setAdminLoginOpen(false)}
