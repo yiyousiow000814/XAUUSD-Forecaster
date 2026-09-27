@@ -1,5 +1,31 @@
 # Public dashboard design review
 
+## Latest follow-up: brief headings and pagination
+
+Verified application revision: `0669b123`.
+Preview: https://7c152c80-aurum-signal-room.yiyousiow1234.workers.dev/audit?view=briefs.
+Both current and completed briefs now use `YYYY-MM-DD 黄金市场简报`.
+The statistics-rules disclosure and orphan styles are removed. News, evidence
+and search share accessible chevron buttons with the existing page handlers.
+
+The production build, Preview build and all 112 affected rendering/content
+tests passed. Obsolete assertions requiring the deleted disclosure were removed;
+replacement behavioral coverage verifies its absence, fixed headings and named
+disabled icon buttons. Architecture documentation and whitespace checks passed.
+
+Desktop 1280x900 and phones 390x844/360x800: switched September 27/26 briefs,
+verified uniform headings and no horizontal overflow, and navigated news page
+1 -> 2 -> 1. Pagination targets measured 44x44; visible button text is empty,
+accessible names remain. Evidence's bounded Preview has no next cursor, so both
+page-one buttons correctly remain disabled; a second evidence page was not
+available for browser verification. Search shares the tested button component.
+No browser warnings/errors recorded. Final task browser sessions: 0.
+
+Captures: `C:/Users/yiyou/AppData/Local/Temp/brief-unified-title.png` and
+`C:/Users/yiyou/AppData/Local/Temp/pagination-icons-360.png`.
+The application diff retains original data, cursor handling and brief content.
+Production is unchanged and PR #562 remains a draft for visual review.
+
 ## Latest follow-up: remove the coverage snapshot banner
 
 Verified application revision: `2c3c85d2`.
