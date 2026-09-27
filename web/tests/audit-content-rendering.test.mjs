@@ -26,7 +26,7 @@ const built = await build({
     resolveDir: fileURLToPath(new URL("..", import.meta.url)), loader: "tsx",
     contents: `import React from 'react';
       import {renderToStaticMarkup} from 'react-dom/server';
-      import AuditView, {NewsRow} from ${JSON.stringify(viewPath)};
+      import AuditView, {NewsRow, StoryCard} from ${JSON.stringify(viewPath)};
       import PreviewBanner from ${JSON.stringify(fileURLToPath(new URL("../app/_components/PreviewBanner.tsx", import.meta.url)))};
       import LiveRoomView from ${JSON.stringify(fileURLToPath(new URL('../app/_views/LiveRoomView.tsx', import.meta.url)))};
       import {OverviewCards,validOverviewBriefs,validOverviewEvents} from ${JSON.stringify(fileURLToPath(new URL('../app/_components/OverviewNews.tsx', import.meta.url)))};
@@ -36,6 +36,7 @@ const built = await build({
       import {clearDashboardResource,updateDashboardResource} from ${JSON.stringify(resourcesPath)};
       export function renderPreview(payload) { updateDashboardResource("/api/status",()=>payload); return renderToStaticMarkup(React.createElement(PreviewBanner)); }
       export function renderLive(payload) { updateDashboardResource("/api/status",()=>payload); return renderToStaticMarkup(React.createElement(LiveRoomView)); }
+      export function renderStory(story,expanded=false) {return renderToStaticMarkup(React.createElement(StoryCard,{story,expanded}));}
       export function renderNews(row) { return renderToStaticMarkup(React.createElement(NewsRow,{row})); }
       export function renderStatus(payload) { return renderToStaticMarkup(React.createElement(StatusView,{initialPayload:payload})); }
       export function render(view, resources) {
@@ -47,7 +48,7 @@ const built = await build({
 });
 const renderedModule = join(temporaryRoot, "audit.mjs");
 writeFileSync(renderedModule, built.outputFiles[0].contents);
-const { render, renderNews, renderStatus, renderLive, renderPreview, renderOverview, validOverviewBriefs, validOverviewEvents } = await import(pathToFileURL(renderedModule).href);
+const { render, renderNews, renderStatus, renderLive, renderPreview, renderOverview, renderStory, validOverviewBriefs, validOverviewEvents } = await import(pathToFileURL(renderedModule).href);
 
 test("article row expands publisher provenance with one coherent public label", () => {
   const row = {headline: "政策会议展望", emerging_topic_zh: "政策会议展望", event_type: "macro_preview",
@@ -373,4 +374,26 @@ test("overview distinguishes loading, confirmed empty, failure and retained cont
   const failed=renderOverview({briefs:{data:null,error:new Error("provider")},events:{data:{items:[{event_key:"one",canonical_headline:"KEPT"}]},error:new Error("refresh")}});
   assert.match(failed,/暂时无法读取/);assert.match(failed,/显示上次内容/);assert.match(failed,/KEPT/);
   assert.equal((failed.match(/>重试</g)||[]).length,2);
+});
+
+
+test("story cards default to latest summary and reveal a newest-first complete chain", () => {
+  const event=(id,date,relation)=>({event_key:id,event_time:date,headline:`headline-${id}`,relation,first_seen:date,source_published_time:date,collector_first_seen_time:date,evidence_documents:1,independent_organizations:1});
+  const story={storyline_id:"chain",title:"Story title",state:"REPORTED",event_count:3,latest_change:"Latest development",last_updated:"2026-09-27T01:00:00Z",timeline:[event("old","2026-09-25T01:00:00Z","STARTS"),event("new","2026-09-27T01:00:00Z","FOLLOWED_BY"),event("middle","2026-09-26T01:00:00Z","CONFIRMS")],evidence_document_count:3,independent_organization_count:2,coverage_count:1,coverage_total:2,covered_roles:[],missing_roles:[],market_reactions:[],commentary:[],background:[]};
+  const original=JSON.stringify(story);
+  const closed=renderStory(story);
+  assert.match(closed,/Latest development/);assert.match(closed,/aria-expanded="false"/);
+  assert.match(closed,/展开故事链/);assert.doesNotMatch(closed,/headline-old|headline-new|story-detail|证据覆盖/);
+  const open=renderStory(story,true);
+  assert.match(open,/aria-expanded="true"/);assert.match(open,/收起故事链/);
+  assert.match(open,/最新在前/);assert.match(open,/证据覆盖/);
+  assert.ok(open.indexOf('headline-new')<open.indexOf('headline-middle'));
+  assert.ok(open.indexOf('headline-middle')<open.indexOf('headline-old'));
+  assert.match(open,/首次进展/);assert.match(open,/随后发生/);
+  assert.equal(JSON.stringify(story),original);
+  assert.equal(renderStory(story),closed);
+  const fallback={...story,timeline:[event("unknown",null,"STARTS"),{...event("fallback",null,"FOLLOWED_BY"),source_published_time:"2026-09-28T00:00:00Z"},story.timeline[1]]};
+  const fallbackHtml=renderStory(fallback,true);
+  assert.ok(fallbackHtml.indexOf('headline-fallback')<fallbackHtml.indexOf('headline-new'));
+  assert.ok(fallbackHtml.indexOf('headline-new')<fallbackHtml.indexOf('headline-unknown'));
 });
