@@ -2126,7 +2126,7 @@ body:has(.assistant-main) > .dashboard-shell { width:100%; height:auto; min-heig
 .overview-empty { padding:20px 0; font-size:16px; color:var(--muted); }
 .overview-read-notice { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:4px 0; font-size:12px; }
 .overview-read-notice button { min-width:44px; min-height:44px; }
-.dashboard-shell.is-live .overview-site-footer { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:16px max(32px,calc((100% - 1080px)/2)); border:0; background:white; color:var(--muted); font-family:var(--font-sans),sans-serif; font-size:14px; }
+.dashboard-shell.is-live .overview-site-footer { display:flex; flex-direction:row; align-items:center; justify-content:space-between; gap:20px; padding:16px max(32px,calc((100% - 1080px)/2)); border:0; background:white; color:var(--muted); font-family:var(--font-sans),sans-serif; font-size:14px; }
 .overview-site-footer>div:first-child { display:flex; align-items:center; gap:20px; }
 .overview-footer-name { color:var(--ink); font-size:18px; white-space:nowrap; }
 .overview-site-footer nav { display:flex; align-items:center; gap:20px; }
