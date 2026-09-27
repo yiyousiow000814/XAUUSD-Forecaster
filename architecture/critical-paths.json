@@ -3,14 +3,14 @@
   "python_import_policy": {
     "schema": "python-import-policy-v1",
     "canonical_packages": {
-      "ai": "xauusd_forecaster/ai",
-      "assistant": "xauusd_forecaster/assistant",
-      "dashboard": "xauusd_forecaster/dashboard",
-      "decision": "xauusd_forecaster/decision",
-      "evidence": "xauusd_forecaster/evidence",
-      "news": "xauusd_forecaster/news",
-      "runtime": "xauusd_forecaster/runtime",
-      "training": "xauusd_forecaster/training"
+      "ai": "xauusd_news/ai",
+      "assistant": "xauusd_news/assistant",
+      "dashboard": "xauusd_news/dashboard",
+      "decision": "xauusd_news/decision",
+      "evidence": "xauusd_news/evidence",
+      "news": "xauusd_news/news",
+      "runtime": "xauusd_news/runtime",
+      "training": "xauusd_news/training"
     },
     "script_imports": [
       {
@@ -56,29 +56,29 @@
       "scripts/runtime/run_dashboard_api.py::Handler.do_GET",
       "scripts/runtime/run_dashboard_api.py::main"
     ],
-    "xauusd_forecaster/dashboard/status_resources.py": [
-      "xauusd_forecaster/dashboard/status_resources.py::_optional_resource_payload"
+    "xauusd_news/dashboard/status_resources.py": [
+      "xauusd_news/dashboard/status_resources.py::_optional_resource_payload"
     ],
-    "xauusd_forecaster/dashboard/news_resources.py": [
-      "xauusd_forecaster/dashboard/news_resources.py::_build_news_projection_source",
-      "xauusd_forecaster/dashboard/news_resources.py::_build_news_projection_source_from_database",
-      "xauusd_forecaster/dashboard/news_resources.py::_finish_news_projection_source_build",
-      "xauusd_forecaster/dashboard/news_resources.py::_news_projection_source_for_request",
-      "xauusd_forecaster/dashboard/news_resources.py::_news_projection_batch",
-      "xauusd_forecaster/dashboard/news_resources.py::_build_news_evidence_resource",
-      "xauusd_forecaster/dashboard/news_resources.py::_materialize_news_evidence_generation",
-      "xauusd_forecaster/dashboard/news_resources.py::_publish_news_evidence_snapshot",
-      "xauusd_forecaster/dashboard/news_resources.py::_news_evidence_page"
+    "xauusd_news/dashboard/news_resources.py": [
+      "xauusd_news/dashboard/news_resources.py::_build_news_projection_source",
+      "xauusd_news/dashboard/news_resources.py::_build_news_projection_source_from_database",
+      "xauusd_news/dashboard/news_resources.py::_finish_news_projection_source_build",
+      "xauusd_news/dashboard/news_resources.py::_news_projection_source_for_request",
+      "xauusd_news/dashboard/news_resources.py::_news_projection_batch",
+      "xauusd_news/dashboard/news_resources.py::_build_news_evidence_resource",
+      "xauusd_news/dashboard/news_resources.py::_materialize_news_evidence_generation",
+      "xauusd_news/dashboard/news_resources.py::_publish_news_evidence_snapshot",
+      "xauusd_news/dashboard/news_resources.py::_news_evidence_page"
     ]
   },
   "views": {
     "news-worker-audit": {
       "files": [
         "scripts/runtime/run_dashboard_api.py",
-        "xauusd_forecaster/dashboard/news_resources.py",
+        "xauusd_news/dashboard/news_resources.py",
         "scripts/runtime/run_dashboard_sync.py",
-        "xauusd_forecaster/dashboard/resource_contracts.py",
-        "xauusd_forecaster/news_projection.py",
+        "xauusd_news/dashboard/resource_contracts.py",
+        "xauusd_news/news_projection.py",
         "web/worker/api-router.ts",
         "web/app/api/news-index/route.ts",
         "web/app/api/news-content/route.ts",
@@ -88,21 +88,21 @@
         "web/app/_views/AuditView.tsx",
         "web/app/_lib/dashboard-resource.ts",
         "web/app/_lib/news-index-contract.ts",
-        "xauusd_forecaster/dashboard/status_resources.py",
-        "xauusd_forecaster/dashboard/sync/resources.py"
+        "xauusd_news/dashboard/status_resources.py",
+        "xauusd_news/dashboard/sync/resources.py"
       ],
       "roots": [
         "scripts/runtime/run_dashboard_api.py::Handler.do_GET",
-        "xauusd_forecaster/dashboard/news_resources.py::_build_news_projection_source",
-        "xauusd_forecaster/dashboard/news_resources.py::_news_projection_source_for_request",
-        "xauusd_forecaster/dashboard/news_resources.py::_finish_news_projection_source_build",
-        "xauusd_forecaster/dashboard/news_resources.py::_build_news_evidence_resource",
-        "xauusd_forecaster/dashboard/status_resources.py::_optional_resource_payload",
+        "xauusd_news/dashboard/news_resources.py::_build_news_projection_source",
+        "xauusd_news/dashboard/news_resources.py::_news_projection_source_for_request",
+        "xauusd_news/dashboard/news_resources.py::_finish_news_projection_source_build",
+        "xauusd_news/dashboard/news_resources.py::_build_news_evidence_resource",
+        "xauusd_news/dashboard/status_resources.py::_optional_resource_payload",
         "scripts/runtime/run_dashboard_api.py::main",
-        "xauusd_forecaster/news_projection.py::build_news_projection_generation",
-        "xauusd_forecaster/dashboard/sync/resources.py::_sync_news",
-        "xauusd_forecaster/dashboard/sync/resources.py::_sync_news_evidence",
-        "xauusd_forecaster/dashboard/sync/resources.py::_sync_audit",
+        "xauusd_news/news_projection.py::build_news_projection_generation",
+        "xauusd_news/dashboard/sync/resources.py::_sync_news",
+        "xauusd_news/dashboard/sync/resources.py::_sync_news_evidence",
+        "xauusd_news/dashboard/sync/resources.py::_sync_audit",
         "web/worker/api-router.ts::routeApiRequest",
         "web/worker/api-router.ts::genericRoute",
         "web/app/api/news-index/route.ts::POST",
@@ -131,16 +131,16 @@
     "source-first-ack": {
       "files": [
         "scripts/runtime/run_dashboard_sync.py",
-        "xauusd_forecaster/dashboard/resource_contracts.py",
-        "xauusd_forecaster/dashboard/sync/transport.py",
-        "xauusd_forecaster/dashboard/sync/resources.py"
+        "xauusd_news/dashboard/resource_contracts.py",
+        "xauusd_news/dashboard/sync/transport.py",
+        "xauusd_news/dashboard/sync/resources.py"
       ],
       "roots": [
-        "xauusd_forecaster/dashboard/sync/resources.py::_sync_market",
-        "xauusd_forecaster/dashboard/sync/resources.py::_sync_market_history",
-        "xauusd_forecaster/dashboard/sync/resources.py::_sync_operator_retries",
-        "xauusd_forecaster/dashboard/sync/resources.py::_sync_news_evidence",
-        "xauusd_forecaster/dashboard/sync/transport.py::_post_json"
+        "xauusd_news/dashboard/sync/resources.py::_sync_market",
+        "xauusd_news/dashboard/sync/resources.py::_sync_market_history",
+        "xauusd_news/dashboard/sync/resources.py::_sync_operator_retries",
+        "xauusd_news/dashboard/sync/resources.py::_sync_news_evidence",
+        "xauusd_news/dashboard/sync/transport.py::_post_json"
       ],
       "tests": [
         "tests/dashboard/test_dashboard_sync.py",

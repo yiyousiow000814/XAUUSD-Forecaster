@@ -4,23 +4,23 @@ import json
 
 import pytest
 
-from xauusd_forecaster.assistant.routing import ASSISTANT_ROUTING_POLICY_VERSION
-from xauusd_forecaster.assistant.routing import GOOGLE_GENERATIVE_LANGUAGE
-from xauusd_forecaster.assistant.routing import OLLAMA_LOCAL
-from xauusd_forecaster.assistant.routing import AssistantModelRoutingUnavailable
-from xauusd_forecaster.assistant.routing import AssistantTaskType
-from xauusd_forecaster.assistant.routing import AssistantToolPolicy
-from xauusd_forecaster.assistant.routing import ModelCapacityClass
-from xauusd_forecaster.assistant.routing import ModelProfile
-from xauusd_forecaster.assistant.routing import ModelRequirement
-from xauusd_forecaster.assistant.routing import ReasoningClass
-from xauusd_forecaster.assistant.routing import ThinkingLevel
-from xauusd_forecaster.assistant.routing import apply_provider_thinking_level
-from xauusd_forecaster.assistant.routing import classify_assistant_reasoning
-from xauusd_forecaster.assistant.routing import classify_assistant_tool_policy
-from xauusd_forecaster.assistant.routing import configured_assistant_model_profiles
-from xauusd_forecaster.assistant.routing import plan_assistant_route
-from xauusd_forecaster.assistant.routing import routing_provenance
+from xauusd_news.assistant.routing import ASSISTANT_ROUTING_POLICY_VERSION
+from xauusd_news.assistant.routing import GOOGLE_GENERATIVE_LANGUAGE
+from xauusd_news.assistant.routing import OLLAMA_LOCAL
+from xauusd_news.assistant.routing import AssistantModelRoutingUnavailable
+from xauusd_news.assistant.routing import AssistantTaskType
+from xauusd_news.assistant.routing import AssistantToolPolicy
+from xauusd_news.assistant.routing import ModelCapacityClass
+from xauusd_news.assistant.routing import ModelProfile
+from xauusd_news.assistant.routing import ModelRequirement
+from xauusd_news.assistant.routing import ReasoningClass
+from xauusd_news.assistant.routing import ThinkingLevel
+from xauusd_news.assistant.routing import apply_provider_thinking_level
+from xauusd_news.assistant.routing import classify_assistant_reasoning
+from xauusd_news.assistant.routing import classify_assistant_tool_policy
+from xauusd_news.assistant.routing import configured_assistant_model_profiles
+from xauusd_news.assistant.routing import plan_assistant_route
+from xauusd_news.assistant.routing import routing_provenance
 
 
 @pytest.mark.parametrize(

@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.news.retrieval.benchmark import BENCHMARK_SCHEMA_VERSION
-from xauusd_forecaster.news.retrieval.benchmark import load_benchmark_manifest
-from xauusd_forecaster.news.retrieval.benchmark import score_candidate_rankings
+from xauusd_news.news.retrieval.benchmark import BENCHMARK_SCHEMA_VERSION
+from xauusd_news.news.retrieval.benchmark import load_benchmark_manifest
+from xauusd_news.news.retrieval.benchmark import score_candidate_rankings
 
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "news_candidate_retrieval_benchmark.json"

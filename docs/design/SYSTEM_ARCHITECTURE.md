@@ -1,4 +1,4 @@
-# XAUUSD Forecaster System Architecture
+# XAUUSD News System Architecture
 
 ## How to use this map
 
@@ -100,7 +100,7 @@ source universe. A periodic full reconciliation is recovery work, not normal
 unchanged mutation.
 
 The local API and Sync share pure resource serializers in
-`xauusd_forecaster/dashboard/resource_contracts.py`. Field projections and
+`xauusd_news/dashboard/resource_contracts.py`. Field projections and
 News generation identities retain their existing package owners. The shared
 serializers accept source values; they do not perform reads, schedule work,
 resolve Git identity, send requests, or advance receipts. Preview and release
@@ -157,15 +157,15 @@ Unknown objects, active worktrees, and rollback artifacts are not deleted.
 
 | Concern | Authoritative implementation | Entry point / consumer | Contract tests |
 |---|---|---|---|
-| Quotes and causal market snapshot | `xauusd_forecaster/market.py`, `xauusd_forecaster/market_session.py` | `scripts/runtime/run_forward_collector.py` | `tests/decision/test_market_session.py`, `tests/evidence/test_quotes_and_labeling.py` |
-| News collection and scheduling | `xauusd_forecaster/news/collection/runtime.py`, `xauusd_forecaster/news/scheduler/state.py`, `xauusd_forecaster/news/annotation/product.py` | Collector thread / `scripts/runtime/run_news_annotator.py` | `tests/news/test_news_collection_owner.py`, `tests/news/test_news_scheduler.py` |
-| Dashboard bounded payloads, provenance, cache, component health, source health, incremental News archive selection and presentation, market, runtime, and storage status resources | `xauusd_forecaster/dashboard/payloads.py`, `xauusd_forecaster/dashboard/read_models.py`, `xauusd_forecaster/dashboard/deployment_provenance.py`, `xauusd_forecaster/dashboard/status_cache.py`, `xauusd_forecaster/dashboard/health_projection.py`, `xauusd_forecaster/dashboard/news_source_health.py`, `xauusd_forecaster/dashboard/news_archive.py`, `xauusd_forecaster/dashboard/news_presentation.py`, `xauusd_forecaster/dashboard/market_resources.py`, `xauusd_forecaster/dashboard/runtime_status.py`, `xauusd_forecaster/dashboard/storage_status.py` | `scripts/runtime/run_dashboard_api.py` | `tests/dashboard/test_dashboard_api.py`, `tests/dashboard/test_dashboard_payloads.py`, `tests/dashboard/test_dashboard_status_cache.py`, `tests/dashboard/test_dashboard_health_projection.py`, `tests/dashboard/test_dashboard_market_resources.py`, `tests/dashboard/test_dashboard_runtime_status.py` |
-| Dashboard transport and progress policy | `xauusd_forecaster/dashboard/sync/transport.py`, `xauusd_forecaster/dashboard/sync/progress.py`; runtime-state I/O stays at the trusted entry-point boundary | `scripts/runtime/run_dashboard_sync.py` | `tests/dashboard/test_dashboard_sync_transport.py`, `tests/dashboard/test_dashboard_sync_progress.py`, `tests/dashboard/test_dashboard_sync.py` |
-| Dashboard pure resource serialization | `xauusd_forecaster/dashboard/resource_contracts.py`; existing field projections and News generation remain authoritative | API and Sync; compatibility imports for Preview and release fixture builders | `tests/dashboard/test_dashboard_resource_contracts.py`, `tests/dashboard/test_dashboard_sync.py`, `tests/dashboard/test_release_validation_fixtures.py` |
-| Dashboard operator retry bridge | `xauusd_forecaster/dashboard/operator_bridge.py` | HTTP adapter in `scripts/runtime/run_dashboard_api.py` | `tests/dashboard/test_dashboard_api.py` |
-| Local storage lifecycle | `xauusd_forecaster/maintenance.py`, `xauusd_forecaster/sqlite_wal.py` | Collector maintenance owners | `tests/runtime/test_backup_containment.py`, `tests/runtime/test_wal_checkpoint_ownership.py` |
+| Quotes and causal market snapshot | `xauusd_news/market.py`, `xauusd_news/market_session.py` | `scripts/runtime/run_forward_collector.py` | `tests/decision/test_market_session.py`, `tests/evidence/test_quotes_and_labeling.py` |
+| News collection and scheduling | `xauusd_news/news/collection/runtime.py`, `xauusd_news/news/scheduler/state.py`, `xauusd_news/news/annotation/product.py` | Collector thread / `scripts/runtime/run_news_annotator.py` | `tests/news/test_news_collection_owner.py`, `tests/news/test_news_scheduler.py` |
+| Dashboard bounded payloads, provenance, cache, component health, source health, incremental News archive selection and presentation, market, runtime, and storage status resources | `xauusd_news/dashboard/payloads.py`, `xauusd_news/dashboard/read_models.py`, `xauusd_news/dashboard/deployment_provenance.py`, `xauusd_news/dashboard/status_cache.py`, `xauusd_news/dashboard/health_projection.py`, `xauusd_news/dashboard/news_source_health.py`, `xauusd_news/dashboard/news_archive.py`, `xauusd_news/dashboard/news_presentation.py`, `xauusd_news/dashboard/market_resources.py`, `xauusd_news/dashboard/runtime_status.py`, `xauusd_news/dashboard/storage_status.py` | `scripts/runtime/run_dashboard_api.py` | `tests/dashboard/test_dashboard_api.py`, `tests/dashboard/test_dashboard_payloads.py`, `tests/dashboard/test_dashboard_status_cache.py`, `tests/dashboard/test_dashboard_health_projection.py`, `tests/dashboard/test_dashboard_market_resources.py`, `tests/dashboard/test_dashboard_runtime_status.py` |
+| Dashboard transport and progress policy | `xauusd_news/dashboard/sync/transport.py`, `xauusd_news/dashboard/sync/progress.py`; runtime-state I/O stays at the trusted entry-point boundary | `scripts/runtime/run_dashboard_sync.py` | `tests/dashboard/test_dashboard_sync_transport.py`, `tests/dashboard/test_dashboard_sync_progress.py`, `tests/dashboard/test_dashboard_sync.py` |
+| Dashboard pure resource serialization | `xauusd_news/dashboard/resource_contracts.py`; existing field projections and News generation remain authoritative | API and Sync; compatibility imports for Preview and release fixture builders | `tests/dashboard/test_dashboard_resource_contracts.py`, `tests/dashboard/test_dashboard_sync.py`, `tests/dashboard/test_release_validation_fixtures.py` |
+| Dashboard operator retry bridge | `xauusd_news/dashboard/operator_bridge.py` | HTTP adapter in `scripts/runtime/run_dashboard_api.py` | `tests/dashboard/test_dashboard_api.py` |
+| Local storage lifecycle | `xauusd_news/maintenance.py`, `xauusd_news/sqlite_wal.py` | Collector maintenance owners | `tests/runtime/test_backup_containment.py`, `tests/runtime/test_wal_checkpoint_ownership.py` |
 | Worker and D1 projection | `web/worker/index.ts`, `web/worker/api-router.ts`, `web/db/schema.ts` | Cloudflare Workers | `web/tests/d1-capabilities.test.mjs`, `web/tests/worker-cpu-headroom.test.mjs` |
-| Live broadcast | `xauusd_forecaster/live_broadcast.py`, `broadcast/src/index.js` | `scripts/runtime/run_live_broadcast_publisher.py` | `tests/decision/test_live_broadcast.py`, `broadcast/tests/broadcast.test.mjs` |
+| Live broadcast | `xauusd_news/live_broadcast.py`, `broadcast/src/index.js` | `scripts/runtime/run_live_broadcast_publisher.py` | `tests/decision/test_live_broadcast.py`, `broadcast/tests/broadcast.test.mjs` |
 
 ## Current structural gaps
 
@@ -189,7 +189,7 @@ source fetch, service ownership and update behavior. No Control Panel remains.
 
 ### Local News resource ownership
 
-`xauusd_forecaster.news_projection.NEWS_READER_WINDOW_DAYS` owns the existing
+`xauusd_news.news_projection.NEWS_READER_WINDOW_DAYS` owns the existing
 60-day window used by both the local API and Sync. Both entrypoints import the
 same stdlib-only projection owner; Sync does not import the SQLite-backed API.
 This ownership extraction preserves the numeric value, query cutoffs, payloads,
@@ -197,7 +197,7 @@ persisted generations, ACK rules and restart behavior. It introduces no mutable
 state, background work or migration. The existing archive window/cursor and
 Sync generation contracts remain the behavioral checks.
 
-`xauusd_forecaster.dashboard.news_resources` owns local News reader queries,
+`xauusd_news.dashboard.news_resources` owns local News reader queries,
 projection generation, evidence pagination and both cache/lock pairs. The API
 retains HTTP authentication, routing and response handling; bootstrap imports
 its capture/generation functions directly from the package. Importing the owner

@@ -12,10 +12,10 @@ from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(MODULE_ROOT))
 
-from xauusd_forecaster.dashboard import resource_contracts
-from xauusd_forecaster.dashboard.sync import resources
-from xauusd_forecaster.dashboard.sync.news_delta import make_news_delta, news_delta_baseline
-from xauusd_forecaster.news_projection import (
+from xauusd_news.dashboard import resource_contracts
+from xauusd_news.dashboard.sync import resources
+from xauusd_news.dashboard.sync.news_delta import make_news_delta, news_delta_baseline
+from xauusd_news.news_projection import (
     build_news_projection_generation,
     canonicalize_news_projection_impact_clocks,
 )

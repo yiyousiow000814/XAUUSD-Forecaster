@@ -9,9 +9,9 @@ inspection or completed-work record.
 
 | Original path and title | Primary purpose | Authority | Destination | Action and inbound repository references |
 | --- | --- | --- | --- | --- |
-| `README.md` — XAUUSD Forecaster | Repository introduction | Summary | unchanged | Update links; no authoritative rules added. |
+| `README.md` — XAUUSD News | Repository introduction | Summary | unchanged | Update links; no authoritative rules added. |
 | `AGENTS.md` — Repository Working Rules | Contributor policy | Normative | unchanged | Add concise taxonomy rule; referenced by repository agents. |
-| `web/README.md` — Aurum Signal Room | Web workspace guide | Reference/runbook summary | unchanged | Keep near the workspace; no moved-doc references. |
+| `web/README.md` — XAUUSD News | Web workspace guide | Reference/runbook summary | unchanged | Keep near the workspace; no moved-doc references. |
 | `ctrader/XauusdForwardQuoteBridge/README.md` — XAUUSD Forward Quote Bridge | Adapter guide and interface summary | Reference | unchanged | Keep near the adapter; no moved-doc references. |
 | `docs/PRODUCT_CONTRACT.md` — Frozen Product Contract | Product behavior and evidence gates | Normative spec | `specs/PRODUCT.md` | Reclassify; referenced by root README and former system document. |
 | `docs/SYSTEM_CONTRACT.md` — XAUUSD Forecasting System Contract | Durable system, ledger, data, validation, and safety boundaries | Normative contract | `contracts/SYSTEM_BOUNDARIES.md` | Keep as contract with product behavior linked to its spec; referenced by root README and U5 audit. |
@@ -42,11 +42,11 @@ inspection or completed-work record.
 | Path | Classification | Decision |
 | --- | --- | --- |
 | `web/preview-manifest.json` | Build manifest | Keep; the name accurately describes configuration rather than authority. |
-| `xauusd_forecaster/news_annotation.schema.json` | Compatibility schema | Keep; schema is the correct machine-readable type. |
+| `xauusd_news/news_annotation.schema.json` | Compatibility schema | Keep; schema is the correct machine-readable type. |
 | `config/forward.example.json` | Example configuration | Keep; it is not presented as a contract or spec. |
 | `web/app/_lib/news-index-contract.ts` | Public payload-shape implementation | Keep; the module enforces a compatibility-sensitive interface. |
-| `xauusd_forecaster/news_contracts.py` | Runtime contract values and compatibility identities | Keep; the name refers to executable invariant/version definitions, not documentation taxonomy. |
-| `xauusd_forecaster/news_contract_migration.py` | Versioned contract migration | Keep; renaming would obscure its compatibility role. |
+| `xauusd_news/news_contracts.py` | Runtime contract values and compatibility identities | Keep; the name refers to executable invariant/version definitions, not documentation taxonomy. |
+| `xauusd_news/news_contract_migration.py` | Versioned contract migration | Keep; renaming would obscure its compatibility role. |
 | `tests/test_news_semantic_contract_v15.py` | Semantic compatibility tests | Keep; tests enforce but do not author the documented rules. |
 | `tests/test_registered_macro_collector_contracts.py` | Collector-family invariant tests | Keep; tests enforce but do not author the documented rules. |
 

@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.dashboard.sync import transport as module
-from xauusd_forecaster.dashboard.sync.progress import sync_error_code
+from xauusd_news.dashboard.sync import transport as module
+from xauusd_news.dashboard.sync.progress import sync_error_code
 
 
 def test_remote_write_rejection_preserves_declared_error_code(monkeypatch) -> None:

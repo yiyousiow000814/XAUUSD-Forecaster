@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.dashboard import resource_contracts as module
+from xauusd_news.dashboard import resource_contracts as module
 
 
 def test_resource_serializers_do_not_depend_on_entrypoints_or_runtime_io() -> None:
@@ -23,7 +23,7 @@ def test_resource_serializers_do_not_depend_on_entrypoints_or_runtime_io() -> No
     }
     assert imports <= {
         "__future__", "copy", "json", "math", "datetime",
-        'xauusd_forecaster.dashboard.payloads', "xauusd_forecaster.news_projection",
+        'xauusd_news.dashboard.payloads', "xauusd_news.news_projection",
     }
 
 

@@ -1,11 +1,11 @@
 # Main Runtime Installation
 
-Production source lives in `C:/Users/yiyou/XAUUSD-Forecaster-runtime`; configuration
-continues to live in `C:/Users/yiyou/XAUUSD-Forecaster`. PR worktrees are development
+Production source lives in `C:/Users/yiyou/xauusd-news-runtime`; configuration
+continues to live in `C:/Users/yiyou/xauusd-news`. PR worktrees are development
 only. The sole entrypoint is `scripts/run_main_services.ps1`.
 
 Run Install once from the accepted main checkout with explicit RuntimeRoot and
-RepositoryRoot. It registers XAUUSD-Forecaster-Main for the current interactive
+RepositoryRoot. It registers xauusd-news-main for the current interactive
 user. Windows Task Scheduler launches hidden wscript at login and checks once a
 minute; IgnoreNew and the runtime mutex admit only one owner. Install does not
 start or stop business processes. Start persists running intent; Stop persists

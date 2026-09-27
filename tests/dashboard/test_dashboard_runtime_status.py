@@ -4,7 +4,7 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from xauusd_forecaster.dashboard import runtime_status as module
+from xauusd_news.dashboard import runtime_status as module
 
 
 UTC = timezone.utc

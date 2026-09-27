@@ -14,11 +14,11 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.mark.parametrize("case", ["retained", "sealed", "missing-config", "wrong-child", "source-output"])
 def test_recovery_producer_accepts_only_the_declared_existing_copy(tmp_path, monkeypatch, case):
-    from xauusd_forecaster import runtime_paths
+    from xauusd_news import runtime_paths
     spec = importlib.util.spec_from_file_location("copy_paths", ROOT / "scripts/maintenance/rehearse_news_recovery_copy.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    runtime = tmp_path / "profile/XAUUSD-Forecaster-runtime"
+    runtime = tmp_path / "profile/xauusd-news-runtime"
     config = None if case == "missing-config" else {"runtime_root": str(runtime)}
     monkeypatch.setattr(runtime_paths, "isolated_runtime_configuration", lambda: config)
     database = (tmp_path / "rehearsal/production-online.sqlite3" if case == "retained" else

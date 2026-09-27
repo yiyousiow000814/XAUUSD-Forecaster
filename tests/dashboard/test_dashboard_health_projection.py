@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from xauusd_forecaster.dashboard.health_projection import (
+from xauusd_news.dashboard.health_projection import (
     COLLECTOR_HEARTBEAT_EXPECTED_SECONDS,
     COLLECTOR_HEARTBEAT_FAILURE_SECONDS,
     DECISION_HORIZON,

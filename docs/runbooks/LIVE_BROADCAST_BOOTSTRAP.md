@@ -3,8 +3,8 @@
 ## Safety boundary
 
 This is a one-time coordinated bootstrap for `aurum-live-broadcast`. It is not
-part of the normal `aurum-signal-room` `wrangler versions upload` flow. Never
-apply these commands to `aurum-signal-room` or `aurum-signal-room-preview`.
+part of the normal `xauusd-news` `wrangler versions upload` flow. Never
+apply these commands to `xauusd-news` or `xauusd-news-preview`.
 
 Repository CI, Preview validation, and Candidate dry-runs stop before platform
 mutation. They must not create the service, namespace, secret, route, or state.

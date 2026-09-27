@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from scripts.validation.build_release_validation_fixtures import _news, build_fixtures
-from xauusd_forecaster.news_projection import (
+from xauusd_news.news_projection import (
     NEWS_PROJECTION_IMPACT_CLOCK_FIELDS,
     canonicalize_news_projection_impact_clocks,
 )

@@ -1,4 +1,4 @@
-import operationalCodeRegistry from "../../../xauusd_forecaster/operational_codes.json" with { type: "json" };
+import operationalCodeRegistry from "../../../xauusd_news/operational_codes.json" with { type: "json" };
 
 export type OperationalCategory = "CAPACITY" | "PROVIDER" | "BACKLOG" | "RETRY" | "MODEL_OUTPUT" | "DATA" | "SEMANTIC" | "SYNC" | "RUNTIME" | "DEPLOYMENT" | "CONFIGURATION" | "DEPENDENCY" | "SECURITY";
 export type OperationalRole = "ROOT" | "SYMPTOM" | "STATE";

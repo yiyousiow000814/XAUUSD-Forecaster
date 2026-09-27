@@ -24,7 +24,7 @@ def _write_sync_rehearsal(code_root: Path, runtime_root: Path) -> Path:
         ROOT / "scripts" / "runtime" / "run_dashboard_sync.py",
         code_root / "scripts" / "runtime" / "run_dashboard_sync.py",
     )
-    shutil.copytree(ROOT / "xauusd_forecaster", code_root / "xauusd_forecaster")
+    shutil.copytree(ROOT / "xauusd_news", code_root / "xauusd_news")
     state_root = runtime_root / ".local" / "forward"
     state_root.mkdir(parents=True, exist_ok=True)
     (state_root / "dashboard-sync.json").write_text("{}", encoding="utf-8")
@@ -37,7 +37,7 @@ def _write_sync_rehearsal(code_root: Path, runtime_root: Path) -> Path:
             import importlib.util
             import sys
             from pathlib import Path
-            from xauusd_forecaster import runtime_paths
+            from xauusd_news import runtime_paths
 
             script = {str(code_root / 'scripts' / 'runtime' / 'run_dashboard_sync.py')!r}
             runtime_paths.PRODUCTION_RUNTIME_STATE_ROOT = Path({str(state_root)!r})
@@ -111,7 +111,7 @@ def test_sync_entrypoint_rejects_status_outside_runtime_authority(tmp_path: Path
     outside = tmp_path / "candidate" / "dashboard-sync-status.json"
     probe = (
         "import runpy,sys;from pathlib import Path;"
-        "from xauusd_forecaster import runtime_paths;"
+        "from xauusd_news import runtime_paths;"
         f"runtime_paths.PRODUCTION_RUNTIME_STATE_ROOT=Path({str(state_root)!r});"
         f"sys.argv=['run_dashboard_sync.py','--state-root',{str(state_root)!r},"
         f"'--config',{str(config)!r},'--status-file',{str(outside)!r},'--once'];"
@@ -143,7 +143,7 @@ def test_sync_entrypoint_rejects_status_outside_runtime_authority(tmp_path: Path
 def test_fixed_runtime_children_reject_another_authority(
     tmp_path: Path, service: str, name: str,
 ) -> None:
-    from xauusd_forecaster.runtime_paths import runtime_child_path
+    from xauusd_news.runtime_paths import runtime_child_path
 
     state_root = tmp_path / "runtime" / ".local" / "forward"
     outside = tmp_path / "candidate" / name
@@ -157,7 +157,7 @@ def test_fixed_runtime_children_reject_another_authority(
 def test_runtime_root_requires_exact_launcher_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from xauusd_forecaster import runtime_paths
+    from xauusd_news import runtime_paths
 
     authority = tmp_path / "runtime" / ".local" / "forward"
     monkeypatch.setattr(runtime_paths, "PRODUCTION_RUNTIME_STATE_ROOT", authority)
@@ -171,7 +171,7 @@ def test_runtime_root_requires_exact_launcher_authority(
 
 def test_quote_bridge_rejects_output_outside_runtime_authority(tmp_path: Path) -> None:
     state_root = (
-        Path.home() / "XAUUSD-Forecaster-runtime" / ".local" / "forward"
+        Path.home() / "xauusd-news-runtime" / ".local" / "forward"
     )
     outside = tmp_path / "candidate" / "quotes"
     launcher = (

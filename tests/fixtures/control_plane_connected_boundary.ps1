@@ -29,7 +29,7 @@ function Invoke-WranglerJson {
         [Text.UTF8Encoding]::new($false, $true).GetString($buffer, 0, $count) | ConvertFrom-ReleaseControlJson
     }
     if ($config.values.WORKER_PLACEMENT_FILE -and
-        ($Arguments | ConvertTo-Json -Compress) -ceq '["deployments","status","--name","aurum-signal-room"]') {
+        ($Arguments | ConvertTo-Json -Compress) -ceq '["deployments","status","--name","xauusd-news"]') {
         $path = Join-Path ([string]$config.owned_root) 'worker-placement.json'
         if ([string]$config.values.WORKER_PLACEMENT_FILE -cne $path) { throw 'CONNECTED_PLACEMENT_AUTHORITY_INVALID' }
         Assert-IsolatedConfigurationPath -Path $path
@@ -75,13 +75,13 @@ function Invoke-WranglerDeploymentCommand {
     if (-not $config.values.WORKER_PLACEMENT_FILE -or $Arguments.Count -notin @(8,9) -or
         $Arguments[0] -cne 'versions' -or $Arguments[1] -cne 'deploy' -or
         ($Arguments[($Arguments.Count-5)..($Arguments.Count-2)] | ConvertTo-Json -Compress) -cne
-            '["--name","aurum-signal-room","--yes","--message"]') { throw 'CONNECTED_DEPLOYMENT_REQUEST_UNDECLARED' }
+            '["--name","xauusd-news","--yes","--message"]') { throw 'CONNECTED_DEPLOYMENT_REQUEST_UNDECLARED' }
     $stable = [string]$config.values.STABLE_WORKER_VERSION
     $candidate = [string]$config.values.TARGET_WORKER_VERSION
     if ($stable -cnotmatch '^[0-9a-f-]{36}$' -or $candidate -cnotmatch '^[0-9a-f-]{36}$' -or $stable -ceq $candidate) {
         throw 'CONNECTED_DEPLOYMENT_IDENTITY_INVALID'
     }
-    $prior = Invoke-WranglerJson -Arguments @('deployments','status','--name','aurum-signal-room')
+    $prior = Invoke-WranglerJson -Arguments @('deployments','status','--name','xauusd-news')
     $specifications = @($Arguments[2..($Arguments.Count-6)])
     $message = $Arguments[-1]
     $stage = $specifications.Count -eq 2 -and $specifications[0] -ceq ($stable+'@100') -and

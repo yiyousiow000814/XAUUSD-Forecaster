@@ -50,18 +50,18 @@ def test_cli_state_path_uses_runtime_authority(tmp_path, monkeypatch, context):
 
 
 @pytest.mark.parametrize("value", [
-    "https://abc12345-aurum-signal-room.example.workers.dev",
-    "https://01abc234-aurum-signal-room.example.workers.dev/",
+    "https://abc12345-xauusd-news.example.workers.dev",
+    "https://01abc234-xauusd-news.example.workers.dev/",
 ])
 def test_accepts_exact_version_worker_origins(value: str) -> None:
     assert MODULE._version_origin(value).startswith("https://")
 
 
 @pytest.mark.parametrize("value", [
-    "http://abc12345-aurum-signal-room.example.workers.dev",
-    "https://aurum-signal-room.example.workers.dev",
-    "https://abc12345-aurum-signal-room.example.workers.dev/api/ingest",
-    "https://abc12345-aurum-signal-room-preview.example.workers.dev",
+    "http://abc12345-xauusd-news.example.workers.dev",
+    "https://xauusd-news.example.workers.dev",
+    "https://abc12345-xauusd-news.example.workers.dev/api/ingest",
+    "https://abc12345-xauusd-news-preview.example.workers.dev",
 ])
 def test_rejects_non_version_or_preview_origins(value: str) -> None:
     with pytest.raises(ValueError):
@@ -100,7 +100,7 @@ def test_bootstrap_keeps_partial_replay_then_requires_verified_current(
     monkeypatch.setattr(MODULE, "_get_json", lambda *_args, **_kwargs: health)
     arguments = dict(
         base_config={"local_status_url": "http://127.0.0.1:8765/api/status"},
-        origin="https://abc12345-aurum-signal-room.example.workers.dev",
+        origin="https://abc12345-xauusd-news.example.workers.dev",
         token="secret", state_file=tmp_path / "state.json",
         max_cycles=2, retry_seconds=0,
         state_root=tmp_path,
@@ -144,7 +144,7 @@ def test_bootstrap_reuses_one_frozen_generation_without_stable_api(
 
     result = MODULE.bootstrap(
         base_config={},
-        origin="https://abc12345-aurum-signal-room.example.workers.dev",
+        origin="https://abc12345-xauusd-news.example.workers.dev",
         token="secret", state_file=tmp_path / "state.json",
         max_cycles=2, retry_seconds=0, frozen_generation=frozen,
         state_root=tmp_path,
@@ -173,7 +173,7 @@ def test_bootstrap_does_not_retry_deterministic_contract_failure(
     with pytest.raises(type(error), match=re.escape(str(error))):
         MODULE.bootstrap(
             base_config={"local_status_url": "http://127.0.0.1:8765/api/status"},
-            origin="https://abc12345-aurum-signal-room.example.workers.dev",
+            origin="https://abc12345-xauusd-news.example.workers.dev",
             token="secret", state_file=tmp_path / "state.json",
             max_cycles=1_000, retry_seconds=0,
             state_root=tmp_path,
@@ -230,9 +230,9 @@ def test_bootstrap_persists_generation_before_first_replay(
 def test_bootstrap_capture_retains_input_and_never_calls_remote_or_initializer(
     tmp_path, monkeypatch, source_state,
 ):
-    from xauusd_forecaster.evidence.ledger import ForwardLedger
-    from xauusd_forecaster.dashboard import news_resources as api_owner
-    from xauusd_forecaster import news_projection as capture_owner
+    from xauusd_news.evidence.ledger import ForwardLedger
+    from xauusd_news.dashboard import news_resources as api_owner
+    from xauusd_news import news_projection as capture_owner
 
     now = datetime(2026, 9, 7, tzinfo=UTC)
     database = tmp_path / "retained-input.sqlite3"
@@ -265,8 +265,8 @@ def test_bootstrap_capture_retains_input_and_never_calls_remote_or_initializer(
         "source_identity": {"fixture": "current imported test source", "inputs": {
             name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in {
                 "scripts/maintenance/bootstrap_news_projection.py": Path(MODULE.__file__),
-                "xauusd_forecaster/dashboard/news_resources.py": Path(api_owner.__file__),
-                "xauusd_forecaster/news_projection.py": Path(capture_owner.__file__),
+                "xauusd_news/dashboard/news_resources.py": Path(api_owner.__file__),
+                "xauusd_news/news_projection.py": Path(capture_owner.__file__),
             }.items()
         }},
         "watermark": now, "epoch": epoch, "state_file": state_file,
@@ -274,7 +274,7 @@ def test_bootstrap_capture_retains_input_and_never_calls_remote_or_initializer(
     }
     try:
         if source_state == "omitted-transition":
-            arguments["source_identity"]["inputs"]["xauusd_forecaster/dashboard/news_resources.py"] = "0" * 64
+            arguments["source_identity"]["inputs"]["xauusd_news/dashboard/news_resources.py"] = "0" * 64
             existing = capture_owner.NewsProjectionSourceCapture(
                 state_root / "bootstrap-generation.capture",
                 binding={"snapshot_stat": before, "input_identity": arguments["input_identity"],
@@ -299,12 +299,12 @@ def test_bootstrap_capture_retains_input_and_never_calls_remote_or_initializer(
             arguments["active_producer_identity"] = {"inputs": {
                 name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in {
                     "scripts/maintenance/bootstrap_news_projection.py": Path(MODULE.__file__),
-                    "xauusd_forecaster/dashboard/news_resources.py": Path(api_owner.__file__),
-                    "xauusd_forecaster/news_projection.py": Path(capture_owner.__file__),
+                    "xauusd_news/dashboard/news_resources.py": Path(api_owner.__file__),
+                    "xauusd_news/news_projection.py": Path(capture_owner.__file__),
                 }.items()
             }}
             if source_state == "executing-mismatch":
-                arguments["active_producer_identity"]["inputs"]["xauusd_forecaster/dashboard/news_resources.py"] = "0" * 64
+                arguments["active_producer_identity"]["inputs"]["xauusd_news/dashboard/news_resources.py"] = "0" * 64
             monkeypatch.setattr(MODULE, "_advance_news_projection_capture",
                                 lambda *_args: pytest.fail("unadmitted executing producer queried"))
             with pytest.raises(ValueError, match=("EXECUTING_PRODUCER_MISMATCH" if source_state == "executing-mismatch"

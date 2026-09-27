@@ -23,12 +23,12 @@ RUNTIME_ROOT = Path(_root_args.runtime_root or Path.cwd()).resolve()
 PRODUCER_ROOT = Path(_root_args.producer_root or Path.cwd()).resolve()
 # Projection builders belong to the exact Windows producer revision. Mutable
 # authority belongs to RuntimeRoot; neither location is inferred from the other.
-PRODUCER_RESOURCE_OWNER = PRODUCER_ROOT / "xauusd_forecaster/dashboard/sync/resources.py"
+PRODUCER_RESOURCE_OWNER = PRODUCER_ROOT / "xauusd_news/dashboard/sync/resources.py"
 if not PRODUCER_RESOURCE_OWNER.is_file():
     raise ValueError("PROJECTION_PRODUCER_OWNER_UNAVAILABLE")
 sys.path.insert(0, str(PRODUCER_ROOT))
 
-from xauusd_forecaster.dashboard.sync.resources import (  # noqa: E402
+from xauusd_news.dashboard.sync.resources import (  # noqa: E402
     AUDIT_DETAIL_LIMIT_BYTES,
     AUDIT_FIRST_PAGE_LIMIT_BYTES,
     REMOTE_PAYLOAD_LIMIT_BYTES,
@@ -39,7 +39,7 @@ from xauusd_forecaster.dashboard.sync.resources import (  # noqa: E402
     UUID_PATTERN,
     valid_audit_detail_payload,
 )
-from xauusd_forecaster.dashboard.read_models import READ_MODEL_CONTRACTS  # noqa: E402
+from xauusd_news.dashboard.read_models import READ_MODEL_CONTRACTS  # noqa: E402
 
 if Path(_deferred_projection_request_digest.__code__.co_filename).resolve() != PRODUCER_RESOURCE_OWNER.resolve():
     raise ValueError("PROJECTION_PRODUCER_OWNER_MISMATCH")
@@ -52,9 +52,9 @@ LOCAL_AUDIT_URL = "http://127.0.0.1:8765/api/audit"
 LOCAL_DATABASE = RUNTIME_ROOT / ".local" / "forward" / "forward-evidence.sqlite3"
 AUDIT_READ_MODEL_CONTRACT = READ_MODEL_CONTRACTS["audit"]
 AUDIT_LOCAL_BUNDLE_LIMIT_BYTES = AUDIT_FIRST_PAGE_LIMIT_BYTES + 3 * AUDIT_DETAIL_LIMIT_BYTES + 256
-REMOTE_BASE_URL = "https://aurum-signal-room.yiyousiow1234.workers.dev"
-WORKER_NAME = "aurum-signal-room"
-RELEASE_CONTROL_USER_AGENT = "XAUUSD-Forecaster-Release-Control/1"
+REMOTE_BASE_URL = "https://xauusd-news.yiyousiow1234.workers.dev"
+WORKER_NAME = "xauusd-news"
+RELEASE_CONTROL_USER_AGENT = "xauusd-news-Release-Control/1"
 REMOTE_URLS = {route: REMOTE_BASE_URL + route for route in BUILDERS}
 REMOTE_URLS["/api/news-evidence"] = REMOTE_BASE_URL + "/api/news-evidence"
 OBSERVE_ATTEMPT_PATTERN = re.compile(r"^[0-9a-f]{32}$")

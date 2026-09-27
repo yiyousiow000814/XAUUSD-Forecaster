@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from xauusd_forecaster import Quote, read_xautk002
+from xauusd_news import Quote, read_xautk002
 
 
 UTC = timezone.utc

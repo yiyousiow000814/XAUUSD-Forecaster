@@ -22,7 +22,7 @@ if ([Environment]::GetEnvironmentVariable('XAUUSD_ISOLATED_CONFIGURATION', 'Proc
 if (-not $BuildOnly) {
     $profileRoot = [Environment]::GetFolderPath('UserProfile')
     $authorityRoot = [System.IO.Path]::GetFullPath((Join-Path $profileRoot (
-        'XAUUSD-Forecaster-runtime\.local\forward'
+        'xauusd-news-runtime\.local\forward'
     )))
     if ([string]::IsNullOrWhiteSpace($StateRoot)) {
         throw 'StateRoot is required for the production quote bridge.'

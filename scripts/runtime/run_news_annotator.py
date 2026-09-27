@@ -20,7 +20,7 @@ from typing import Callable
 MODULE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(MODULE_ROOT))
 
-from xauusd_forecaster.news.scheduler.runtime import (
+from xauusd_news.news.scheduler.runtime import (
     PRODUCTION_LANES_PER_ACCOUNT,
     _execute_job,
     _execute_job_safely,
@@ -28,23 +28,23 @@ from xauusd_forecaster.news.scheduler.runtime import (
     run_scheduled_batch,
 )
 
-from xauusd_forecaster.news.brief.runtime import (
+from xauusd_news.news.brief.runtime import (
     run_daily_brief_batch,
 )
 
-from xauusd_forecaster.news.annotation.product import (
+from xauusd_news.news.annotation.product import (
     DEFAULT_GEMINI_MODEL,
     FALLBACK_GEMINI_MODEL,
     IMPACT_PROMPT_VERSION,
     PROMPT_VERSION,
     annotate_pending_news,
 )
-from xauusd_forecaster.news.brief.product import (
+from xauusd_news.news.brief.product import (
     brief_dates_to_process,
     update_daily_brief,
 )
-from xauusd_forecaster.evidence.ledger import ForwardLedger  # noqa: E402
-from xauusd_forecaster.news.scheduler.state import (
+from xauusd_news.evidence.ledger import ForwardLedger  # noqa: E402
+from xauusd_news.news.scheduler.state import (
     ApiCredential,
     LIVE_LANE,
     ROUTINE_POOL,
@@ -55,11 +55,11 @@ from xauusd_forecaster.news.scheduler.state import (
     scheduler_counts,
     sync_pending_jobs,
 )
-from xauusd_forecaster.runtime.health import (
+from xauusd_news.runtime.health import (
     RuntimeHeartbeatPulse,
     write_runtime_heartbeat,
 )
-from xauusd_forecaster.runtime_paths import (  # noqa: E402
+from xauusd_news.runtime_paths import (  # noqa: E402
     authoritative_runtime_root,
     runtime_child_path,
 )

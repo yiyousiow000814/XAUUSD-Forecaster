@@ -6,31 +6,31 @@ from datetime import UTC, datetime
 
 import pytest
 
-import xauusd_forecaster.assistant.agent as assistant_agent_module
-from xauusd_forecaster.assistant.agent import DEFAULT_ASSISTANT_AGENT_BUDGETS
-from xauusd_forecaster.assistant.agent import AssistantAgentContractError
-from xauusd_forecaster.assistant.agent import AssistantAgentRequest
-from xauusd_forecaster.assistant.agent import AssistantModelTurn
-from xauusd_forecaster.assistant.agent import CapacityRoutedAssistantModelInvoker
-from xauusd_forecaster.assistant.agent import RoutedAssistantModelTurn
-from xauusd_forecaster.assistant.agent import configured_assistant_agent_budgets
-from xauusd_forecaster.assistant.agent import decode_gemini_assistant_turn
-from xauusd_forecaster.assistant.agent import decode_ollama_assistant_turn
-from xauusd_forecaster.assistant.agent import ollama_openai_payload
-from xauusd_forecaster.assistant.agent import run_bounded_assistant_agent
-from xauusd_forecaster.assistant.capacity import AssistantCapacityPolicy
-from xauusd_forecaster.assistant.routing import GOOGLE_GENERATIVE_LANGUAGE
-from xauusd_forecaster.assistant.routing import ModelCapacityClass
-from xauusd_forecaster.assistant.routing import ModelProfile
-from xauusd_forecaster.assistant.tools import AssistantToolActor
-from xauusd_forecaster.assistant.tools import AssistantToolCall
-from xauusd_forecaster.assistant.tools import AssistantToolCapability
-from xauusd_forecaster.assistant.tools import AssistantToolDefinition
-from xauusd_forecaster.assistant.tools import AssistantToolRegistry
-from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.ai.model_gateway import ModelRequestUsage
-from xauusd_forecaster.news.scheduler.state import PREEMPTIBLE_POOL
-from xauusd_forecaster.news.scheduler.state import ApiCredential
+import xauusd_news.assistant.agent as assistant_agent_module
+from xauusd_news.assistant.agent import DEFAULT_ASSISTANT_AGENT_BUDGETS
+from xauusd_news.assistant.agent import AssistantAgentContractError
+from xauusd_news.assistant.agent import AssistantAgentRequest
+from xauusd_news.assistant.agent import AssistantModelTurn
+from xauusd_news.assistant.agent import CapacityRoutedAssistantModelInvoker
+from xauusd_news.assistant.agent import RoutedAssistantModelTurn
+from xauusd_news.assistant.agent import configured_assistant_agent_budgets
+from xauusd_news.assistant.agent import decode_gemini_assistant_turn
+from xauusd_news.assistant.agent import decode_ollama_assistant_turn
+from xauusd_news.assistant.agent import ollama_openai_payload
+from xauusd_news.assistant.agent import run_bounded_assistant_agent
+from xauusd_news.assistant.capacity import AssistantCapacityPolicy
+from xauusd_news.assistant.routing import GOOGLE_GENERATIVE_LANGUAGE
+from xauusd_news.assistant.routing import ModelCapacityClass
+from xauusd_news.assistant.routing import ModelProfile
+from xauusd_news.assistant.tools import AssistantToolActor
+from xauusd_news.assistant.tools import AssistantToolCall
+from xauusd_news.assistant.tools import AssistantToolCapability
+from xauusd_news.assistant.tools import AssistantToolDefinition
+from xauusd_news.assistant.tools import AssistantToolRegistry
+from xauusd_news.evidence.ledger import ForwardLedger
+from xauusd_news.ai.model_gateway import ModelRequestUsage
+from xauusd_news.news.scheduler.state import PREEMPTIBLE_POOL
+from xauusd_news.news.scheduler.state import ApiCredential
 
 
 NOW = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)

@@ -6,11 +6,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from xauusd_forecaster.news.scheduler.state import apply_retry_schedule_override
-from xauusd_forecaster.news.scheduler.state import enqueue_job
-from xauusd_forecaster.news.scheduler.state import install_scheduler_schema
-from xauusd_forecaster.runtime.operational_health import extend_with_component_alerts
-from xauusd_forecaster.runtime.operational_health import scheduler_health_snapshot
+from xauusd_news.news.scheduler.state import apply_retry_schedule_override
+from xauusd_news.news.scheduler.state import enqueue_job
+from xauusd_news.news.scheduler.state import install_scheduler_schema
+from xauusd_news.runtime.operational_health import extend_with_component_alerts
+from xauusd_news.runtime.operational_health import scheduler_health_snapshot
 
 
 NOW = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
@@ -847,7 +847,7 @@ def test_daily_brief_deferral_keeps_the_underlying_failure_code() -> None:
 
 
 def test_component_alert_preserves_structured_semantic_reason_codes() -> None:
-    from xauusd_forecaster.dashboard.health_projection import semantic_pipeline_component
+    from xauusd_news.dashboard.health_projection import semantic_pipeline_component
     stale = semantic_pipeline_component({
         "observed_at": (NOW - timedelta(days=2)).isoformat(),
         "heartbeat_at": (NOW - timedelta(days=2)).isoformat(), "status": "UNHEALTHY",

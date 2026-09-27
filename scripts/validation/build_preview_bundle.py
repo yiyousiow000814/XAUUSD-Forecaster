@@ -19,19 +19,19 @@ from zoneinfo import ZoneInfo
 
 MODULE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(MODULE_ROOT))
-package = types.ModuleType("xauusd_forecaster")
-package.__path__ = [str(MODULE_ROOT / "xauusd_forecaster")]
-sys.modules["xauusd_forecaster"] = package
-factor_coverage = importlib.import_module("xauusd_forecaster.factors").factor_coverage
-model_limits = importlib.import_module('xauusd_forecaster.ai.model_limits')
-resource_contracts = importlib.import_module("xauusd_forecaster.dashboard.resource_contracts")
-dashboard_payloads = importlib.import_module("xauusd_forecaster.dashboard.payloads")
+package = types.ModuleType("xauusd_news")
+package.__path__ = [str(MODULE_ROOT / "xauusd_news")]
+sys.modules["xauusd_news"] = package
+factor_coverage = importlib.import_module("xauusd_news.factors").factor_coverage
+model_limits = importlib.import_module('xauusd_news.ai.model_limits')
+resource_contracts = importlib.import_module("xauusd_news.dashboard.resource_contracts")
+dashboard_payloads = importlib.import_module("xauusd_news.dashboard.payloads")
 assess_news_semantic_eligibility = importlib.import_module(
-    'xauusd_forecaster.news.semantics.time'
+    'xauusd_news.news.semantics.time'
 ).assess_news_semantic_eligibility
 
 
-DEFAULT_SOURCE = "https://aurum-signal-room.yiyousiow1234.workers.dev"
+DEFAULT_SOURCE = "https://xauusd-news.yiyousiow1234.workers.dev"
 SERIES_BY_DOMAIN = {
     "利率": "DGS2",
     "实际收益率": "DFII10",

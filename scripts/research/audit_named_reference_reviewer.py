@@ -15,17 +15,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from xauusd_forecaster.news.annotation.product import DEFAULT_GEMMA_MODEL
-from xauusd_forecaster.news.annotation.product import generate_metered_response
-from xauusd_forecaster.news.retrieval.named_reference_benchmark import REVIEW_CONTRACT_VERSION
-from xauusd_forecaster.news.retrieval.named_reference_benchmark import benchmark_manifest_sha256
-from xauusd_forecaster.news.retrieval.named_reference_benchmark import decode_named_reference_review
-from xauusd_forecaster.news.retrieval.named_reference_benchmark import load_named_reference_benchmark
-from xauusd_forecaster.news.retrieval.named_reference_benchmark import named_reference_review_payload
-from xauusd_forecaster.news.retrieval.named_reference_benchmark import score_named_reference_runs
-from xauusd_forecaster.news.scheduler.state import configured_api_credentials
-from xauusd_forecaster.news.scheduler.state import install_scheduler_schema
-from xauusd_forecaster.news.scheduler.model_gateway import SchedulerModelAccountant
+from xauusd_news.news.annotation.product import DEFAULT_GEMMA_MODEL
+from xauusd_news.news.annotation.product import generate_metered_response
+from xauusd_news.news.retrieval.named_reference_benchmark import REVIEW_CONTRACT_VERSION
+from xauusd_news.news.retrieval.named_reference_benchmark import benchmark_manifest_sha256
+from xauusd_news.news.retrieval.named_reference_benchmark import decode_named_reference_review
+from xauusd_news.news.retrieval.named_reference_benchmark import load_named_reference_benchmark
+from xauusd_news.news.retrieval.named_reference_benchmark import named_reference_review_payload
+from xauusd_news.news.retrieval.named_reference_benchmark import score_named_reference_runs
+from xauusd_news.news.scheduler.state import configured_api_credentials
+from xauusd_news.news.scheduler.state import install_scheduler_schema
+from xauusd_news.news.scheduler.model_gateway import SchedulerModelAccountant
 
 
 DEFAULT_FIXTURE = ROOT / "tests" / "fixtures" / "news_named_reference_benchmark.json"

@@ -11,7 +11,7 @@
 Run Python scripts by their repository-relative path, for example
 `python scripts/runtime/run_forward_collector.py --help`. Their code root is
 resolved from the entrypoint location; data-root and CLI contracts are unchanged.
-Reusable business behavior belongs in `xauusd_forecaster`, not another script.
+Reusable business behavior belongs in `xauusd_news`, not another script.
 
 Four Windows deployment files intentionally remain at this directory's root:
 `run_main_services.ps1`, `main_services_launcher.vbs`, `main_runtime.ps1` and

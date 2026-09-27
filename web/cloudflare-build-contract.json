@@ -2,7 +2,7 @@
   "schema_version": "cloudflare-production-build-v3",
   "source": {
     "provider": "github",
-    "repository": "yiyousiow000814/XAUUSD-Forecaster",
+    "repository": "yiyousiow000814/xauusd-news",
     "production_branch": "main",
     "root_directory": "/web",
     "path_includes": [

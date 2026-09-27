@@ -122,7 +122,7 @@ health, model factor aggregation, and Dashboard archive readers omitted
 `source`. This could make one cluster simultaneously appear pending, completed,
 or absent depending on the reader.
 
-The ordering now lives in `xauusd_forecaster.news_identity` and all sibling
+The ordering now lives in `xauusd_news.news_identity` and all sibling
 readers use it. A family regression deliberately orders `source_item_id`
 opposite to `source` and proves pending, title, and completed readers agree.
 

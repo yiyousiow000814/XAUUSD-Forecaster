@@ -127,7 +127,7 @@ def _guard(event, arguments):
         if writing and not target.is_relative_to(FIXTURE_ROOT) and str(target) != os.devnull:
             raise RuntimeError('FIXTURE_WRITE_TARGET_DENIED')
         if (not target.is_relative_to(FIXTURE_ROOT) and any(part.casefold() in {
-                'xauusd-forecaster', 'xauusd-forecaster-runtime', 'xauusd-forecaster.local',
+                'xauusd-news', 'xauusd-news-runtime', 'xauusd-news.local',
             } for part in target.parts)):
             raise RuntimeError('FIXTURE_PRODUCTION_READ_DENIED')
 
@@ -330,7 +330,7 @@ def _mapped_urlopen(url, data=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, *, c
                 '/api/audit-briefs', '/api/audit-stories', '/api/audit-decisions', '/api/news-evidence'}
             and re.fullmatch('__release_observe=[0-9a-f]{32}' + (
                 '&mode=all&limit=1' if original.path == '/api/news-evidence' else ''), original.query)
-            and lower.get('cloudflare-workers-version-overrides') == 'aurum-signal-room="' +
+            and lower.get('cloudflare-workers-version-overrides') == 'xauusd-news="' +
                 DOCUMENT['values'].get('TARGET_WORKER_VERSION', '') + '"'
             and lower.get('cache-control') == 'no-cache' and lower.get('pragma') == 'no-cache')
         if exact != 1 and not observe:
@@ -421,5 +421,5 @@ elif DOCUMENT.get('legacy_configuration_revision'):
         creationflags=subprocess.CREATE_NO_WINDOW).stdout.strip()
     if observed == DOCUMENT['legacy_configuration_revision']:
         sys.path.insert(0, str(code_root))
-        import xauusd_forecaster.news.scheduler.state as news_scheduler
+        import xauusd_news.news.scheduler.state as news_scheduler
         news_scheduler._runtime_environment_value = environment_value

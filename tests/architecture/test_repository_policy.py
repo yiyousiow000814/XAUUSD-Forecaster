@@ -186,14 +186,3 @@ def test_admits_only_exact_main_direct_build_contract(tmp_path: Path) -> None:
         changed["source"]["production_branch"] = branch
         write(tmp_path, "web/cloudflare-build-contract.json", json.dumps(changed))
         assert boundaries(tmp_path)
-
-
-def test_repository_rename_bridge_preserves_deployment_restrictions(tmp_path: Path) -> None:
-    for repository, allowed in (("yiyousiow000814/xauusd-news", True), ("someone/other", False)):
-        changed = json.loads(VALID_BUILD_CONTRACT)
-        changed["source"]["repository"] = repository
-        write(tmp_path, "web/cloudflare-build-contract.json", json.dumps(changed))
-        assert (not boundaries(tmp_path)) == allowed
-        changed["source"]["production_branch"] = "feature"
-        write(tmp_path, "web/cloudflare-build-contract.json", json.dumps(changed))
-        assert boundaries(tmp_path)

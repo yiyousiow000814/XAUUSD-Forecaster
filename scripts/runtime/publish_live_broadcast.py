@@ -12,7 +12,7 @@ from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(MODULE_ROOT))
 
-from xauusd_forecaster.live_broadcast import public_live_state, publish_live_state
+from xauusd_news.live_broadcast import public_live_state, publish_live_state
 
 
 def main() -> int:

@@ -118,7 +118,7 @@ def compare_news_queries(database, api, instant, *, deadline_seconds=30, row_bud
     This proves query/display equivalence, not a historical HTTP timeout.
     The legacy SQL is retained as a bounded oracle; interruption is not equality.
     """
-    from xauusd_forecaster.dashboard.news_resources import _durable_news_evidence_rows
+    from xauusd_news.dashboard.news_resources import _durable_news_evidence_rows
 
     started = time.monotonic()
     captured = {}
@@ -259,14 +259,14 @@ def validate_copy_paths(database, output, *, isolated_runtime_copy=False):
         raise ValueError("ISOLATED_COPY_PATH_REQUIRED")
     if isolated_runtime_copy:
         sys.path.insert(0, str(ROOT))
-        from xauusd_forecaster.runtime_paths import isolated_runtime_configuration
+        from xauusd_news.runtime_paths import isolated_runtime_configuration
         configuration = isolated_runtime_configuration()
         if configuration is None or database != (
                 Path(configuration["runtime_root"]) / ".local/forward/forward-evidence.sqlite3"):
             raise ValueError("ISOLATED_COPY_PATH_REQUIRED")
         return
     if (database.parent.name != "rehearsal" or database.name != "production-online.sqlite3"
-            or any(part.lower() in {".local", "forward", "xauusd-forecaster-runtime"}
+            or any(part.lower() in {".local", "forward", "xauusd-news-runtime"}
                    for part in database.parts)):
         raise ValueError("ISOLATED_COPY_PATH_REQUIRED")
 
@@ -362,7 +362,7 @@ def main():
         report["historical_failure_evidence_sha256"] = historical_digest
     sys.path.insert(0, str(ROOT))
     api, sync = load("recovery_copy_api", "run_dashboard_api.py"), load("recovery_copy_sync", "run_dashboard_sync.py")
-    from xauusd_forecaster.news_projection import receipt_payload_hash
+    from xauusd_news.news_projection import receipt_payload_hash
     node = shutil.which("node")
     if not node:
         raise RuntimeError("NODE_UNAVAILABLE")

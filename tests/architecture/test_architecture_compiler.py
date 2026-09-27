@@ -1122,8 +1122,8 @@ def test_current_news_worker_audit_view_keeps_independent_transports_and_dynamic
     assert not any(row['source'].startswith('web/') and row['resolution'] not in {'UNKNOWN', 'LITERAL'} for row in edges)
 
     api = 'scripts/runtime/run_dashboard_api.py::'
-    news = 'xauusd_forecaster/dashboard/news_resources.py::'
-    status = 'xauusd_forecaster/dashboard/status_resources.py::'
+    news = 'xauusd_news/dashboard/news_resources.py::'
+    status = 'xauusd_news/dashboard/status_resources.py::'
     assert {api + 'Handler.do_GET', api + 'main', status + '_optional_resource_payload'} <= roots
     assert {news + name for name in ('_build_news_projection_source',
         '_news_projection_source_for_request', '_finish_news_projection_source_build',

@@ -14,26 +14,26 @@ from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(MODULE_ROOT))
 
-from xauusd_forecaster.evidence.ledger import ForwardLedger  # noqa: E402
-from xauusd_forecaster.maintenance import (  # noqa: E402
+from xauusd_news.evidence.ledger import ForwardLedger  # noqa: E402
+from xauusd_news.maintenance import (  # noqa: E402
     DailyBackupOwner,
     apply_backup_retention,
     archive_completed_quote_days,
     ensure_daily_forward_backup,
 )
-from xauusd_forecaster.runtime.health import (
+from xauusd_news.runtime.health import (
     RuntimeHeartbeatPulse,
     write_runtime_heartbeat,
 )
-from xauusd_forecaster.runtime_paths import (  # noqa: E402
+from xauusd_news.runtime_paths import (  # noqa: E402
     authoritative_runtime_root,
     runtime_child_path,
 )
-from xauusd_forecaster.sqlite_wal import (  # noqa: E402
+from xauusd_news.sqlite_wal import (  # noqa: E402
     ForwardWalCheckpointOwner,
 )
-from xauusd_forecaster.news.collection.runtime import NewsCollectionOwner  # noqa: E402
-from xauusd_forecaster.news.collection.intake import collect_official_news
+from xauusd_news.news.collection.runtime import NewsCollectionOwner  # noqa: E402
+from xauusd_news.news.collection.intake import collect_official_news
 
 def main() -> int:
     parser = argparse.ArgumentParser()

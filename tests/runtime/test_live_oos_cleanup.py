@@ -5,9 +5,9 @@ import pytest
 from tests.fixtures.dashboard_news_fixtures import _append_basic_annotation
 
 from scripts.maintenance.purge_live_oos import purge
-from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.news.semantics.evidence import event_evidence_rows_from_connection
-from xauusd_forecaster.dashboard.status_resources import _dashboard_payload
+from xauusd_news.evidence.ledger import ForwardLedger
+from xauusd_news.news.semantics.evidence import event_evidence_rows_from_connection
+from xauusd_news.dashboard.status_resources import _dashboard_payload
 
 
 def test_cleanup_preserves_news_and_is_restartable(tmp_path):

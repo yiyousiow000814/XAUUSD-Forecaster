@@ -15,7 +15,7 @@ import stat
 import sys
 import time
 
-configuration_owner = Path(__file__).resolve().parents[2] / "xauusd_forecaster/runtime_paths.py"
+configuration_owner = Path(__file__).resolve().parents[2] / "xauusd_news/runtime_paths.py"
 spec = importlib.util.spec_from_file_location("quote_input_configuration", configuration_owner)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)

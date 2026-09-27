@@ -33,7 +33,7 @@ def _policy(root):
             or set(packages) != {'ai', 'assistant', 'dashboard', 'decision', 'evidence', 'news', 'runtime', 'training'}):
         raise ValueError('ARCHITECTURE_IMPORT_POLICY_PACKAGES_INVALID')
     for area, path in packages.items():
-        if path != 'xauusd_forecaster/' + area:
+        if path != 'xauusd_news/' + area:
             raise ValueError('ARCHITECTURE_IMPORT_POLICY_PACKAGES_INVALID')
     exceptions, shims = {}, {}
     for field, output in [('script_imports', exceptions), ('legacy_shims', shims)]:
@@ -52,7 +52,7 @@ def _policy(root):
                 key = pair
                 paths = pair
             else:
-                paths = tuple(_relative(row[key], 'xauusd_forecaster', suffix='.py') for key in ('path', 'owner'))
+                paths = tuple(_relative(row[key], 'xauusd_news', suffix='.py') for key in ('path', 'owner'))
                 key = paths[0]
             if key in output or paths[0] == paths[1]:
                 raise ValueError('ARCHITECTURE_IMPORT_POLICY_DECLARATION_INVALID')
@@ -127,9 +127,9 @@ def _requests(tree, relative):
 def check_architecture_imports(root):
     root = root.resolve()
     packages, exceptions, shims = _policy(root)
-    if any(not (root / name).is_dir() for name in ('xauusd_forecaster', 'scripts')):
+    if any(not (root / name).is_dir() for name in ('xauusd_news', 'scripts')):
         raise ValueError('ARCHITECTURE_IMPORT_SOURCE_MISSING')
-    paths = sorted((root / 'xauusd_forecaster').rglob('*.py')) + sorted((root / 'scripts').rglob('*.py'))
+    paths = sorted((root / 'xauusd_news').rglob('*.py')) + sorted((root / 'scripts').rglob('*.py'))
     if not paths:
         raise ValueError('ARCHITECTURE_IMPORT_SOURCE_MISSING')
     violations, dynamic = [], []
@@ -153,7 +153,7 @@ def check_architecture_imports(root):
                 dynamic.append(dict(path=relative, line=line, requested_module=target,
                                     syntax=spelling, runtime_resolution='UNKNOWN'))
                 continue
-            if relative.startswith('xauusd_forecaster/') and _within(target, 'scripts'):
+            if relative.startswith('xauusd_news/') and _within(target, 'scripts'):
                 reject(line, 'ARCHITECTURE_PACKAGE_IMPORTS_SCRIPT', target)
             requested = target
             if relative.startswith('scripts/'):

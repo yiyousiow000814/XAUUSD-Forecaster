@@ -21,7 +21,7 @@ from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(MODULE_ROOT))
 
-from xauusd_forecaster.dashboard.sync.resources import (
+from xauusd_news.dashboard.sync.resources import (
     DEFERRED_PROJECTION_CONTRACT,
     DEFERRED_PROJECTION_ROUTES,
     NEWS_EVIDENCE_WRITE_BATCH_ITEMS,
@@ -64,7 +64,7 @@ from xauusd_forecaster.dashboard.sync.resources import (
 HEAVY_RESOURCES_PER_CYCLE = 1
 
 
-from xauusd_forecaster.dashboard.resource_contracts import (
+from xauusd_news.dashboard.resource_contracts import (
     REMOTE_PAYLOAD_LIMIT_BYTES,
     REMOTE_DAILY_BRIEF_LIMIT,
     REMOTE_MARKET_CANDLE_LIMIT,
@@ -83,11 +83,11 @@ from xauusd_forecaster.dashboard.resource_contracts import (
     audit_briefs_snapshot,
     audit_stories_snapshot,
 )
-from xauusd_forecaster.dashboard.payloads import (
+from xauusd_news.dashboard.payloads import (
     audit_stories_payload,
     critical_status_payload,
 )
-from xauusd_forecaster.news_projection import (
+from xauusd_news.news_projection import (
     NEWS_DETAIL_BATCH_ITEMS,
     NEWS_DETAIL_BATCH_LIMIT_BYTES,
     NEWS_INDEX_BATCH_LIMIT_BYTES,
@@ -95,18 +95,18 @@ from xauusd_forecaster.news_projection import (
     NewsProjectionGeneration,
     NEWS_INDEX_BATCH_ITEMS as NEWS_WRITE_BATCH_ITEMS,
 )
-from xauusd_forecaster.runtime_paths import (
+from xauusd_news.runtime_paths import (
     authoritative_runtime_root,
     runtime_child_path,
 )
-from xauusd_forecaster.dashboard.sync.progress import (
+from xauusd_news.dashboard.sync.progress import (
     OPERATOR_RETRY_COMMANDS_PER_CYCLE,
     RUNTIME_STATE_ROOT_KEY,
     AllTargetsRejected,
     SyncResourceResults,
     sync_error_code,
 )
-from xauusd_forecaster.dashboard.sync.transport import (
+from xauusd_news.dashboard.sync.transport import (
     LOCAL_STATUS_TIMEOUT_SECONDS,
     RemoteInvariantViolation,
     _get_json,

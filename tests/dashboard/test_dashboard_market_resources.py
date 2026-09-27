@@ -4,8 +4,8 @@ import gzip
 import json
 from datetime import datetime, timedelta, timezone
 
-from xauusd_forecaster.dashboard import market_resources as module
-from xauusd_forecaster.evidence.ledger import ForwardLedger
+from xauusd_news.dashboard import market_resources as module
+from xauusd_news.evidence.ledger import ForwardLedger
 
 
 UTC = timezone.utc

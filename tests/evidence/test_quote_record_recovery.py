@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from xauusd_forecaster.market import JsonlMarketProvider
+from xauusd_news.market import JsonlMarketProvider
 
 
 @pytest.mark.parametrize("compressed", [False, True])

@@ -8,7 +8,7 @@ evidence. The Windows Stable runtime is its only publisher. Public browsers are
 read-only subscribers.
 
 The isolated `aurum-live-broadcast` Worker and its singleton `LiveHub` Durable
-Object own transport and latest-state delivery. `aurum-signal-room` continues to
+Object own transport and latest-state delivery. `xauusd-news` continues to
 own the website and `/api/status` fallback. Broadcast failure must not affect
 news collection, evidence persistence, or market collection.
 

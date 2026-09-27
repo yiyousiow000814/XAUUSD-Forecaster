@@ -6,11 +6,11 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 import pytest
-from xauusd_forecaster.dashboard import news_resources
-from xauusd_forecaster.news.annotation.product import ANNOTATION_FAILURE_RECOVERY_VERSION
-from xauusd_forecaster.news.annotation.product import PROMPT_VERSION
-from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.news.scheduler.state import authorize_repairable_annotation_failures
+from xauusd_news.dashboard import news_resources
+from xauusd_news.news.annotation.product import ANNOTATION_FAILURE_RECOVERY_VERSION
+from xauusd_news.news.annotation.product import PROMPT_VERSION
+from xauusd_news.evidence.ledger import ForwardLedger
+from xauusd_news.news.scheduler.state import authorize_repairable_annotation_failures
 from tests.fixtures.dashboard_news_fixtures import (
     _isolated_dashboard_credentials, _basic_annotation_payload, _append_basic_annotation,
 )
@@ -469,7 +469,7 @@ def test_news_capture_uses_fixed_input_scoped_identity_and_real_cursor(tmp_path,
 def test_news_projection_request_starts_one_background_build(monkeypatch, tmp_path) -> None:
     news_resources._NEWS_PROJECTION_CACHE.clear()
     generation = __import__(
-        "xauusd_forecaster.news_projection", fromlist=["build_news_projection_generation"],
+        "xauusd_news.news_projection", fromlist=["build_news_projection_generation"],
     ).build_news_projection_generation(
         [], [], window_start="2026-06-25T00:00:00+00:00",
         watermark="2026-08-24T00:00:00+00:00",
@@ -522,7 +522,7 @@ def test_news_projection_request_starts_one_background_build(monkeypatch, tmp_pa
 def test_news_projection_source_rejects_non_batch_offsets(tmp_path) -> None:
     news_resources._NEWS_PROJECTION_CACHE.clear()
     generation = __import__(
-        "xauusd_forecaster.news_projection", fromlist=["build_news_projection_generation"],
+        "xauusd_news.news_projection", fromlist=["build_news_projection_generation"],
     ).build_news_projection_generation(
         [{
             "source": "example", "source_item_id": str(index), "revision_number": 1,
@@ -953,8 +953,8 @@ def test_news_generation_keeps_latest_window_when_source_grows(tmp_path, monkeyp
 
 
 def test_selected_article_survives_ledger_and_reader_without_rehydrating(tmp_path):
-    from xauusd_forecaster.news.semantics.article_source import PAGE_TEXT_MARKER
-    from xauusd_forecaster.news.collection.content import hydrate_pending_non_fed_content
+    from xauusd_news.news.semantics.article_source import PAGE_TEXT_MARKER
+    from xauusd_news.news.collection.content import hydrate_pending_non_fed_content
     now = datetime.now(UTC).replace(microsecond=0)
     ledger = ForwardLedger(tmp_path / "source.sqlite3", now=now)
     article = "Treasury changed the operation size from two to four billion dollars. " * 8
@@ -1017,8 +1017,8 @@ def test_selected_article_survives_ledger_and_reader_without_rehydrating(tmp_pat
 
 
 def test_prohibited_content_withdraws_canonical_reader_copy_without_deleting_evidence(tmp_path):
-    from xauusd_forecaster.news.annotation.content_policy import skip_prohibited_content, content_is_skipped
-    from xauusd_forecaster.news_projection import news_source_capture_record, stable_news_key
+    from xauusd_news.news.annotation.content_policy import skip_prohibited_content, content_is_skipped
+    from xauusd_news.news_projection import news_source_capture_record, stable_news_key
     now = datetime.now(UTC) - timedelta(seconds=20)
     ledger = ForwardLedger(tmp_path / "skipped.sqlite3", now=now - timedelta(seconds=1))
     body = "Complete source evidence rejected explicitly by the provider. " * 20
@@ -1048,7 +1048,7 @@ def test_prohibited_content_withdraws_canonical_reader_copy_without_deleting_evi
     generation = news_resources._build_news_projection_source(ledger.connection)
     assert len(generation.index_rows) == 1
     assert generation.manifest["withdrawal_count"] == 1
-    from xauusd_forecaster.dashboard.status_resources import _dashboard_payload
+    from xauusd_news.dashboard.status_resources import _dashboard_payload
     payload = _dashboard_payload(ledger.path, optional_resources=frozenset({"audit"}))
     assert [item["source_item_id"] for item in payload["recent_news"]] == ["healthy"]
     keys = news_resources._news_mirror_candidate_keys(ledger.connection,

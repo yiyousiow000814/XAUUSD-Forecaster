@@ -11,7 +11,7 @@ Bootstrap imports five of those definitions from the API script.
 ## Ownership and composition
 
 Move the definitions and their existing mutable globals together into
-`xauusd_forecaster.dashboard.news_resources`. Keep function bodies, persisted
+`xauusd_news.dashboard.news_resources`. Keep function bodies, persisted
 names, schemas, timing, counters, error states, locks and thread targets
 unchanged. The API imports only its eight actual resource dependencies;
 bootstrap imports its five functions directly from the same package owner.

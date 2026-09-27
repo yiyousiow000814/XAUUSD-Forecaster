@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from xauusd_forecaster.ai.model_gateway import ModelRequestAccountant
-from xauusd_forecaster.ai.model_gateway import ModelRequestUsage
+from xauusd_news.ai.model_gateway import ModelRequestAccountant
+from xauusd_news.ai.model_gateway import ModelRequestUsage
 
 
 class CallbackModelAccountant(ModelRequestAccountant):

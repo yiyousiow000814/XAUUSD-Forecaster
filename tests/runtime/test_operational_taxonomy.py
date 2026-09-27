@@ -2,24 +2,24 @@ import ast
 import re
 from pathlib import Path
 
-from xauusd_forecaster.news.brief.product import GENERATION_FAILURE_CODES
-from xauusd_forecaster.news.retrieval.gemini_embeddings import GEMINI_EMBEDDING_FAILURE_CODES
-from xauusd_forecaster.runtime.taxonomy import INTENTIONALLY_UNCORRELATED_FAILURE_CODES
-from xauusd_forecaster.runtime.taxonomy import normalize_operational_event
-from xauusd_forecaster.runtime.taxonomy import operational_code_index
-from xauusd_forecaster.runtime.taxonomy import operational_code_registry
-from xauusd_forecaster.runtime.taxonomy import validate_operational_code_registry
+from xauusd_news.news.brief.product import GENERATION_FAILURE_CODES
+from xauusd_news.news.retrieval.gemini_embeddings import GEMINI_EMBEDDING_FAILURE_CODES
+from xauusd_news.runtime.taxonomy import INTENTIONALLY_UNCORRELATED_FAILURE_CODES
+from xauusd_news.runtime.taxonomy import normalize_operational_event
+from xauusd_news.runtime.taxonomy import operational_code_index
+from xauusd_news.runtime.taxonomy import operational_code_registry
+from xauusd_news.runtime.taxonomy import validate_operational_code_registry
 
 
 ROOT = Path(__file__).resolve().parents[2]
 FAILURE_CODE_SOURCES = (
-    "xauusd_forecaster/news/retrieval/gemini_embeddings.py",
-    "xauusd_forecaster/news/retrieval/search.py",
-    "xauusd_forecaster/news/scheduler/state.py",
-    "xauusd_forecaster/ai/model_gateway.py",
-    "xauusd_forecaster/news/scheduler/model_gateway.py",
-    "xauusd_forecaster/news/brief/product.py",
-    "xauusd_forecaster/runtime/operational_health.py",
+    "xauusd_news/news/retrieval/gemini_embeddings.py",
+    "xauusd_news/news/retrieval/search.py",
+    "xauusd_news/news/scheduler/state.py",
+    "xauusd_news/ai/model_gateway.py",
+    "xauusd_news/news/scheduler/model_gateway.py",
+    "xauusd_news/news/brief/product.py",
+    "xauusd_news/runtime/operational_health.py",
     "scripts/runtime/run_news_annotator.py",
 )
 FAILURE_FIELDS = {"failure_code", "latest_failure_code", "dominant_failure_code"}
@@ -103,7 +103,7 @@ def test_operational_registry_is_valid_and_all_published_codes_are_registered() 
     assert validate_operational_code_registry() == []
     registered = operational_code_index()
     emitted: set[str] = set()
-    for base in (ROOT / "xauusd_forecaster", ROOT / "scripts", ROOT / "web" / "app"):
+    for base in (ROOT / "xauusd_news", ROOT / "scripts", ROOT / "web" / "app"):
         for path in base.rglob("*"):
             if path.suffix not in {".py", ".ts", ".tsx"}:
                 continue
@@ -148,7 +148,7 @@ def test_python_and_typescript_consume_the_same_registry_revision() -> None:
     registry = operational_code_registry()
     source = (ROOT / "web" / "app" / "_lib" / "operational-health.ts").read_text(encoding="utf-8")
     assert registry["schema_version"] == "operational-code-registry.v1"
-    assert '../../../xauusd_forecaster/operational_codes.json' in source
+    assert '../../../xauusd_news/operational_codes.json' in source
     assert "OPERATIONAL_CODE_REGISTRY_VERSION = operationalCodeRegistry.schema_version" in source
 
 
@@ -181,7 +181,7 @@ def test_disallowed_emitted_severity_fails_visibly_instead_of_hiding_event() -> 
 def test_current_python_operational_emitters_use_allowed_severities() -> None:
     registered = operational_code_index()
     emitted = _emitted_alert_calls(
-        ROOT / "xauusd_forecaster" / "runtime/operational_health.py"
+        ROOT / "xauusd_news" / "runtime/operational_health.py"
     )
     assert emitted
     for codes, severities in emitted:

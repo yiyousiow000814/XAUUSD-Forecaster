@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from xauusd_forecaster.dashboard.payloads import audit_briefs_payload
-from xauusd_forecaster.dashboard.payloads import audit_status_payload
-from xauusd_forecaster.dashboard.payloads import audit_stories_payload
-from xauusd_forecaster.dashboard.payloads import bounded_evidence_window
-from xauusd_forecaster.dashboard.payloads import critical_status_payload
-from xauusd_forecaster.dashboard.payloads import valid_audit_detail_payload
+from xauusd_news.dashboard.payloads import audit_briefs_payload
+from xauusd_news.dashboard.payloads import audit_status_payload
+from xauusd_news.dashboard.payloads import audit_stories_payload
+from xauusd_news.dashboard.payloads import bounded_evidence_window
+from xauusd_news.dashboard.payloads import critical_status_payload
+from xauusd_news.dashboard.payloads import valid_audit_detail_payload
 
 
 def test_critical_status_keeps_fixed_news_totals_without_news_rows() -> None:

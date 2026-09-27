@@ -39,7 +39,7 @@ scope, concise user-facing explanation, and bounded evidence fields. Messages
 may improve without changing the code. A code changes only when the failure
 meaning or required operator response changes.
 
-`xauusd_forecaster/operational_codes.json` is the authoritative machine-readable
+`xauusd_news/operational_codes.json` is the authoritative machine-readable
 catalog. It classifies alert, task-failure, and structured health-reason codes
 with a category, root-cause family, default root/symptom/state role, recovery
 policy, Chinese title, and bounded description. Python and TypeScript consume

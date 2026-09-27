@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.news_projection import (
+from xauusd_news.news_projection import (
     NEWS_PROJECTION_CONTRACT_VERSION,
     split_news_rows,
     receipt_digest,
@@ -37,10 +37,10 @@ def test_receipt_vectors_are_cross_runtime_canonical() -> None:
 
 
 def test_sparse_inventory_matches_complete_batches_and_bounds_fallback(monkeypatch, tmp_path):
-    from xauusd_forecaster.dashboard.sync.news_delta import (
+    from xauusd_news.dashboard.sync.news_delta import (
         make_news_delta, news_delta_baseline, valid_news_delta_baseline,
     )
-    from xauusd_forecaster.dashboard.sync import resources
+    from xauusd_news.dashboard.sync import resources
     from copy import deepcopy
 
     def generation(rows, watermark="2026-09-14T04:00:00+00:00"):
@@ -67,7 +67,7 @@ def test_sparse_inventory_matches_complete_batches_and_bounds_fallback(monkeypat
 
     # Exercise the production transport owner with actual frozen batches and
     # serialization, including an accepted patch whose response was lost.
-    from xauusd_forecaster.dashboard.sync.news_delta import applied_delta_manifest
+    from xauusd_news.dashboard.sync.news_delta import applied_delta_manifest
     applied = applied_delta_manifest(request)
     state = {"projection_state": "CURRENT", "delta_baseline": baseline,
              "last_full_replay_watermark": old.manifest["watermark"]}
@@ -197,7 +197,7 @@ def test_source_capture_preserves_canonical_bytes_across_restart_and_no_work(tmp
 
 
 def test_source_capture_byte_yield_uses_last_accepted_raw_cursor(tmp_path, monkeypatch):
-    import xauusd_forecaster.news_projection as module
+    import xauusd_news.news_projection as module
     records = [_source_record(0), _source_record(1, withdrawal=True), _source_record(2)]
     accepted_bytes = sum(len((compact_json(row) + "\n").encode()) for row in records[:2])
     monkeypatch.setattr(module, "NEWS_SOURCE_CAPTURE_PART_BYTES", accepted_bytes + 1)
@@ -216,7 +216,7 @@ def test_source_capture_byte_yield_uses_last_accepted_raw_cursor(tmp_path, monke
 
 @pytest.mark.parametrize("failure_point", ("part", "before_manifest", "after_manifest"))
 def test_source_capture_atomic_progress_survives_interruption(tmp_path, monkeypatch, failure_point):
-    import xauusd_forecaster.news_projection as module
+    import xauusd_news.news_projection as module
     capture = _capture(tmp_path)
     original = capture._atomic
     interrupted = False
@@ -251,7 +251,7 @@ def test_source_capture_atomic_progress_survives_interruption(tmp_path, monkeypa
 
 
 def test_source_capture_failures_preserve_prefix_and_backoff(tmp_path, monkeypatch):
-    import xauusd_forecaster.news_projection as module
+    import xauusd_news.news_projection as module
     records = [_source_record(i) for i in range(129)]
     capture = _capture(tmp_path)
     accepted = capture.advance(_page_reader(records, []))
@@ -336,8 +336,8 @@ def test_retained_generation_admission_rejects_before_replay(tmp_path, corruptio
 
 
 def test_retained_and_materialized_consumers_share_exact_batch_contract(tmp_path, monkeypatch):
-    from xauusd_forecaster.dashboard.news_resources import _news_projection_batch
-    from xauusd_forecaster.dashboard.sync.resources import _frozen_news_projection_batch
+    from xauusd_news.dashboard.news_resources import _news_projection_batch
+    from xauusd_news.dashboard.sync.resources import _frozen_news_projection_batch
 
     rows = [_source_row(i, withdrawal=i % 3 == 0) for i in range(17)]
     records = [news_source_capture_record(row, [
@@ -369,7 +369,7 @@ def test_retained_and_materialized_consumers_share_exact_batch_contract(tmp_path
 @pytest.mark.parametrize("source_kind", ("original", "derived"))
 def test_retained_artifact_restart_is_exact_and_does_not_materialize_bodies(tmp_path, monkeypatch, corruption, source_kind):
     import gzip
-    from xauusd_forecaster.dashboard import news_resources as api
+    from xauusd_news.dashboard import news_resources as api
     if source_kind == "derived":
         _, capture, records, _, transition = _derived_reader_fixture(tmp_path)
         capture.derive_reader_segment(**transition)
@@ -432,7 +432,7 @@ def test_bootstrap_retained_pin_requires_current_budget_target_and_recoverable_s
     capture.finalize_plan()
     arguments = {
         "capture": capture, "state_file": tmp_path / "candidate.json", "state_root": tmp_path,
-        "origin": "https://candidate-aurum-signal-room.fixture.workers.dev", "max_cycles": 2,
+        "origin": "https://candidate-xauusd-news.fixture.workers.dev", "max_cycles": 2,
     }
     generation = pin_frozen_source_capture(**arguments)
     artifact = tmp_path / "candidate-generation.json.gz"
@@ -440,7 +440,7 @@ def test_bootstrap_retained_pin_requires_current_budget_target_and_recoverable_s
     with pytest.raises(ValueError, match="REPLAY_WORK_BOUND"):
         pin_frozen_source_capture(**{**arguments, "max_cycles": 1})
     with pytest.raises(ValueError, match="TARGET_MISMATCH"):
-        pin_frozen_source_capture(**{**arguments, "origin": "https://other-aurum-signal-room.fixture.workers.dev"})
+        pin_frozen_source_capture(**{**arguments, "origin": "https://other-xauusd-news.fixture.workers.dev"})
     resumed = pin_frozen_source_capture(**{**arguments, "max_cycles": 3})
     assert resumed.manifest == generation.manifest
     assert artifact.read_bytes() == pinned
@@ -450,7 +450,7 @@ def test_bootstrap_retained_pin_requires_current_budget_target_and_recoverable_s
         raise bootstrap_owner.PayloadContractError("test boundary reached")
     monkeypatch.setattr(bootstrap_owner, "_sync_news", observed_sync)
     for candidate, origin, expected in (
-        (generation, "https://other-aurum-signal-room.fixture.workers.dev", "TARGET_MISMATCH"),
+        (generation, "https://other-xauusd-news.fixture.workers.dev", "TARGET_MISMATCH"),
         (capture.open_replay_generation(maximum_batches=8), arguments["origin"], "TARGET_MISMATCH"),
         (resumed, arguments["origin"], "test boundary reached"),
     ):
@@ -631,7 +631,7 @@ def test_source_capture_reader_transition_reconciles_atomic_storage(tmp_path, mo
 
 @pytest.mark.parametrize("bound", ("row", "total", "metadata"))
 def test_source_capture_storage_bounds_never_publish_a_partial_generation(tmp_path, monkeypatch, bound):
-    import xauusd_forecaster.news_projection as module
+    import xauusd_news.news_projection as module
     capture = _capture(tmp_path)
     records = [_source_record(0), _source_record(1)]
     if bound == "row":
@@ -668,7 +668,7 @@ def test_source_capture_unwritable_failure_state_is_not_retryable(tmp_path, monk
 
 
 def test_source_capture_accounts_for_uncommitted_disk_bytes(tmp_path, monkeypatch):
-    import xauusd_forecaster.news_projection as module
+    import xauusd_news.news_projection as module
     capture = _capture(tmp_path)
     capture.advance(_page_reader([_source_record(i) for i in range(129)], []))
     state = capture.read()
@@ -711,7 +711,7 @@ def test_source_capture_declared_directory_rejects_symlink(tmp_path):
 
 @pytest.mark.parametrize("case", ("empty", "withdrawals", "unicode-byte-batches", "item-batches"))
 def test_capture_global_plan_matches_original_generation_across_parts(tmp_path, monkeypatch, case):
-    import xauusd_forecaster.news_projection as module
+    import xauusd_news.news_projection as module
     rows = [
         _source_row(i, withdrawal=(case == "withdrawals" or i % 11 == 0),
                     body=('中\\"\n' * 20_000 if case == "unicode-byte-batches" else "frozen"))
@@ -825,7 +825,7 @@ def test_capture_direct_batch_reader_rejects_corruption_without_source_rebuild(t
 
 
 def test_capture_plan_failure_retains_capture_without_automatic_loop(tmp_path, monkeypatch):
-    import xauusd_forecaster.news_projection as module
+    import xauusd_news.news_projection as module
     capture = _capture(tmp_path)
     complete = capture.advance(_page_reader([_source_record(0)], []))
     monkeypatch.setattr(module, "news_projection_capture_rss", lambda: 513 * 1024 * 1024)
@@ -844,7 +844,7 @@ def test_capture_plan_failure_retains_capture_without_automatic_loop(tmp_path, m
     "before_attempt", "before_plan_commit", "after_plan_commit", "interrupted_hash",
 ))
 def test_capture_plan_publication_and_restart_never_repeat_hash_unbounded(tmp_path, monkeypatch, failure_point):
-    import xauusd_forecaster.news_projection as module
+    import xauusd_news.news_projection as module
     capture = _capture(tmp_path)
     complete = capture.advance(_page_reader([_source_record(0)], []))
     original = capture._atomic

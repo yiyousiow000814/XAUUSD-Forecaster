@@ -5,7 +5,7 @@ import json
 import pytest
 
 from tests.fixtures.model_accounting_fakes import CallbackModelAccountant
-import xauusd_forecaster.assistant.compaction as assistant_compaction
+import xauusd_news.assistant.compaction as assistant_compaction
 
 
 def source_messages() -> list[dict[str, object]]:

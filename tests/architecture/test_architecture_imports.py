@@ -40,7 +40,7 @@ def source(tmp_path):
     policy = deepcopy(json.loads((ROOT / 'architecture/critical-paths.json').read_text())['python_import_policy'])
     policy['script_imports'] = []
     policy['legacy_shims'] = []
-    put(tmp_path, 'xauusd_forecaster/__init__.py', '"""Public facade."""\n')
+    put(tmp_path, 'xauusd_news/__init__.py', '"""Public facade."""\n')
     put(tmp_path, 'scripts/entry.py', '# Runtime entrypoint fixture; never executed.\n')
     save_policy(tmp_path, policy)
     return tmp_path, policy
@@ -52,20 +52,20 @@ def source(tmp_path):
 ])
 def test_package_to_entrypoint_direction_is_enforced_for_the_import_family(checker, source, body):
     root, _ = source
-    put(root, 'xauusd_forecaster/domain.py', body)
+    put(root, 'xauusd_news/domain.py', body)
     result = checker.check_architecture_imports(root)
     assert any(row['reason'] == 'ARCHITECTURE_PACKAGE_IMPORTS_SCRIPT' for row in result['violations'])
-    assert all(row['path'] == 'xauusd_forecaster/domain.py' for row in result['violations'])
+    assert all(row['path'] == 'xauusd_news/domain.py' for row in result['violations'])
 
 
 @pytest.mark.parametrize('body', [
-    'from ..dashboard import owner', 'from xauusd_forecaster.dashboard import owner',
-    'import xauusd_forecaster.dashboard.owner as owner',
+    'from ..dashboard import owner', 'from xauusd_news.dashboard import owner',
+    'import xauusd_news.dashboard.owner as owner',
 ])
 @pytest.mark.parametrize('area', ['news', 'training', 'evidence', 'ai', 'runtime', 'assistant', 'decision'])
 def test_canonical_sibling_packages_cannot_reverse_the_dashboard_direction(checker, source, area, body):
     root, _ = source
-    put(root, f'xauusd_forecaster/{area}/owner.py', body)
+    put(root, f'xauusd_news/{area}/owner.py', body)
     result = checker.check_architecture_imports(root)
     assert any(row['reason'] == 'ARCHITECTURE_DOMAIN_IMPORTS_DASHBOARD' for row in result['violations'])
 
@@ -73,16 +73,16 @@ def test_canonical_sibling_packages_cannot_reverse_the_dashboard_direction(check
 @pytest.mark.parametrize('body', ['from ..assistant import owner', 'import web.worker', 'from web import worker'])
 def test_declared_decision_namespace_cannot_gain_optional_runtime_dependency(checker, source, body):
     root, _ = source
-    put(root, 'xauusd_forecaster/decision/owner.py', body)
+    put(root, 'xauusd_news/decision/owner.py', body)
     assert any(row['reason'] == 'ARCHITECTURE_DECISION_OPTIONAL_DEPENDENCY'
                for row in checker.check_architecture_imports(root)['violations'])
 
 
 def test_similar_names_flat_modules_and_dynamic_requests_do_not_gain_runtime_authority(checker, source):
     root, _ = source
-    put(root, 'xauusd_forecaster/decision/selection.py', 'from .dashboard import owner\n')
-    put(root, 'xauusd_forecaster/news/owner.py',
-        'import scripts_extra\nfrom xauusd_forecaster.dashboard_extra import value\n'
+    put(root, 'xauusd_news/decision/selection.py', 'from .dashboard import owner\n')
+    put(root, 'xauusd_news/news/owner.py',
+        'import scripts_extra\nfrom xauusd_news.dashboard_extra import value\n'
         'import importlib\nimportlib.import_module("scripts.entry")\n'
         'importlib.import_module(selected_by_environment)\n'
         'importlib.import_module(name="scripts.entry")\n'
@@ -102,7 +102,7 @@ def test_similar_names_flat_modules_and_dynamic_requests_do_not_gain_runtime_aut
     ('if configured:\n    install_schema()\n', False),
     ('from .owner import *\n', False),
 ])
-@pytest.mark.parametrize('path', ['xauusd_forecaster/__init__.py', 'xauusd_forecaster/news/__init__.py', 'xauusd_forecaster/news/nested/__init__.py'])
+@pytest.mark.parametrize('path', ['xauusd_news/__init__.py', 'xauusd_news/news/__init__.py', 'xauusd_news/news/nested/__init__.py'])
 def test_initializer_declaration_only_contract_covers_nested_siblings(checker, source, body, valid, path):
     root, _ = source
     put(root, path, body)
@@ -114,16 +114,16 @@ def test_initializer_declaration_only_contract_covers_nested_siblings(checker, s
 
 def test_explicit_whole_file_shim_has_one_owner_and_canonical_callers_cannot_use_it(checker, source):
     root, policy = source
-    put(root, 'xauusd_forecaster/news/owner.py', 'def value():\n    return 1\n')
-    put(root, 'xauusd_forecaster/old.py', 'from .news.owner import value\n')
-    policy['legacy_shims'] = [{'path': 'xauusd_forecaster/old.py',
-        'owner': 'xauusd_forecaster/news/owner.py', 'remove_when': 'All old callers are migrated.'}]
+    put(root, 'xauusd_news/news/owner.py', 'def value():\n    return 1\n')
+    put(root, 'xauusd_news/old.py', 'from .news.owner import value\n')
+    policy['legacy_shims'] = [{'path': 'xauusd_news/old.py',
+        'owner': 'xauusd_news/news/owner.py', 'remove_when': 'All old callers are migrated.'}]
     save_policy(root, policy)
     assert checker.check_architecture_imports(root)['violations'] == []
-    put(root, 'xauusd_forecaster/training/consumer.py', 'from ..old import value\n')
+    put(root, 'xauusd_news/training/consumer.py', 'from ..old import value\n')
     assert any(row['reason'] == 'ARCHITECTURE_CANONICAL_IMPORTS_SHIM'
                for row in checker.check_architecture_imports(root)['violations'])
-    put(root, 'xauusd_forecaster/old.py', 'client = Client()\n')
+    put(root, 'xauusd_news/old.py', 'client = Client()\n')
     assert any(row['reason'] == 'ARCHITECTURE_IMPORT_DECLARATIONS_ONLY'
                for row in checker.check_architecture_imports(root)['violations'])
 
@@ -164,7 +164,7 @@ def test_policy_missing_or_invalid_authority_is_not_a_pass(checker, source, muta
         put(root, 'scripts/missing.py', '# Present\n')
         policy['script_imports'].append(deepcopy(record))
     if mutation == 'no_reason': record['reason'] = ''
-    if mutation == 'wrong_area': policy['canonical_packages']['news'] = 'xauusd_forecaster/news/collection/intake.py'
+    if mutation == 'wrong_area': policy['canonical_packages']['news'] = 'xauusd_news/news/collection/intake.py'
     save_policy(root, policy)
     if mutation == 'no_policy': put(root, 'architecture/critical-paths.json', '{}')
     with pytest.raises(ValueError, match='ARCHITECTURE_(IMPORT_POLICY|INPUT_INVALID)'):
@@ -174,11 +174,11 @@ def test_policy_missing_or_invalid_authority_is_not_a_pass(checker, source, muta
 def test_actual_repository_policy_and_required_workflow(checker):
     result = checker.check_architecture_imports(ROOT)
     assert result['violations'] == []
-    assert result['files'] == len(list((ROOT / 'xauusd_forecaster').rglob('*.py'))) + len(list((ROOT / 'scripts').rglob('*.py')))
+    assert result['files'] == len(list((ROOT / 'xauusd_news').rglob('*.py'))) + len(list((ROOT / 'scripts').rglob('*.py')))
     preview = next(row for row in result['dynamic_requests']
                    if row['path'] == 'scripts/validation/build_preview_bundle.py'
-                   and row['requested_module'] == 'xauusd_forecaster.dashboard.resource_contracts')
-    assert preview['requested_module'] == 'xauusd_forecaster.dashboard.resource_contracts'
+                   and row['requested_module'] == 'xauusd_news.dashboard.resource_contracts')
+    assert preview['requested_module'] == 'xauusd_news.dashboard.resource_contracts'
     assert preview['runtime_resolution'] == 'UNKNOWN'
     workflow = (ROOT / '.github/workflows/architecture.yml').read_text()
     assert 'python scripts/architecture/check_architecture_imports.py' in workflow
@@ -195,7 +195,7 @@ def test_real_copied_cli_is_source_bound_read_only_and_never_imports_the_checked
         'remove_when': 'Tool interface moves together.', 'binding': 'MODULE_REQUEST_ONLY'}]
     # The copied compiler's optional TypeScript helper import is a source request,
     # but the helper need not be installed or executed for this Python-only CLI.
-    put(root, 'xauusd_forecaster/never_execute.py', 'raise RuntimeError("APPLICATION_WAS_EXECUTED")\n')
+    put(root, 'xauusd_news/never_execute.py', 'raise RuntimeError("APPLICATION_WAS_EXECUTED")\n')
     save_policy(root, policy)
     other = tmp_path / 'unrelated-cwd'
     other.mkdir()
@@ -208,10 +208,10 @@ def test_real_copied_cli_is_source_bound_read_only_and_never_imports_the_checked
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)['violations'] == []
     assert {path: path.read_bytes() for path in before} == before
-    put(root, 'xauusd_forecaster/never_execute.py', 'import scripts.entry\n')
+    put(root, 'xauusd_news/never_execute.py', 'import scripts.entry\n')
     result = run()
     assert result.returncode == 1
     assert 'ARCHITECTURE_PACKAGE_IMPORTS_SCRIPT' in result.stdout
-    put(root, 'xauusd_forecaster/never_execute.py', 'def invalid(:\n')
+    put(root, 'xauusd_news/never_execute.py', 'def invalid(:\n')
     result = run()
     assert result.returncode == 1 and 'SyntaxError' in result.stderr

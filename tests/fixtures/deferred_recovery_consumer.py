@@ -26,7 +26,7 @@ def main():
     if not marker.is_file() or json.loads(marker.read_text(encoding="utf-8")) != {"root": str(runtime)}:
         raise ValueError("ISOLATED_CONSUMER_OWNERSHIP_REQUIRED")
     if runtime.is_relative_to(ROOT) or any(part.lower() in {
-        "xauusd-forecaster-runtime", "xauusd-forecaster", "xauusd-forecaster.local",
+        "xauusd-news-runtime", "xauusd-news", "xauusd-news.local",
     } for part in runtime.parts):
         raise ValueError("ISOLATED_CONSUMER_PRODUCTION_PATH_DENIED")
     provider = urlsplit(fixture.fixture_provider)

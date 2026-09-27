@@ -8,7 +8,7 @@ import urllib.parse
 import urllib.request
 
 
-DEFAULT_BASE_URL = "https://aurum-signal-room.yiyousiow1234.workers.dev"
+DEFAULT_BASE_URL = "https://xauusd-news.yiyousiow1234.workers.dev"
 TIMEOUT_SECONDS = 20
 PUBLIC_PATHS = ("/", "/health", "/api/status")
 HUMAN_PATHS = (

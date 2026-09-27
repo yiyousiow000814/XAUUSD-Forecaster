@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from xauusd_forecaster.evidence.ledger import ForwardLedger
+from xauusd_news.evidence.ledger import ForwardLedger
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,7 +30,7 @@ def test_real_current_api_startup_and_health_under_explicit_runtime_authority(
     tmp_path: Path, revision_root: Path, is_current: bool,
 ) -> None:
     home = tmp_path / "home"
-    state = home / "XAUUSD-Forecaster-runtime" / ".local" / "forward"
+    state = home / "xauusd-news-runtime" / ".local" / "forward"
     state.mkdir(parents=True)
     database = state / "forward-evidence.sqlite3"
     ForwardLedger(database).close()

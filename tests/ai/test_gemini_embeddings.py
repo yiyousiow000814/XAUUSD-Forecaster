@@ -9,17 +9,17 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pytest
 
-from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.news.retrieval.gemini_embeddings import GEMINI_EMBEDDING_DIMENSIONS
-from xauusd_forecaster.news.retrieval.gemini_embeddings import GeminiEmbeddingCapacityDeferred
-from xauusd_forecaster.news.retrieval.gemini_embeddings import GeminiEmbeddingClient
-from xauusd_forecaster.news.retrieval.gemini_embeddings import GeminiEmbeddingFailure
-from xauusd_forecaster.news.scheduler.state import ApiCredential
-from xauusd_forecaster.news.scheduler.state import CONTRACT_BACKFILL_WORKLOAD
-from xauusd_forecaster.news.scheduler.state import LIVE_OPERATIONAL_WORKLOAD
-from xauusd_forecaster.news.scheduler.state import ROUTINE_POOL
-from xauusd_forecaster.news.scheduler.state import quota_day
-from xauusd_forecaster.news.scheduler.state import reserve_account_request
+from xauusd_news.evidence.ledger import ForwardLedger
+from xauusd_news.news.retrieval.gemini_embeddings import GEMINI_EMBEDDING_DIMENSIONS
+from xauusd_news.news.retrieval.gemini_embeddings import GeminiEmbeddingCapacityDeferred
+from xauusd_news.news.retrieval.gemini_embeddings import GeminiEmbeddingClient
+from xauusd_news.news.retrieval.gemini_embeddings import GeminiEmbeddingFailure
+from xauusd_news.news.scheduler.state import ApiCredential
+from xauusd_news.news.scheduler.state import CONTRACT_BACKFILL_WORKLOAD
+from xauusd_news.news.scheduler.state import LIVE_OPERATIONAL_WORKLOAD
+from xauusd_news.news.scheduler.state import ROUTINE_POOL
+from xauusd_news.news.scheduler.state import quota_day
+from xauusd_news.news.scheduler.state import reserve_account_request
 
 
 def _client(connection) -> GeminiEmbeddingClient:
@@ -49,7 +49,7 @@ def _seed_embedding_backfill_forecast(connection) -> None:
 def test_embedding_inherits_backfill_admission_without_reserving_or_calling(
     tmp_path, monkeypatch,
 ) -> None:
-    import xauusd_forecaster.news.retrieval.gemini_embeddings as gemini_embeddings
+    import xauusd_news.news.retrieval.gemini_embeddings as gemini_embeddings
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     credential = ApiCredential("account", ROUTINE_POOL, "key", "fingerprint")
@@ -102,7 +102,7 @@ def test_embedding_inherits_backfill_admission_without_reserving_or_calling(
 def test_embedding_batch_reserves_each_content_item_and_uses_asymmetric_tasks(
     tmp_path, monkeypatch,
 ) -> None:
-    import xauusd_forecaster.news.retrieval.gemini_embeddings as gemini_embeddings
+    import xauusd_news.news.retrieval.gemini_embeddings as gemini_embeddings
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     credential = ApiCredential(
@@ -151,8 +151,8 @@ def test_embedding_batch_reserves_each_content_item_and_uses_asymmetric_tasks(
 def test_embedding_batch_moves_to_an_independent_account_when_rpm_is_full(
     tmp_path, monkeypatch,
 ) -> None:
-    import xauusd_forecaster.news.retrieval.gemini_embeddings as gemini_embeddings
-    from xauusd_forecaster.news.scheduler.state import reserve_account_request
+    import xauusd_news.news.retrieval.gemini_embeddings as gemini_embeddings
+    from xauusd_news.news.scheduler.state import reserve_account_request
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     credentials = (
@@ -189,7 +189,7 @@ def test_embedding_batch_moves_to_an_independent_account_when_rpm_is_full(
 def test_embedding_http_429_keeps_bounded_safe_quota_provenance(
     tmp_path, monkeypatch,
 ) -> None:
-    import xauusd_forecaster.news.retrieval.gemini_embeddings as gemini_embeddings
+    import xauusd_news.news.retrieval.gemini_embeddings as gemini_embeddings
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     credential = ApiCredential(
@@ -254,8 +254,8 @@ def test_embedding_http_429_keeps_bounded_safe_quota_provenance(
 def test_embedding_local_admission_has_distinct_failure_code(
     tmp_path, monkeypatch,
 ) -> None:
-    import xauusd_forecaster.news.retrieval.gemini_embeddings as gemini_embeddings
-    from xauusd_forecaster.news.scheduler.state import reserve_account_request
+    import xauusd_news.news.retrieval.gemini_embeddings as gemini_embeddings
+    from xauusd_news.news.scheduler.state import reserve_account_request
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     credential = ApiCredential("full", ROUTINE_POOL, "key", "fingerprint")
@@ -284,7 +284,7 @@ def test_embedding_local_admission_has_distinct_failure_code(
 def test_five_account_daily_cap_blocks_transport_and_next_day_resets(
     tmp_path, monkeypatch,
 ) -> None:
-    import xauusd_forecaster.news.retrieval.gemini_embeddings as gemini_embeddings
+    import xauusd_news.news.retrieval.gemini_embeddings as gemini_embeddings
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     credentials = tuple(
@@ -360,7 +360,7 @@ def test_five_account_daily_cap_blocks_transport_and_next_day_resets(
 def test_first_provider_429_stops_unproven_account_failover(
     tmp_path, monkeypatch,
 ) -> None:
-    import xauusd_forecaster.news.retrieval.gemini_embeddings as gemini_embeddings
+    import xauusd_news.news.retrieval.gemini_embeddings as gemini_embeddings
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     credentials = tuple(
@@ -410,7 +410,7 @@ def test_first_provider_429_stops_unproven_account_failover(
 def test_embedding_provider_failure_family_keeps_distinct_provenance(
     tmp_path, monkeypatch, provider_error, failure_code,
 ) -> None:
-    import xauusd_forecaster.news.retrieval.gemini_embeddings as gemini_embeddings
+    import xauusd_news.news.retrieval.gemini_embeddings as gemini_embeddings
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     credential = ApiCredential("account", ROUTINE_POOL, "key", "fingerprint")

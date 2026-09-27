@@ -7,18 +7,18 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-import xauusd_forecaster.news.annotation.product as annotation
-import xauusd_forecaster.news.brief.product as daily_brief
-from xauusd_forecaster.ai.provider_registry import quota_surface_for_model
-from xauusd_forecaster.evidence.ledger import ForwardLedger
-from xauusd_forecaster.ai.model_gateway import GeminiModelGateway
-from xauusd_forecaster.ai.model_gateway import ModelGatewayCapacityExhausted
-from xauusd_forecaster.ai.model_gateway import ModelGatewayResponseInvalid
-from xauusd_forecaster.news.scheduler.state import ApiCredential
-from xauusd_forecaster.news.scheduler.state import ROUTINE_POOL
-from xauusd_forecaster.news.scheduler.state import enqueue_job
-from xauusd_forecaster.news.scheduler.state import quota_day
-from xauusd_forecaster.news.scheduler.model_gateway import SchedulerModelAccountant
+import xauusd_news.news.annotation.product as annotation
+import xauusd_news.news.brief.product as daily_brief
+from xauusd_news.ai.provider_registry import quota_surface_for_model
+from xauusd_news.evidence.ledger import ForwardLedger
+from xauusd_news.ai.model_gateway import GeminiModelGateway
+from xauusd_news.ai.model_gateway import ModelGatewayCapacityExhausted
+from xauusd_news.ai.model_gateway import ModelGatewayResponseInvalid
+from xauusd_news.news.scheduler.state import ApiCredential
+from xauusd_news.news.scheduler.state import ROUTINE_POOL
+from xauusd_news.news.scheduler.state import enqueue_job
+from xauusd_news.news.scheduler.state import quota_day
+from xauusd_news.news.scheduler.model_gateway import SchedulerModelAccountant
 from tests.fixtures.model_accounting_fakes import CallbackModelAccountant
 
 
@@ -1085,7 +1085,7 @@ def test_routine_only_account_generates_daily_brief(tmp_path, monkeypatch) -> No
 def test_daily_brief_reranks_account_headroom_for_each_date(
     tmp_path, monkeypatch,
 ) -> None:
-    from xauusd_forecaster.news.brief import runtime as runner
+    from xauusd_news.news.brief import runtime as runner
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     credentials = (
@@ -1120,7 +1120,7 @@ def test_annotator_cycle_reconciles_jobs_before_brief_and_reserves_capacity(
     tmp_path, monkeypatch,
 ) -> None:
     from scripts.runtime import run_news_annotator as runner
-    from xauusd_forecaster import runtime_paths
+    from xauusd_news import runtime_paths
 
     calls: list[str] = []
     monkeypatch.setattr(runtime_paths, "PRODUCTION_RUNTIME_STATE_ROOT", tmp_path)
@@ -1155,7 +1155,7 @@ def test_capacity_blocked_brief_leaves_gemma_window_for_retry(
     tmp_path, monkeypatch,
 ) -> None:
     from scripts.runtime import run_news_annotator as runner
-    from xauusd_forecaster import runtime_paths
+    from xauusd_news import runtime_paths
 
     scheduled: list[frozenset[str]] = []
     monkeypatch.setattr(runtime_paths, "PRODUCTION_RUNTIME_STATE_ROOT", tmp_path)
