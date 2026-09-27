@@ -1,6 +1,6 @@
 # Public dashboard design review
 
-## In progress: navigation loading presentation
+## Latest follow-up: navigation loading presentation
 
 Boundary: transient dashboard navigation presentation only. DashboardApp remains
 the owner of route selection, the navigation sequence and load failure recovery.
@@ -13,6 +13,40 @@ The Suspense fallback and empty initial news read reuse a bounded skeleton;
 cached content and explicit failures remain readable. Verify slow import/data,
 success, failure, superseded requests, back/forward, reduced motion and phone
 layout. Source/test review plus deployed Preview rehearsal are required.
+
+Verified application revision: `ae01138f`.
+Preview: https://eeb798c7-aurum-signal-room.yiyousiow1234.workers.dev/.
+Production and Preview builds passed; 124 rendering, content and responsive-scroll
+checks passed. Generated architecture input and document-link checks passed.
+Behavior coverage exercises pending imports, superseded completion, import and
+popstate failure, successful recovery, bounded skeleton markup and retained
+cached news. Final separate inspection followed links through DashboardApp,
+Suspense, the content boundary and AuditView. It found and repaired direct-child
+CSS selectors affected by the retained-view wrapper, preserving overview,
+audit, admin and retry layout rules. The unrelated Assistant waiting animation
+keeps its own animation name. No server/data/release contract changed.
+
+On the immutable Preview, delayed the actual AuditView script request and clicked
+News and Events. The six-row skeleton appeared below the shared header on
+1280x900, 390x844 and 360x800; no horizontal overflow. Inspected the full list's
+outer edges and dividers, including its last row. Reduced-motion emulation
+reported animation `none`. Failed the held request: the original overview
+returned with a working retry action; retry opened the real news page. Phone
+flow included menu open/close, navigation, scrolling, article expand/collapse,
+news page 2, event selection, browser back and return to overview. Desktop
+reinspection confirmed both overview images loaded and the original 1136px
+content width. All request interception, cache and media overrides were cleared.
+
+One React #418 hydration warning was recorded in the first fault-injection
+session. It did not reproduce in a fresh direct news navigation, comparison with
+the preceding Preview, normal overview navigation or normal reload. No cause is
+claimed for this isolated observation; it remains recorded as a limitation rather
+than describing all browser runs as console-clean. A summary selector initially
+missed the actual disclosure and was corrected using its visible headline.
+All task tabs were closed and viewport reset; remaining task sessions: 0.
+Screenshots: `C:/Users/yiyou/AppData/Local/Temp/navigation-skeleton-desktop.png`
+and `C:/Users/yiyou/AppData/Local/Temp/navigation-skeleton-phone.png`.
+Production was not activated.
 
 ## Latest follow-up: overview image arrival
 
