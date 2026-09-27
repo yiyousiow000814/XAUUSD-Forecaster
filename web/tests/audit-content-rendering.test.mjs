@@ -26,7 +26,7 @@ const built = await build({
     resolveDir: fileURLToPath(new URL("..", import.meta.url)), loader: "tsx",
     contents: `import React from 'react';
       import {renderToStaticMarkup} from 'react-dom/server';
-      import AuditView, {NewsRow, StoryCard, PaginationButton} from ${JSON.stringify(viewPath)};
+      import AuditView, {NewsRow, StoryCard, PaginationButton, MacroData} from ${JSON.stringify(viewPath)};
       import PreviewBanner from ${JSON.stringify(fileURLToPath(new URL("../app/_components/PreviewBanner.tsx", import.meta.url)))};
       import LiveRoomView from ${JSON.stringify(fileURLToPath(new URL('../app/_views/LiveRoomView.tsx', import.meta.url)))};
       import {OverviewCards,validOverviewBriefs,validOverviewEvents} from ${JSON.stringify(fileURLToPath(new URL('../app/_components/OverviewNews.tsx', import.meta.url)))};
@@ -36,6 +36,7 @@ const built = await build({
       import {clearDashboardResource,updateDashboardResource} from ${JSON.stringify(resourcesPath)};
       export function renderPreview(payload) { updateDashboardResource("/api/status",()=>payload); return renderToStaticMarkup(React.createElement(PreviewBanner)); }
       export function renderLive(payload) { updateDashboardResource("/api/status",()=>payload); return renderToStaticMarkup(React.createElement(LiveRoomView)); }
+      export function renderMacro(rows) {return renderToStaticMarkup(React.createElement(MacroData,{rows}));}
       export function renderPageButton(props) {return renderToStaticMarkup(React.createElement(PaginationButton,props));}
       export function renderStory(story,expanded=false) {return renderToStaticMarkup(React.createElement(StoryCard,{story,expanded}));}
       export function renderNews(row) { return renderToStaticMarkup(React.createElement(NewsRow,{row})); }
@@ -49,7 +50,7 @@ const built = await build({
 });
 const renderedModule = join(temporaryRoot, "audit.mjs");
 writeFileSync(renderedModule, built.outputFiles[0].contents);
-const { renderPageButton, render, renderNews, renderStatus, renderLive, renderPreview, renderOverview, renderStory, validOverviewBriefs, validOverviewEvents } = await import(pathToFileURL(renderedModule).href);
+const { renderMacro, renderPageButton, render, renderNews, renderStatus, renderLive, renderPreview, renderOverview, renderStory, validOverviewBriefs, validOverviewEvents } = await import(pathToFileURL(renderedModule).href);
 
 test("article row expands publisher provenance with one coherent public label", () => {
   const row = {headline: "政策会议展望", emerging_topic_zh: "政策会议展望", event_type: "macro_preview",
@@ -411,7 +412,7 @@ test("branch coverage keeps compact provenance without a full-width snapshot not
   assert.doesNotMatch(html, /分支构建快照|此页使用分支重新计算/);
   assert.match(html, /<small>分支快照<\/small>/);
   assert.match(html, /<option value="coverage"[^>]*>[^<]*分支快照<\/option>/);
-  assert.match(html, /本页没有覆盖记录/);
+  assert.match(html, /暂无宏观数据/);
   assert.match(html, /所选资源时间[^<]*19:00:00/);
 });
 
@@ -435,5 +436,36 @@ test("audit removes the statistics rules disclosure and uses named pagination ic
     assert.match(button, /<svg[^>]*aria-hidden="true"/);
     assert.match(button, /disabled=""/);
     assert.doesNotMatch(button, new RegExp(`>${label}<`));
+  }
+});
+
+
+test("macro reading displays six observed series without collector or model status", () => {
+  const html = renderMacro([
+    {domain:"利率",value:4.87,unit:"percent",observed_at:"2026-09-24",status:"WARMING_UP"},
+    {domain:"流动性",value:6747704,unit:"USD millions",observed_at:"2026-09-23"},
+    {domain:"风险偏好",value:14.21,unit:"index",observed_at:"2026-09-22"},
+    {domain:"黄金自身",status:"LIVE",action_bearing:true},
+    {domain:"通胀",status:"COLLECTING"},
+  ]);
+  assert.equal((html.match(/<article>/g) ?? []).length, 6);
+  assert.match(html, /4.87<small>%/);
+  assert.match(html, /6.748<small>万亿美元/);
+  assert.match(html, /VIX 波动率指数/);
+  assert.match(html, /美联储广义美元指数/);
+  assert.match(html, /观测日期 2026-09-24/);
+  assert.match(html, /暂无观测数据/);
+  assert.doesNotMatch(html, /黄金自身|通胀|11\/11|等待训练|实时|采集中/);
+  for (const value of [null, NaN, Infinity]) {
+    assert.doesNotMatch(renderMacro([{domain:"利率",value,unit:"percent"}]), /NaN|Infinity|0.00/);
+  }
+  assert.doesNotMatch(renderMacro([{domain:"流动性",value:6747704,unit:"index"}]), /6.748|6747704/);
+});
+
+test("story reading never displays deployment diagnostics including Preview snapshots", () => {
+  for (const status of ["PREVIEW_SNAPSHOT", "DEPLOYMENT_DRIFT", "MATCHED"]) {
+    const html = render("stories", {...baseline, "/api/status": {...baseline["/api/status"],system:{deployment:{status,runtime_git_sha:"abcd1234",expected_git_sha:"abcd1234"}}},"/api/audit-stories":details.stories});
+    assert.doesNotMatch(html, /deployment-proof|版本正常|版本暂时无法核对|版本需要更新|abcd1234/);
+    assert.match(html, /事件脉络/);
   }
 });

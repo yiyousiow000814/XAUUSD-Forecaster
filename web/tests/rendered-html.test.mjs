@@ -1988,7 +1988,6 @@ test("shows single events immediately and keeps later changes in one thread", ()
   assert.doesNotMatch(page, /暂无后续进展/);
   assert.match(page, /先看最新进展，展开查看完整脉络/);
   assert.ok(page.indexOf('className="story-grid"') < page.indexOf('className="theme-streams"'), "events must appear before secondary topic streams");
-  assert.match(page, /版本需要更新/);
   assert.doesNotMatch(page, /还没有形成故事链/);
   assert.doesNotMatch(page, /故事开始/);
   assert.doesNotMatch(page, /TEMPORAL EVENT GRAPH V5/);
@@ -2003,7 +2002,6 @@ test("shows single events immediately and keeps later changes in one thread", ()
 test("accepts split audit resources without status-only system provenance", () => {
   const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   assert.match(page, /system\?: \{ online: boolean/);
-  assert.match(page, /const deployment = payload\?\.system\?\.deployment/);
   assert.doesNotMatch(page, /payload\?\.system\.deployment/);
 });
 
@@ -2043,7 +2041,6 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.audit-tabs-shell \{ display:none; \}/);
   assert.match(css, /\.audit-view-picker \{ position:sticky; top:0;[\s\S]*?grid-template-columns:auto minmax\(0,1fr\)/);
   assert.match(css, /\.audit-main \.audit-intro>div:first-child \{ display:none; \}/);
-  assert.match(css, /\.coverage-card \{ display:grid;[\s\S]*?min-height:0;/);
   assert.match(css, /\.evidence-summary \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); gap:8px/);
   assert.match(css, /\.quota-capacity-grid \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); \}/);
   assert.match(css, /@media \(max-width:430px\)\{[\s\S]*?\.throughput-summary \{ grid-template-columns:1fr; \}/);
@@ -2075,7 +2072,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.graph-modal-backdrop \{ position:fixed; inset:0; z-index:1100/);
   assert.match(css, /\.audit-intro>div:first-child \.eyebrow \{ display:none/);
   assert.match(css, /\.audit-intro h1 \{ font-size:clamp\(32px,9vw,38px\)/);
-  assert.match(css, /\.daily-brief-desk,\s*\.news-search-desk,\s*\.decision-audit,\s*\.shadow-league,\s*\.coverage-grid \{ border-top:1px solid rgba\(17,17,15,\.55\); \}/);
+  assert.match(css, /\.daily-brief-desk,\s*\.news-search-desk,\s*\.decision-audit,\s*\.shadow-league \{ border-top:1px solid rgba\(17,17,15,\.55\); \}/);
 });
 
 test("keeps expanded news readable by progressively revealing technical evidence on phones", () => {
@@ -2970,11 +2967,6 @@ test("standalone mobile audit notices have a top edge while stacked notices shar
 
 test("public reading grids own complete responsive boundaries", () => {
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(css, /\.is-public \.coverage-grid \{[^}]*gap:0;[^}]*border:1px solid var\(--line\)/);
-  assert.match(css, /\.is-public \.coverage-card:nth-child\(n\+4\) \{ border-top:1px solid var\(--line\)/);
-  assert.match(css, /\.is-public \.coverage-card:last-child:nth-child\(3n\+1\) \{ grid-column:span 3; border-right:0/);
-  assert.match(css, /\.is-public \.coverage-card:last-child:nth-child\(3n\+2\) \{ grid-column:span 2; border-right:0/);
-  assert.match(css, /\.is-public \.coverage-card:last-child:nth-child\(n\) \{ grid-column:auto/);
   assert.match(css, /\.is-public \.evidence-summary article:nth-child\(3n\) \{ border-right:0/);
   assert.match(css, /\.is-public \.evidence-summary article:nth-child\(2n\) \{ border-right:0/);
   assert.match(css, /\.is-public \.news-row\+\.news-row \{ border-top:1px solid var\(--line\)/);
@@ -2990,4 +2982,12 @@ test("public reading preserves focus and scrolling while compacting phone rows",
   assert.match(css, /@media\(prefers-reduced-motion:reduce\)[\s\S]*transition:none/);
   assert.match(css, /\.is-public \.news-row:not\(\[open\]\) \.news-row-title small/);
   assert.match(css, /\.is-public \.news-row\[open\] \.news-row-title strong \{ display:block; -webkit-line-clamp:unset/);
+});
+
+
+test("macro observations use independently bordered responsive cards", () => {
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.macro-grid \{ display:grid; grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.macro-grid article \{[^}]*border:1px solid var\(--line\)/);
+  assert.match(css, /@media\(max-width:850px\)[\s\S]*\.macro-grid \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
 });

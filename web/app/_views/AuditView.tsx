@@ -357,11 +357,31 @@ function newsSourceLabel(row: Pick<News, "source" | "category">): string {
   return SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ");
 }
 
-const COVERAGE_STATUS_LABELS: Record<string, string> = {
-  LIVE: "实时",
-  COLLECTING: "监测中",
-  WARMING_UP: "等待数据",
-};
+const MACRO_INDICATORS = [
+  { domain: "利率", label: "利率", detail: "美国 2 年期国债收益率", source: "FRED · DGS2", unit: "percent", displayUnit: "%", divisor: 1, digits: 2 },
+  { domain: "实际收益率", label: "实际收益率", detail: "美国 10 年期 TIPS 收益率", source: "FRED · DFII10", unit: "percent", displayUnit: "%", divisor: 1, digits: 2 },
+  { domain: "美元", label: "美元", detail: "美联储广义美元指数", source: "FRED · DTWEXBGS", unit: "index", displayUnit: "点", divisor: 1, digits: 2 },
+  { domain: "油价", label: "油价", detail: "WTI 原油现货价格", source: "FRED · DCOILWTICO", unit: "USD/barrel", displayUnit: "美元/桶", divisor: 1, digits: 2 },
+  { domain: "流动性", label: "美联储资产", detail: "美联储总资产 · 流动性参考", source: "FRED · WALCL", unit: "USD millions", displayUnit: "万亿美元", divisor: 1_000_000, digits: 3 },
+  { domain: "风险偏好", label: "市场波动", detail: "VIX 波动率指数", source: "FRED · VIXCLS", unit: "index", displayUnit: "点", divisor: 1, digits: 2 },
+] as const;
+
+export function MacroData({ rows }: { rows: Payload["factor_coverage"] }) {
+  return <section className="macro-data" aria-label="宏观数据">
+    <header><h2>宏观数据</h2><p>按各自观测日期展示，用于了解市场背景。</p></header>
+    <div className="macro-grid">{MACRO_INDICATORS.map(indicator => {
+      const row = rows.find(item => item.domain === indicator.domain);
+      const available = typeof row?.value === "number" && Number.isFinite(row.value) && row.unit === indicator.unit;
+      return <article key={indicator.domain}>
+        <h3>{indicator.label}</h3><p>{indicator.detail}</p>
+        <strong className="macro-value">{available ? (row!.value! / indicator.divisor).toFixed(indicator.digits) : "—"}{available && <small>{indicator.displayUnit}</small>}</strong>
+        <div className="macro-observed">{available ? `观测日期 ${row?.observed_at ?? "未提供"}` : "暂无观测数据"}</div>
+        <small className="macro-source">{indicator.source}</small>
+      </article>;
+    })}</div>
+  </section>;
+}
+
 const MODEL_LABELS: Record<string, string> = {
   CHAMPION_0: "零收益安全基准",
   MARKET_ONLY: "黄金自身 Ridge",
@@ -465,12 +485,6 @@ function mergeNewsEvidenceByEvent(rows: NewsEvidence[]): NewsEvidence[] {
   }
   return sortNewsEvidenceByTime(merged.values());
 }
-const DEPLOYMENT_PRESENTATION: Record<string, { className: string; label: string }> = {
-  MATCHED: { className: "matched", label: "版本正常" },
-  LOCAL_CHANGES: { className: "local-changes", label: "有尚未发布的改动" },
-  PROVENANCE_UNKNOWN: { className: "unknown", label: "版本暂时无法核对" },
-  DEPLOYMENT_DRIFT: { className: "drift", label: "版本需要更新" },
-};
 const VISIBILITY_LABELS: Record<string, string> = {
   MODEL_VISIBLE: "可用于模型",
   IMPACT_PENDING: "等待 Gemma",
@@ -1159,10 +1173,6 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
     setEvidencePageCursors({ 1: null });
     setShowAllEvidence(false);
   };
-  const deployment = payload?.system?.deployment;
-  const deploymentPresentation = DEPLOYMENT_PRESENTATION[
-    deployment?.status ?? "PROVENANCE_UNKNOWN"
-  ] ?? DEPLOYMENT_PRESENTATION.PROVENANCE_UNKNOWN;
   const storylinesUnavailable = Boolean(
     payload?.preview?.is_preview
     && payload.preview.resources?.audit_stories?.availability
@@ -1212,7 +1222,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻 <b><MetricValue phase={newsPhase}><CountValue value={readableNewsTotal} /></MetricValue></b></a>
         <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>当前可用新闻事件 <b><MetricValue phase={statusState}><CountValue value={newsMetrics.events.currently_model_eligible} /></MetricValue></b></a>
         <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b><MetricValue phase={statusState}><CountValue value={activeEventTotal} /></MetricValue></b></a>
-        <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b><MetricValue phase={coveragePhase} snapshotLabel="分支快照" snapshotTitle="此覆盖结果由当前 PR 分支在构建时重新计算，不是生产实时观测">{payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</MetricValue></b></a>
+        <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>宏观数据 <b><MetricValue phase={coveragePhase} snapshotLabel="分支快照" snapshotTitle="只读分支快照；各项观测日期见下方">参考指标</MetricValue></b></a>
       </nav>
       </div>
 
@@ -1224,7 +1234,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
           <option value="news">新闻 · {formatExactCount(readableNewsTotal)}</option>
           <option value="evidence">当前可用新闻事件 · {formatExactCount(newsMetrics.events.currently_model_eligible)}</option>
           <option value="stories">事件脉络 · {formatExactCount(activeEventTotal)}</option>
-          <option value="coverage">大视野覆盖 · {formatExactCount(payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length)}/11{coveragePhase === "snapshot" ? " · 分支快照" : ""}</option>
+          <option value="coverage">宏观数据{coveragePhase === "snapshot" ? " · 分支快照" : ""}</option>
         </select>
       </label>
 
@@ -1453,7 +1463,6 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
 
       {view === "stories" && selectedAuditDetailState === "ready" && <section className="story-desk">
         <header className="evidence-intro evidence-intro-compact"><div><p className="eyebrow">事件脉络</p><h2>先看最新进展，展开查看完整脉络。</h2></div></header>
-        {deployment && <section className={`deployment-proof ${deploymentPresentation.className}`}><b>{deploymentPresentation.label}</b>{deployment.status === "DEPLOYMENT_DRIFT" ? <span>本机 {deployment.runtime_git_sha?.slice(0, 8) ?? "未知"} · 远端 {deployment.expected_git_sha?.slice(0, 8) ?? "未知"}</span> : deployment.runtime_git_sha ? <span>版本 {deployment.runtime_git_sha.slice(0, 8)}</span> : null}</section>}
         <div className="event-thread-summary" aria-label="事件脉络统计"><span><b><CountValue value={activeEventTotal} /></b> 个独立事件</span><span><b><CountValue value={continuedEventTotal} /></b> 个已有后续</span><span><b><CountValue value={singleEventTotal} /></b> 个暂无后续</span></div>
         {(payload?.storylines ?? []).length > 0 && <><div className={`story-grid ${showAllStorylines ? "show-all-mobile-items" : ""}`}>{(payload?.storylines ?? []).map(story => <StoryCard key={story.storyline_id} story={story} expanded={expandedStorylines.has(story.storyline_id)} onToggle={() => setExpandedStorylines(current => { const next = new Set(current); if (next.has(story.storyline_id)) next.delete(story.storyline_id); else next.add(story.storyline_id); return next; })} />)}</div>{(payload?.storylines ?? []).length > 4 && <button className="mobile-reveal-button storylines-reveal-button" type="button" aria-expanded={showAllStorylines} onClick={() => setShowAllStorylines(value => !value)}>{showAllStorylines ? "收起较早脉络" : `显示其余 ${formatExactCount((payload?.storylines ?? []).length - 4)} 条脉络`}</button>}</>}
         {(payload?.story_event_candidates ?? []).length > 0 && <section className="single-event-index">
@@ -1474,14 +1483,10 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         <details className="unassigned-story-events"><summary>未归属事件 <b><CountValue value={payload?.storyline_summary?.unassigned_total} /></b></summary>{(payload?.unassigned_story_events ?? []).map(item => <div key={item.event_key}><time>{time(item.first_seen)}</time><span>{item.headline}</span><small>{item.record_kind} · {item.reason}</small></div>)}</details>
       </section>}
 
-      {view === "coverage" && <section className="coverage-grid">
-        {(payload?.factor_coverage ?? []).length === 0 && <div className="current-data-notice audit-resource-notice" role={statusState === "error" ? "alert" : "status"}><b>{statusState === "loading" ? "大视野覆盖读取中" : statusState === "error" ? "大视野覆盖暂不可用" : "本页没有覆盖记录"}</b><span>{statusState === "error" ? statusError : statusState === "loading" ? "等待覆盖资源返回。" : "当前资源未提供覆盖记录；未知状态不代表来源健康。"}</span>{statusState === "error" && <button type="button" onClick={() => void refreshStatus(true)}>重试大视野覆盖</button>}</div>}
-        {(payload?.factor_coverage ?? []).map(row => <article key={row.domain} className={`coverage-card status-${row.status.toLowerCase().replaceAll("_", "-")}`}>
-          <div><span>{row.cadence}</span><b>{COVERAGE_STATUS_LABELS[row.status] ?? row.status}</b></div><h2>{row.domain}</h2><p>{row.source ?? "尚未连接可靠的 point-in-time 数据源"}</p>
-          {row.value !== null && row.value !== undefined && <strong className="coverage-value">{number(row.value, 3)} <small>{row.unit}</small></strong>}
-          <small>{row.status_reason ?? `${row.observed_at ? `观测期 ${row.observed_at} · ` : ""}${row.action_bearing ? "已进入决策Snapshot" : "Shadow特征，等待训练验证"}`}</small>
-        </article>)}
-      </section>}
+      {view === "coverage" && <>
+        {(payload?.factor_coverage ?? []).length === 0 && <div className="current-data-notice audit-resource-notice" role={statusState === "error" ? "alert" : "status"}><b>{statusState === "loading" ? "宏观数据读取中" : statusState === "error" ? "宏观数据暂不可用" : "暂无宏观数据"}</b><span>{statusState === "error" ? statusError : statusState === "loading" ? "等待数据返回。" : "当前资源未提供观测值。"}</span>{statusState === "error" && <button type="button" onClick={() => void refreshStatus(true)}>重试宏观数据</button>}</div>}
+        <MacroData rows={payload?.factor_coverage ?? []} />
+      </>}
 
       <footer className="audit-footer"><span>{view === "search" ? "搜索结果按本次查询显示" : `所选资源时间 ${selectedResourceTime ? time(selectedResourceTime) : "尚未提供"}`}</span><span>SHADOW ONLY · APPEND ONLY</span></footer>
     </main>

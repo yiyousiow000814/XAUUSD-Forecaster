@@ -317,3 +317,20 @@ Public hover feedback uses a short color transition, without a mouse-only focus
 outline. Keyboard focus remains visible inside rounded boundaries. Reduced
 motion disables these transitions. Scrollbar chrome is hidden throughout the
 app while existing scrolling, keyboard navigation and scroll ownership remain.
+
+## Macro reading and story diagnostics
+
+The retained `/audit?view=coverage` URL is labeled `宏观数据`. It presents six
+observed series: two-year Treasury yield, ten-year TIPS yield, the Fed broad
+Dollar index, WTI spot, Federal Reserve total assets and VIX. Each card exposes
+its precise series identity, value, unit and individual observation date.
+WALCL values in USD millions are divided by one million for USD trillions.
+Missing, non-finite or incompatible-unit values remain unavailable, never zero.
+These are background indicators, not directional signals or a live-data claim.
+Collector states and the legacy 11/11 coverage score are not shown here.
+Underlying collection and API provenance are unchanged; Preview labels remain.
+
+Story reading omits deployment hashes and version-verdict banners. Release
+identity and operational diagnosis belong to their existing owners, not a
+story card. Removing the presentation does not fabricate a matching revision
+or weaken deployment checks.
