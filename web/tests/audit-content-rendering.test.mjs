@@ -385,6 +385,15 @@ test("overview shows three latest brief summaries and event publication times", 
   assert.equal(JSON.stringify(data),before);
 });
 
+test("overview reading uses Chinese sans typography and distributes desktop row space", () => {
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.overview-news \{[^}]*--font-sans:"Microsoft YaHei","PingFang SC"/);
+  assert.match(css, /\.overview-news-card ul \{[^}]*display:grid;[^}]*grid-auto-rows:1fr/);
+  assert.match(css, /\.overview-item-title \{[^}]*-webkit-line-clamp:2;[^}]*font-weight:600/);
+  assert.match(css, /\.overview-item-summary \{[^}]*-webkit-line-clamp:2/);
+  assert.match(css, /\.overview-news-card ul \{ display:block; \}/);
+});
+
 test("overview distinguishes loading, confirmed empty, failure and retained content", () => {
   const empty={daily_news_briefs:[],projection_contract:"audit-detail-source-v1"};
   assert.equal(validOverviewBriefs(empty),true);
