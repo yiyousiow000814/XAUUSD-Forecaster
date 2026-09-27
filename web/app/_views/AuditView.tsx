@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ButtonHTMLAttributes } from "react";
+import { ChevronLeftIcon, ChevronRightIcon } from "@radix-ui/react-icons";
 import CountValue from "../_components/CountValue";
 import { useDashboardNavigation, type AuditViewName } from "../_components/DashboardNavigation";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
@@ -20,6 +21,13 @@ import { validAuditDetailPayload } from "../_lib/audit-detail-contract";
 import { sortNewsEvidenceByTime } from "../_lib/news-evidence-order";
 
 declare const __AURUM_DEPLOYMENT__: { is_preview: boolean };
+
+export function PaginationButton({ direction, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { direction: "previous" | "next" }) {
+  const label = direction === "previous" ? "上一页" : "下一页";
+  return <button {...props} type="button" className="pagination-arrow" aria-label={label} title={label}>
+    {direction === "previous" ? <ChevronLeftIcon aria-hidden="true" /> : <ChevronRightIcon aria-hidden="true" />}
+  </button>;
+}
 
 type AuditDeskView = AuditViewName;
 type AuditDetailView = "briefs" | "stories";
@@ -1260,7 +1268,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
           </div>
         </li>;
         return <section className="daily-brief-desk">
-          <header><div><p className="eyebrow">{selectedDate ? `${shortBriefDate(selectedDate)} · DAILY BRIEF · ASIA/KUALA_LUMPUR` : "DAILY BRIEF · ASIA/KUALA_LUMPUR"}</p><h2>{publicBriefText(selected?.brief.title) || (selectedDate ? `${shortBriefDate(selectedDate)} 每日简报` : "每日简报")}</h2><p className={`brief-phase phase-${(phase ?? "WAITING").toLowerCase()}`}>{dailyBriefPhaseLabel(phase, isCurrent)}</p></div>
+          <header><div><p className="eyebrow">{selectedDate ? `${shortBriefDate(selectedDate)} · DAILY BRIEF · ASIA/KUALA_LUMPUR` : "DAILY BRIEF · ASIA/KUALA_LUMPUR"}</p><h2>{selectedDate ? `${selectedDate} 黄金市场简报` : "黄金市场简报"}</h2><p className={`brief-phase phase-${(phase ?? "WAITING").toLowerCase()}`}>{dailyBriefPhaseLabel(phase, isCurrent)}</p></div>
             <div className="brief-date-switcher">
               <nav aria-label="最近简报日期">{recentDates.map(date => { const row = briefs.find(item => item.brief_date === date); const isToday = date === summary?.brief_date; const datePhase = isToday ? summary.phase : row?.phase; return <button type="button" key={date} className={selectedDate === date ? "active" : ""} onClick={() => setBriefDate(date)}><span>{shortBriefDate(date)}</span><small>{dailyBriefDateLabel(datePhase, isToday)}</small></button>; })}</nav>
               {historicalDates.length > 0 && <label className="brief-history-picker">
@@ -1325,7 +1333,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         {searchResults.source_mode !== "NOT_QUERIED" && <p className="search-count">{searchResults.query ? `“${searchResults.query}”` : "所选日期范围"} 找到 <CountValue value={searchResults.total} format="exact" /> 条 · {searchResults.source_mode === "IMMUTABLE_PREVIEW_SNAPSHOT" ? "Preview 构建快照（非完整档案）" : "当前新闻档案"}</p>}
         <div className="search-results">{searchResults.items.map(row => <article key={row.detail_key}><time>{time(row.source_published_time ?? row.collector_first_seen_time)}</time><h3>{row.headline}</h3><p>{row.emerging_topic_zh || publicImpactReason(row.impact_reason_zh) || row.source}</p><small>{row.source} · {row.category} · 证据 {row.detail_key.slice(0, 12)}…</small></article>)}</div>
         {searchResults.source_mode !== "NOT_QUERIED" && searchResults.total === 0 && <p className="search-empty">没有符合条件的新闻证据。</p>}
-        {searchResults.total > searchResults.page_size && <nav className="search-pages" aria-label="搜索结果分页"><button type="button" aria-label="上一页搜索结果" disabled={searchResults.page <= 1 || searchBusy} onClick={() => void runNewsSearch(searchResults.page - 1, searchResults)}>←</button><span>{formatExactCount(searchResults.page)} / {formatExactCount(Math.ceil(searchResults.total / searchResults.page_size))}</span><button type="button" aria-label="下一页搜索结果" disabled={searchResults.page >= Math.ceil(searchResults.total / searchResults.page_size) || searchBusy} onClick={() => void runNewsSearch(searchResults.page + 1, searchResults)}>→</button></nav>}
+        {searchResults.total > searchResults.page_size && <nav className="search-pages" aria-label="搜索结果分页"><PaginationButton direction="previous" disabled={searchResults.page <= 1 || searchBusy} onClick={() => void runNewsSearch(searchResults.page - 1, searchResults)} /><span>{formatExactCount(searchResults.page)} / {formatExactCount(Math.ceil(searchResults.total / searchResults.page_size))}</span><PaginationButton direction="next" disabled={searchResults.page >= Math.ceil(searchResults.total / searchResults.page_size) || searchBusy} onClick={() => void runNewsSearch(searchResults.page + 1, searchResults)} /></nav>}
       </section>}
       {view === "news" && <>
         {newsProjectionNotice && <div
@@ -1394,9 +1402,9 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         </section>
         {newsPageNotice && <p role="status">{newsPageNotice}</p>}
         {newsPageCount > 1 && <nav className="news-pagination" aria-label="新闻分页">
-          <button type="button" disabled={newsBusy || newsIndex.page !== newsPage || !newsIndex.previous_cursor} onClick={() => navigateNews(newsPage - 1, newsIndex.previous_cursor ?? null)}>← 上一页</button>
-          <span>第 <b>{formatExactCount(currentNewsPage)}</b> / {formatExactCount(newsPageCount)} 页 · {NEWS_REVIEW_PRESENTATION[newsReviewState].label} · 当前分类 {formatExactCount(newsIndex.total)} 条</span>
-          <button type="button" disabled={newsBusy || newsIndex.page !== newsPage || !newsIndex.next_cursor} onClick={() => navigateNews(newsPage + 1, newsIndex.next_cursor ?? null)}>下一页 →</button>
+          <PaginationButton direction="previous" disabled={newsBusy || newsIndex.page !== newsPage || !newsIndex.previous_cursor} onClick={() => navigateNews(newsPage - 1, newsIndex.previous_cursor ?? null)} />
+          <span aria-live="polite"><b>{formatExactCount(currentNewsPage)}</b> / {formatExactCount(newsPageCount)}</span>
+          <PaginationButton direction="next" disabled={newsBusy || newsIndex.page !== newsPage || !newsIndex.next_cursor} onClick={() => navigateNews(newsPage + 1, newsIndex.next_cursor ?? null)} />
         </nav>}
       </>}
 
@@ -1426,7 +1434,6 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
             ? <>本筛选已载入 <b>{formatExactCount(visibleEvidence.length)}</b> / {formatExactCount(evidenceModeTotal)} 个；完整总数保留在审计账本。</>
             : <>已显示全部 <b>{formatExactCount(evidenceModeTotal)}</b> 个。</>}
         </p>
-        <details className="evidence-rule-note"><summary>查看统计规则</summary><p>核心新闻要求一手完整证据或至少两个独立可靠来源确认；大视野新闻还纳入单一可靠来源并降低权重。新闻只从首次收到后生效，按事件类型和有效交易时间逐步衰减。Gemini 与 Gemma 负责理解事件语义，版本化证据规则负责时间、身份、去重与准入；每个事件下方可核对统一身份和原始发布域名。</p></details>
         <div className={`evidence-table-wrap ${showAllEvidence ? "show-all-mobile-items" : ""}`}><table className="evidence-table">
           <thead><tr><th>是否用于预测</th><th>新闻事件</th><th>用了多少次 / 为什么没用</th><th>发布时间 / 收到时间</th></tr></thead>
           <tbody>{visibleEvidence.length === 0 && evidenceModeTotal > 0 && <tr className="evidence-unavailable-row"><td colSpan={4}>这个分类有记录，但本页尚未载入明细。总数不会被当成空结果。</td></tr>}{visibleEvidence.map(row => <tr key={`${evidenceMode}:${row.event_key}`}>
@@ -1437,9 +1444,9 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
           </tr>)}</tbody>
         </table></div>
         <nav className="market-history-nav" aria-label="新闻证据翻页">
-          <button type="button" disabled={evidencePage <= 1} onClick={() => setEvidencePage(page => Math.max(1, page - 1))}>上一页</button>
-          <span>第 {formatExactCount(evidencePage)} 页</span>
-          <button type="button" disabled={!evidenceArchiveReady || !evidenceArchive.has_more || !evidenceArchive.next_cursor} onClick={() => setEvidencePage(page => page + 1)}>下一页</button>
+          <PaginationButton direction="previous" disabled={evidencePage <= 1} onClick={() => setEvidencePage(page => Math.max(1, page - 1))} />
+          <span aria-live="polite" aria-label={`第 ${formatExactCount(evidencePage)} 页`}>{formatExactCount(evidencePage)}</span>
+          <PaginationButton direction="next" disabled={!evidenceArchiveReady || !evidenceArchive.has_more || !evidenceArchive.next_cursor} onClick={() => setEvidencePage(page => page + 1)} />
         </nav>
         {visibleEvidence.length > 8 && <button className="mobile-reveal-button" type="button" aria-expanded={showAllEvidence} onClick={() => setShowAllEvidence(value => !value)}>{showAllEvidence ? "收起证据" : `显示本页其余 ${formatExactCount(visibleEvidence.length - 8)} 个事件`}</button>}
       </section>}

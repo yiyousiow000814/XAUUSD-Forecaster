@@ -26,7 +26,7 @@ const built = await build({
     resolveDir: fileURLToPath(new URL("..", import.meta.url)), loader: "tsx",
     contents: `import React from 'react';
       import {renderToStaticMarkup} from 'react-dom/server';
-      import AuditView, {NewsRow, StoryCard} from ${JSON.stringify(viewPath)};
+      import AuditView, {NewsRow, StoryCard, PaginationButton} from ${JSON.stringify(viewPath)};
       import PreviewBanner from ${JSON.stringify(fileURLToPath(new URL("../app/_components/PreviewBanner.tsx", import.meta.url)))};
       import LiveRoomView from ${JSON.stringify(fileURLToPath(new URL('../app/_views/LiveRoomView.tsx', import.meta.url)))};
       import {OverviewCards,validOverviewBriefs,validOverviewEvents} from ${JSON.stringify(fileURLToPath(new URL('../app/_components/OverviewNews.tsx', import.meta.url)))};
@@ -36,6 +36,7 @@ const built = await build({
       import {clearDashboardResource,updateDashboardResource} from ${JSON.stringify(resourcesPath)};
       export function renderPreview(payload) { updateDashboardResource("/api/status",()=>payload); return renderToStaticMarkup(React.createElement(PreviewBanner)); }
       export function renderLive(payload) { updateDashboardResource("/api/status",()=>payload); return renderToStaticMarkup(React.createElement(LiveRoomView)); }
+      export function renderPageButton(props) {return renderToStaticMarkup(React.createElement(PaginationButton,props));}
       export function renderStory(story,expanded=false) {return renderToStaticMarkup(React.createElement(StoryCard,{story,expanded}));}
       export function renderNews(row) { return renderToStaticMarkup(React.createElement(NewsRow,{row})); }
       export function renderStatus(payload) { return renderToStaticMarkup(React.createElement(StatusView,{initialPayload:payload})); }
@@ -48,7 +49,7 @@ const built = await build({
 });
 const renderedModule = join(temporaryRoot, "audit.mjs");
 writeFileSync(renderedModule, built.outputFiles[0].contents);
-const { render, renderNews, renderStatus, renderLive, renderPreview, renderOverview, renderStory, validOverviewBriefs, validOverviewEvents } = await import(pathToFileURL(renderedModule).href);
+const { renderPageButton, render, renderNews, renderStatus, renderLive, renderPreview, renderOverview, renderStory, validOverviewBriefs, validOverviewEvents } = await import(pathToFileURL(renderedModule).href);
 
 test("article row expands publisher provenance with one coherent public label", () => {
   const row = {headline: "政策会议展望", emerging_topic_zh: "政策会议展望", event_type: "macro_preview",
@@ -412,4 +413,27 @@ test("branch coverage keeps compact provenance without a full-width snapshot not
   assert.match(html, /<option value="coverage"[^>]*>[^<]*分支快照<\/option>/);
   assert.match(html, /本页没有覆盖记录/);
   assert.match(html, /所选资源时间[^<]*19:00:00/);
+});
+
+
+test("brief heading uses the selected date regardless of generated title or phase", () => {
+  for (const [date, phase, title] of [["2026-09-27", "INTRADAY", "2026-09-27 黄金市场简报"], ["2026-09-26", "FINAL", "黄金周线料将收跌"]]) {
+    const html = render("briefs", {...baseline, "/api/audit-briefs": {...details.briefs,
+      daily_news_briefs: [{brief_date:date, generated_at:generatedAt, phase, model_version:"gemma", brief:{title,overview:"Retained overview",items:[]}}]}});
+    assert.match(html, new RegExp(`<h2>${date} 黄金市场简报</h2>`));
+    assert.doesNotMatch(html, /<h2>黄金周线料将收跌/);
+    assert.match(html, /Retained overview/);
+  }
+});
+
+test("audit removes the statistics rules disclosure and uses named pagination icons", () => {
+  const html = render("evidence", baseline);
+  assert.doesNotMatch(html, /查看统计规则|evidence-rule-note/);
+  for (const [direction,label] of [["previous","上一页"],["next","下一页"]]) {
+    const button = renderPageButton({direction,disabled:true});
+    assert.match(button, new RegExp(`aria-label="${label}"`));
+    assert.match(button, /<svg[^>]*aria-hidden="true"/);
+    assert.match(button, /disabled=""/);
+    assert.doesNotMatch(button, new RegExp(`>${label}<`));
+  }
 });

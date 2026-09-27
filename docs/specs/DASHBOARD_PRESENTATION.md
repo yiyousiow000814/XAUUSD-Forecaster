@@ -300,6 +300,12 @@ fixed-height scrolling region. Collapsing restores the compact card.
 
 ## Public reading density and interaction
 
+The daily brief page title is the selected brief date followed by
+`黄金市场简报`, regardless of generation phase or generated editorial title.
+Audit pagination uses previous/next chevron icons with accessible names,
+disabled boundary states and 44px targets. The redundant statistics-rules
+disclosure is omitted from the current-events reading surface.
+
 Public reading pages omit the redundant branded footer; navigation and status
 remain in the shared header. On phones, news uses compact divided rows rather
 than large individual cards. Collapsed rows show the headline, category and

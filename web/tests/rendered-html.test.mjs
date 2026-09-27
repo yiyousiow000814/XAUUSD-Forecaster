@@ -1609,7 +1609,6 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /模型真正用过哪些新闻/);
   assert.match(source, /按独立事件说明模型用过什么、没用什么/);
   assert.match(source, /evidence-intro evidence-intro-compact/);
-  assert.match(source, /查看统计规则/);
   assert.match(source, /收到多少篇文章/);
   assert.match(source, /历史上用过多少个事件/);
   assert.match(source, /影响过多少次预测/);
@@ -1624,10 +1623,7 @@ test("renders the news and decision audit route", async () => {
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /\.evidence-summary \{[^}]*grid-template-columns:repeat\(3,1fr\)/);
   assert.match(css, /\.evidence-filters button \{[^}]*min-height:44px/);
-  assert.match(css, /\.evidence-rule-note summary \{[^}]*min-height:44px/);
   assert.match(source, /多源确认/);
-  assert.match(source, /核心新闻要求一手完整证据或至少两个独立可靠来源确认/);
-  assert.match(source, /大视野新闻还纳入单一可靠来源并降低权重/);
   assert.match(source, /api\/news-content\?key=/);
   assert.match(source, /api\/news-index\?/);
   assert.match(source, /briefs: "\/api\/audit-briefs"/);
@@ -1675,8 +1671,6 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /查看技术审计明细/);
   assert.doesNotMatch(source, /旧工程数据|修复后的训练种子|上线后前向结果/);
   assert.doesNotMatch(source, /Legacy Engineering|Repaired Seed|Next fit/);
-  assert.match(source, /大视野新闻还纳入单一可靠来源并降低权重/);
-  assert.match(source, /按事件类型和有效交易时间逐步衰减/);
   assert.doesNotMatch(source, /Live OOS 学习曲线 · .*点击查看/);
   assert.match(source, /className="news-table"/);
 });
@@ -2218,7 +2212,6 @@ test("reflows news evidence into readable mobile cards", () => {
   assert.match(view, /className="evidence-status-cell"/);
   assert.match(view, /统一来源身份：/);
   assert.match(view, /原始发布域名：/);
-  assert.match(view, /Gemini 与 Gemma 负责理解事件语义/);
   assert.match(view, /showAllEvidence/);
   assert.match(view, /showEvidenceMetrics/);
   assert.match(view, /className="evidence-metrics-toggle"/);
