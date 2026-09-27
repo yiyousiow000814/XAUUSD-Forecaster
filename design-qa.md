@@ -1,13 +1,46 @@
 # Public dashboard design review
 
-## In progress: header status and login placement
+## Latest follow-up: header status and login placement
 
 Scope: public status-link selected/hover/focus presentation and the geometry
 passed to the existing login popup. Authentication, trusted-message checks,
 callback URL, popup ownership/polling and blocked-popup fallback are unchanged.
 The opener supplies its live window geometry; negative monitor coordinates
 remain valid. Check desktop and both phone viewports, active/inactive status,
-modal open/cancel/Escape, scrolled-page centering and popup geometry regression.
+modal open/cancel/Escape and popup geometry regression.
+
+Verified application revision: `b33861aa`.
+Preview: https://36a1cb78-aurum-signal-room.yiyousiow1234.workers.dev/health.
+The preceding Preview reproduced the selected-state defect: 58px-wide inner
+pill, zero horizontal padding and an inset outline. The inner modal was already
+centered at 390x844 and 1280x900; the separate login window had no left/top
+features. The public link now owns its selected background and 10px side padding;
+the inner pill no longer draws that outline. Private header styling is retained.
+
+Production and Preview builds passed; 105 rendering/auth-session/admin-client
+checks passed. Popup tests cover primary and secondary monitors (including
+negative coordinates), smaller windows, unchanged callback/target, and blocked
+popup fallback. The production caller supplies the current window. Architecture
+input/document checks and whitespace checks passed. Final diff review checked
+the only popup call site, unchanged trusted-message/session authority, timer and
+close handling, and public/private CSS cascade.
+
+On the deployed Preview, checked 1280x900, 390x844 and 360x800. Status target is
+78x44 on the 390px phone, with the dot 10px inside its left edge; selected shadow
+is none and background is light teal. Verified inactive state, actual mouse hover,
+keyboard focus outline, status-page navigation and reduced-motion transition 0s.
+No horizontal overflow. Opened login from desktop and phone menu, closed with
+Cancel and Escape, and returned to overview. Modal centers measured (640,450),
+(195,422) and (180,400), respectively. No browser warnings/errors. Temporary
+media and viewport overrides were cleared; all task tabs closed, remaining task
+sessions: 0.
+
+The immutable Preview intentionally hides the real Google login action. Native
+OS placement of the external login window and a complete authenticated handoff
+were not exercised; geometry and fallback are covered by tests, not represented
+as a completed production login. Browser policies may adjust window coordinates.
+Screenshots: `C:/Users/yiyou/AppData/Local/Temp/status-button-fixed.png` and
+`C:/Users/yiyou/AppData/Local/Temp/admin-login-centered.png`.
 
 ## Latest follow-up: navigation loading presentation
 
