@@ -466,7 +466,6 @@ test("keeps nested compact counts in each dashboard headline hierarchy", () => {
   for (const [selector, size] of [
     ["metric-grid strong", "44px"],
     ["quota-metric-grid strong", "40px"],
-    ["evidence-summary strong", "40px"],
     ["learning-summary-grid strong", "42px"],
     ["event-thread-summary b", "25px"],
     ["theme-streams article strong", "25px"],
@@ -479,7 +478,6 @@ test("keeps nested compact counts in each dashboard headline hierarchy", () => {
   for (const unsafeSelector of [
     /\.metric-grid span,\.metric-grid small/,
     /\.quota-metric-grid span,\.quota-metric-grid small/,
-    /\.evidence-summary span/,
     /\.learning-summary-grid span,\.learning-summary-grid small/,
     /\.event-thread-summary span/,
     /\.theme-streams article span/,
@@ -596,6 +594,7 @@ test("renders static public shell and path-specific admin shells with one invari
   const routes = [
     ["/", "总览"],
     ["/audit?view=news", "新闻与事件"],
+    ...["briefs", "search", "evidence", "stories", "coverage"].map(view => [`/audit?view=${view}`, "新闻与事件"]),
     ["/audit?view=league", "新闻与事件"],
     ["/health", "系统"],
     ["/admin", "管理员登录"],
@@ -612,9 +611,23 @@ test("renders static public shell and path-specific admin shells with one invari
     const header = html.match(/<header class="dashboard-header topbar">[\s\S]*?<\/header>/)?.[0];
     assert.ok(header, path);
     assert.doesNotMatch(header, /class="brand-mark"/, path);
-    assert.match(header, /<strong>黄金资讯<\/strong>/, path);
+    assert.match(header, /(?:黄金资讯|<span class="brand-gold">黄金<\/span>资讯)/, path);
     assert.match(header, /<small>行情与新闻<\/small>/, path);
-    assert.equal(header.match(/aria-current="page"/g)?.length, 1, path);
+    // Every public route shares the same closed phone menu and brand authority.
+    const publicRoute = !path.startsWith("/admin");
+    if (publicRoute) {
+      assert.match(html, /class="dashboard-shell [^"]*is-public"/);
+      assert.doesNotMatch(html, /public-site-footer/);
+      assert.match(header, /class="brand-gold">黄金<\/span>资讯/);
+    }
+    assert.equal(header.match(/aria-current="page"/g)?.length, publicRoute ? 2 : 1, path);
+    if (publicRoute) {
+      const menu = header.match(/<details class="public-mobile-menu">[\s\S]*?<\/details>/)?.[0];
+      assert.ok(menu);
+      assert.doesNotMatch(menu, /<details[^>]*\sopen/);
+      assert.match(menu, /<summary aria-label="打开或关闭导航"/);
+      assert.match(menu, /新闻与事件[\s\S]*管理员登录[\s\S]*运行状态/);
+    }
     if (path === "/health") assert.match(header, /aria-current="page"[^>]*aria-label="查看系统运行状态"[^>]*href="\/health"/, path);
     else assert.match(header, new RegExp(`aria-current="page"[^>]*>(?:<span[^>]*></span>)?${activeLabel}</(?:a|button)>`), path);
     assert.equal(header.match(/class="dashboard-global-state"/g)?.length, 1, path);
@@ -659,6 +672,7 @@ test("keeps Admin login intent local until the explicit Access handoff", () => {
   assert.match(shell, /candidateInspection \? null : <button/);
   assert.match(shell, /className="admin-login-primary"[\s\S]*onClick=\{beginAdminLogin\}/);
   assert.match(shell, /openAdminAuthPopup[\s\S]*window\.location\.assign\("\/admin"\)/);
+  assert.match(shell, /window\.location\.assign\("\/admin"\),\s*window,\s*\)/);
   assert.match(shell, /isTrustedAdminAuthMessage[\s\S]*revalidateAdminSession/);
   assert.match(shell, /adminAuthState === "AUTHENTICATED"/);
   assert.match(shell, /<button type="button" onClick=\{closeAdminLogin\}>取消<\/button>/);
@@ -1107,7 +1121,7 @@ test("prefetches bounded news details and avoids a fast loading-label flash", ()
   assert.doesNotMatch(source, /正在读取新闻详情/);
   assert.match(css, /\.news-detail-skeleton\.is-visible/);
   assert.match(css, /prefers-reduced-motion:reduce/);
-  assert.match(source, /BACKGROUND: "非当前影响"/);
+  assert.match(source, /BACKGROUND: "背景资料"/);
   assert.match(source, /new Set\(\[/);
   assert.doesNotMatch(source, /Gemini 中文标题/);
 });
@@ -1514,6 +1528,10 @@ test("uses one Chinese system-state presentation across every dashboard page", (
   const shell = readFileSync(new URL("../app/_components/DashboardShell.tsx", import.meta.url), "utf8");
   const contract = readFileSync(new URL("../app/_lib/system-state.ts", import.meta.url), "utf8");
   const freshness = readFileSync(new URL("../app/_components/CurrentDataState.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.dashboard-shell\.is-public \.dashboard-global-state \{[^}]*min-height:44px;[^}]*padding:0 10px;[^}]*border-radius:8px/);
+  assert.match(css, /\.dashboard-shell\.is-public \.dashboard-global-state\[aria-current="page"\] \.live-pill \{ box-shadow:none/);
+  assert.match(css, /\.dashboard-global-state \.live-pill>span \{ flex-shrink:0/);
   assert.match(component, /systemStatePresentation/);
   assert.match(component, /data-read-state/);
   assert.match(contract, /运行正常/);
@@ -1591,28 +1609,10 @@ test("renders the news and decision audit route", async () => {
   const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   assert.match(source, />新闻 <b>/);
   assert.match(source, /当前可用新闻事件/);
-  assert.match(source, /模型真正用过哪些新闻/);
-  assert.match(source, /按独立事件说明模型用过什么、没用什么/);
   assert.match(source, /evidence-intro evidence-intro-compact/);
-  assert.match(source, /查看统计规则/);
-  assert.match(source, /收到多少篇文章/);
-  assert.match(source, /历史上用过多少个事件/);
-  assert.match(source, /影响过多少次预测/);
-  assert.match(source, /模型一共读取多少次/);
-  assert.match(source, /现在仍可用于预测/);
-  assert.match(source, /本筛选已载入/);
-  assert.match(source, /完整总数保留在审计账本/);
-  assert.match(source, /这个分类有记录，但本页尚未载入明细/);
-  assert.match(source, /这不是新闻数量/);
   assert.doesNotMatch(source, /文章 \/ Revision/);
   assert.doesNotMatch(source, /当前达到 Broad 门槛/);
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(css, /\.evidence-summary \{[^}]*grid-template-columns:repeat\(3,1fr\)/);
-  assert.match(css, /\.evidence-filters button \{[^}]*min-height:44px/);
-  assert.match(css, /\.evidence-rule-note summary \{[^}]*min-height:44px/);
-  assert.match(source, /多源确认/);
-  assert.match(source, /核心新闻要求一手完整证据或至少两个独立可靠来源确认/);
-  assert.match(source, /大视野新闻还纳入单一可靠来源并降低权重/);
   assert.match(source, /api\/news-content\?key=/);
   assert.match(source, /api\/news-index\?/);
   assert.match(source, /briefs: "\/api\/audit-briefs"/);
@@ -1627,7 +1627,6 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /row\.model_identities\.map/);
   assert.doesNotMatch(source, /row\.model_unseen_reason_codes\.map/);
   assert.doesNotMatch(source, /IDENTITY_LABELS/);
-  assert.match(source, /MODEL_LABELS\[identity\] \?\? identity/);
   assert.match(source, /读取中/);
   assert.match(source, /学习数据暂不可用|暂不可用/);
   assert.doesNotMatch(source, /payload\?\.system\.online && !error/);
@@ -1648,10 +1647,6 @@ test("renders the news and decision audit route", async () => {
   assert.match(newsIndexRoute, /action === "prepare"/);
   assert.match(newsIndexRoute, /action === "activate"/);
   assert.match(newsStore, /\(\$\{NEWS_REVIEW_STATE_CASE_SQL\}\)=\?/);
-  assert.match(source, /evidenceMode === "eligible"/);
-  assert.match(source, />当前可用 <b>/);
-  assert.match(source, />历史上用过 <b>/);
-  assert.match(source, />从未用过 <b>/);
   assert.doesNotMatch(source, /查看全部/);
   assert.doesNotMatch(source, /个 key 轮换|每分钟最多生成/);
   assert.ok(source.indexOf('<nav className="audit-tabs"') < source.indexOf('<section className="annotation-queue"'));
@@ -1660,8 +1655,6 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /查看技术审计明细/);
   assert.doesNotMatch(source, /旧工程数据|修复后的训练种子|上线后前向结果/);
   assert.doesNotMatch(source, /Legacy Engineering|Repaired Seed|Next fit/);
-  assert.match(source, /大视野新闻还纳入单一可靠来源并降低权重/);
-  assert.match(source, /按事件类型和有效交易时间逐步衰减/);
   assert.doesNotMatch(source, /Live OOS 学习曲线 · .*点击查看/);
   assert.match(source, /className="news-table"/);
 });
@@ -1691,7 +1684,8 @@ test("switches dashboard rooms locally and reuses client data between views", ()
   assert.match(app, /lazy\(loadRetryView\)/);
   assert.match(app, /<RetryView \/>/);
   assert.match(app, /<DashboardShell location=\{location\}>/);
-  assert.match(css, /\.dashboard-global-link\.is-navigating::after/);
+  assert.doesNotMatch(css, /is-navigating::after|nav-progress/);
+  assert.match(css, /\.dashboard-view-content\[hidden\] \{ display:none/);
   assert.match(css, /prefers-reduced-motion:reduce/);
   assert.match(cache, /const resources = new Map/);
   assert.match(cache, /if \(entry\.pending\)/);
@@ -1979,7 +1973,6 @@ test("shows single events immediately and keeps later changes in one thread", ()
   assert.doesNotMatch(page, /暂无后续进展/);
   assert.match(page, /先看最新进展，展开查看完整脉络/);
   assert.ok(page.indexOf('className="story-grid"') < page.indexOf('className="theme-streams"'), "events must appear before secondary topic streams");
-  assert.match(page, /版本需要更新/);
   assert.doesNotMatch(page, /还没有形成故事链/);
   assert.doesNotMatch(page, /故事开始/);
   assert.doesNotMatch(page, /TEMPORAL EVENT GRAPH V5/);
@@ -1994,7 +1987,6 @@ test("shows single events immediately and keeps later changes in one thread", ()
 test("accepts split audit resources without status-only system provenance", () => {
   const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   assert.match(page, /system\?: \{ online: boolean/);
-  assert.match(page, /const deployment = payload\?\.system\?\.deployment/);
   assert.doesNotMatch(page, /payload\?\.system\.deployment/);
 });
 
@@ -2034,8 +2026,6 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.audit-tabs-shell \{ display:none; \}/);
   assert.match(css, /\.audit-view-picker \{ position:sticky; top:0;[\s\S]*?grid-template-columns:auto minmax\(0,1fr\)/);
   assert.match(css, /\.audit-main \.audit-intro>div:first-child \{ display:none; \}/);
-  assert.match(css, /\.coverage-card \{ display:grid;[\s\S]*?min-height:0;/);
-  assert.match(css, /\.evidence-summary \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); gap:8px/);
   assert.match(css, /\.quota-capacity-grid \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); \}/);
   assert.match(css, /@media \(max-width:430px\)\{[\s\S]*?\.throughput-summary \{ grid-template-columns:1fr; \}/);
   assert.match(css, /\.graph-modal>nav \{ grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
@@ -2066,7 +2056,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.graph-modal-backdrop \{ position:fixed; inset:0; z-index:1100/);
   assert.match(css, /\.audit-intro>div:first-child \.eyebrow \{ display:none/);
   assert.match(css, /\.audit-intro h1 \{ font-size:clamp\(32px,9vw,38px\)/);
-  assert.match(css, /\.daily-brief-desk,\s*\.news-search-desk,\s*\.decision-audit,\s*\.shadow-league,\s*\.coverage-grid \{ border-top:1px solid rgba\(17,17,15,\.55\); \}/);
+  assert.match(css, /\.daily-brief-desk,\s*\.news-search-desk,\s*\.decision-audit,\s*\.shadow-league \{ border-top:1px solid rgba\(17,17,15,\.55\); \}/);
 });
 
 test("keeps expanded news readable by progressively revealing technical evidence on phones", () => {
@@ -2178,6 +2168,9 @@ test("live room reports articles without treating omitted event counts as zero",
   assert.doesNotMatch(source, /newsMetrics|metric-grid|source-panel/);
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /\.overview-more[^}]*min-height:48px/);
+  // The overview phone header must override the shared stacked topbar.
+  assert.match(css, /@media\(max-width:850px\)[\s\S]*\.dashboard-shell\.is-public \.dashboard-header \{[^}]*flex-direction:row;[^}]*flex-wrap:nowrap;/);
+
   // Desktop owns one panel boundary and one divider; phones own two complete cards.
   assert.match(css, /\.overview-news \{[^}]*border:1px solid/);
   assert.match(css, /\.overview-news-card\+\.overview-news-card \{[^}]*border-left:1px solid/);
@@ -2193,38 +2186,19 @@ test("live room reports articles without treating omitted event counts as zero",
   assert.equal(resolveNewsMetrics({ counts: { news_revisions: 0 } }).articles.stored_revisions, 0);
 });
 
-test("reflows news evidence into readable mobile cards", () => {
+test("curated events keep bounded paging and accessible source disclosure", () => {
   const view = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(view, /className="evidence-event-cell"/);
-  assert.match(view, /className="evidence-status-cell"/);
-  assert.match(view, /统一来源身份：/);
-  assert.match(view, /原始发布域名：/);
-  assert.match(view, /Gemini 与 Gemma 负责理解事件语义/);
-  assert.match(view, /showAllEvidence/);
-  assert.match(view, /showEvidenceMetrics/);
-  assert.match(view, /className="evidence-metrics-toggle"/);
-  assert.match(view, /mergeNewsEvidenceByEvent/);
-  assert.match(view, /const evidenceArchiveReady = Boolean\([\s\S]*evidenceArchive\.snapshot_id && evidenceArchive\.mode === evidenceMode/);
-  assert.match(view, /evidenceArchiveReady[\s\S]*mergeNewsEvidenceByEvent\(evidenceArchive\.items\)/);
-  assert.doesNotMatch(view, /evidenceArchive\.items\.length > 0/);
+  assert.match(view, /const evidenceMode = "eligible" as const/);
+  assert.match(view, /evidenceArchive.snapshot_id && evidenceArchive.mode === evidenceMode/);
+  assert.match(view, /evidenceArchiveReady[\s\S]*mergeNewsEvidenceByEvent\(evidenceArchive.items\)/);
   assert.match(view, /!evidenceArchiveReady && evidencePayloadHasDuplicates/);
-  assert.match(view, /sortNewsEvidenceByTime\(merged\.values\(\)\)/);
-  assert.match(view, /new Map<string, NewsEvidence>/);
-  assert.match(view, /evidenceMode}:\$\{row\.event_key}/);
-  assert.doesNotMatch(view, /evidenceMode}:\$\{row\.event_key}:\$\{index}/);
-  assert.match(css, /@media \(max-width:640px\)[\s\S]*\.evidence-table thead \{ position:absolute/);
-  assert.match(css, /grid-template-areas:"event event" "status time" "usage usage"/);
-  assert.match(css, /\.evidence-event-cell \{ grid-area:event/);
-  assert.match(css, /\.evidence-status-cell \{ grid-area:status/);
-  assert.match(css, /\.evidence-usage-cell \{ grid-area:usage/);
-  assert.match(css, /\.evidence-time-cell \{ grid-area:time/);
-  assert.match(css, /\.evidence-status-copy \{ display:none!important/);
-  assert.match(css, /\.evidence-model-list \{ display:none!important/);
-  assert.match(css, /\.evidence-table-wrap:not\(\.show-all-mobile-items\) \.evidence-table tbody>tr:nth-child\(n\+9\)/);
-  assert.match(css, /\.evidence-desk>\.mobile-reveal-button \{ display:block;[^}]*min-height:48px/);
-  assert.match(css, /\.evidence-metrics-block \{ display:none/);
-  assert.match(css, /grid-template-areas:"event" "status" "time" "usage"/);
+  assert.match(view, /sortNewsEvidenceByTime\(merged.values\(\)\)/);
+  assert.match(view, /!evidenceArchiveReady \|\| !evidenceArchive.has_more \|\| !evidenceArchive.next_cursor/);
+  assert.doesNotMatch(view, /showEvidenceMetrics|showAllEvidence|MODEL_LABELS|evidenceReason/);
+  assert.match(css, /\.current-event-sources>summary \{[^}]*min-height:44px/);
+  assert.match(css, /\.current-event\+\.current-event \{ border-top:1px solid var\(--line\)/);
+  assert.match(css, /\.current-event h3 \{ margin:7px 0 1px; font-size:15px/);
 });
 
 test("sorts every news evidence filter by publication time before status", () => {
@@ -2525,7 +2499,7 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell form \{[^}]*grid-template-columns:minmax\(0,1fr\) 52px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell \{[^}]*min-height:69px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell textarea \{[^}]*height:52px;[^}]*max-height:52px/);
-  assert.match(css, /\.dashboard-shell\.is-admin>\.assistant-main \{[^}]*height:auto; min-height:0/);
+  assert.match(css, /\.dashboard-shell\.is-admin>\.assistant-main[^{}]*\{[^}]*height:auto; min-height:0/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-thread-heading h1 \{[^}]*font-size:clamp\(18px,4\.8vw,20px\)/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-message\.is-user>p \{[^}]*font-size:15px; line-height:1\.68/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-news-card-trigger>strong \{[^}]*font-size:19px; line-height:1\.22/);
@@ -2955,4 +2929,29 @@ test("standalone mobile audit notices have a top edge while stacked notices shar
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /@media \(max-width:850px\)\{[^}]*[\s\S]*?\.audit-main > \.current-data-notice \{ border-top:1px solid var\(--ink\); \}/);
   assert.match(css, /\.audit-main > \.current-data-notice \+ \.current-data-notice \{ border-top:0; \}/);
+});
+
+test("public reading grids own complete responsive boundaries", () => {
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.is-public \.news-row\+\.news-row \{ border-top:1px solid var\(--line\)/);
+});
+
+
+test("public reading preserves focus and scrolling while compacting phone rows", () => {
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /html,body,\* \{ scrollbar-width:none/);
+  assert.match(css, /\*::-webkit-scrollbar \{ display:none/);
+  assert.match(css, /\.is-public \.audit-tabs a:hover \{[^}]*outline:none/);
+  assert.match(css, /\.is-public \.audit-tabs a:focus-visible \{ outline:2px solid/);
+  assert.match(css, /@media\(prefers-reduced-motion:reduce\)[\s\S]*transition:none/);
+  assert.match(css, /\.is-public \.news-row:not\(\[open\]\) \.news-row-title small/);
+  assert.match(css, /\.is-public \.news-row\[open\] \.news-row-title strong \{ display:block; -webkit-line-clamp:unset/);
+});
+
+
+test("macro observations use independently bordered responsive cards", () => {
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.macro-grid \{ display:grid; grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.macro-grid article \{[^}]*border:1px solid var\(--line\)/);
+  assert.match(css, /@media\(max-width:850px\)[\s\S]*\.macro-grid \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
 });

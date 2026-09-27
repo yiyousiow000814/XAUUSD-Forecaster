@@ -1,5 +1,7 @@
 "use client";
 
+import { HamburgerMenuIcon, Cross2Icon } from "@radix-ui/react-icons";
+
 import {
   useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode,
 } from "react";
@@ -49,10 +51,10 @@ type ShellStatusPayload = {
   operational_health?: { status?: "HEALTHY" | "WARNING" | "ERROR" };
 };
 
-function DashboardBrand() {
+function DashboardBrand({ overview = false }: { overview?: boolean }) {
   return <DashboardLink ariaLabel="打开总览" className="dashboard-brand brand brand-button" href="/" replace>
     <span>
-      <strong>黄金资讯</strong>
+      <strong>{overview ? <><span className="brand-gold">黄金</span>资讯</> : "黄金资讯"}</strong>
       <small>行情与新闻</small>
     </span>
   </DashboardLink>;
@@ -137,7 +139,7 @@ function DashboardHeader({
 }: { location: DashboardLocation; adminAuthenticated: boolean; openAdminLogin: () => void }) {
   const activeDestination = activeDashboardDestination(location.room);
   return <header className="dashboard-header topbar">
-    <DashboardBrand />
+    <DashboardBrand overview={activeDestination !== "admin"} />
     <GlobalNavigation
       activeDestination={activeDestination}
       adminAuthenticated={adminAuthenticated}
@@ -149,7 +151,41 @@ function DashboardHeader({
       openAdminLogin={openAdminLogin}
     />
     <GlobalSystemState active={location.room === "health"} />
+    {activeDestination !== "admin" && <PublicMobileMenu activeDestination={activeDestination} adminAuthenticated={adminAuthenticated} openAdminLogin={openAdminLogin} />}
   </header>;
+}
+
+function PublicMobileMenu({ activeDestination, adminAuthenticated, openAdminLogin }: {
+  activeDestination: ReturnType<typeof activeDashboardDestination>;
+  adminAuthenticated: boolean; openAdminLogin: () => void;
+}) {
+  const menu = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const element = menu.current;
+    if (!element) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        element.open = false;
+        element.querySelector("summary")?.focus();
+      }
+    };
+    const closeOnNavigation = (event: MouseEvent) => {
+      if (event.target instanceof Element && event.target.closest("a,button")) element.open = false;
+    };
+    element.addEventListener("keydown", closeOnEscape);
+    element.addEventListener("click", closeOnNavigation);
+    return () => {
+      element.removeEventListener("keydown", closeOnEscape);
+      element.removeEventListener("click", closeOnNavigation);
+    };
+  }, []);
+  return <details className="public-mobile-menu" ref={menu}>
+    <summary aria-label="打开或关闭导航"><HamburgerMenuIcon className="menu-open-icon" aria-hidden="true" /><Cross2Icon className="menu-close-icon" aria-hidden="true" /></summary>
+    <div className="public-menu-content">
+      <GlobalNavigation activeDestination={activeDestination} adminAuthenticated={adminAuthenticated} openAdminLogin={openAdminLogin} />
+      <DashboardLink href="/health" ariaCurrent={activeDestination === "system" ? "page" : undefined}>运行状态</DashboardLink>
+    </div>
+  </details>;
 }
 
 function AdminSectionNavigation({ location }: { location: DashboardLocation }) {
@@ -270,6 +306,7 @@ export default function DashboardShell({ children, location }: { children: React
     popupRef.current = openAdminAuthPopup(
       (url, target, features) => window.open(url, target, features),
       () => window.location.assign("/admin"),
+      window,
     );
     if (!popupRef.current) return;
     popupRef.current.focus();
@@ -280,7 +317,7 @@ export default function DashboardShell({ children, location }: { children: React
       void completeAdminLogin();
     }, 500);
   };
-  return <div className={`dashboard-shell is-${activeDestination}`}>
+  return <div className={`dashboard-shell is-${activeDestination}${activeDestination !== "admin" ? " is-public" : ""}`}>
     <div className="grain" />
     <div className="dashboard-shell-header">
       <DashboardHeader

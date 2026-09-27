@@ -2,6 +2,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import LiveRoomView from "../_views/LiveRoomView";
+import DashboardPageSkeleton from "./DashboardPageSkeleton";
 import { primeDashboardResources } from "../_lib/dashboard-resource";
 import { settleResponsiveScroll } from "../_lib/responsive-scroll";
 import type { StatusPayload as HealthStatusPayload } from "../_views/HealthView";
@@ -87,6 +88,7 @@ export default function DashboardApp({
   primeDashboardResources(initialResources);
   const [location, setLocation] = useState(initialLocation);
   const [navigationFailure, setNavigationFailure] = useState<string | null>(null);
+  const [pendingLocation, setPendingLocation] = useState<DashboardLocation | null>(null);
   const navigationSequence = useRef(0);
   const pendingScrollTop = useRef<number | null>(null);
 
@@ -105,10 +107,14 @@ export default function DashboardApp({
       return;
     }
     const sequence = ++navigationSequence.current;
+    setPendingLocation(destination);
     try {
       await preloadRoom(destination.room);
     } catch {
-      if (sequence === navigationSequence.current) setNavigationFailure(canonicalHref(destination));
+      if (sequence === navigationSequence.current) {
+        setPendingLocation(null);
+        setNavigationFailure(canonicalHref(destination));
+      }
       return;
     }
     if (sequence !== navigationSequence.current) return;
@@ -117,6 +123,7 @@ export default function DashboardApp({
     else window.history.pushState(null, "", nextHref);
     pendingScrollTop.current = currentScrollTop;
     setNavigationFailure(null);
+    setPendingLocation(null);
     setLocation(destination);
   }, []);
 
@@ -178,13 +185,16 @@ export default function DashboardApp({
       const destination = parseDashboardUrl(new URL(window.location.href));
       if (!destination) return;
       const sequence = ++navigationSequence.current;
+      setPendingLocation(destination);
       void preloadRoom(destination.room).then(() => {
         if (sequence !== navigationSequence.current) return;
         setNavigationFailure(null);
+        setPendingLocation(null);
         setLocation(destination);
       }).catch(() => {
         if (sequence !== navigationSequence.current) return;
         window.history.replaceState(null, "", canonicalHref(location));
+        setPendingLocation(null);
         setNavigationFailure(canonicalHref(destination));
       });
     };
@@ -199,8 +209,10 @@ export default function DashboardApp({
   return <DashboardNavigationProvider value={navigation}>
     <DashboardShell location={location}>
       {navigationFailure && <div className="current-data-notice audit-resource-notice is-error" role="alert"><b>目标页面暂不可用</b><span>页面文件加载失败，当前内容已保留。</span><button type="button" onClick={() => window.location.assign(navigationFailure)}>重新打开目标页面</button></div>}
+      {pendingLocation && <DashboardPageSkeleton location={pendingLocation} />}
+      <div className="dashboard-view-content" hidden={pendingLocation !== null}>
       <DashboardContentBoundary href={canonicalHref(location)}>
-      <Suspense fallback={<main className="app-view-loading" role="status" aria-label="正在打开页面"><span>正在打开页面…</span><i /></main>}>
+      <Suspense fallback={<DashboardPageSkeleton location={location} />}>
         {location.room === "architecture" && <ArchitectureView />}
         {location.room === "live" && <LiveRoomView />}
         {location.room === "status" && <StatusView initialPayload={initialAdminStatus} />}
@@ -211,6 +223,7 @@ export default function DashboardApp({
         {location.room === "assistant" && <AssistantView />}
       </Suspense>
       </DashboardContentBoundary>
+      </div>
     </DashboardShell>
   </DashboardNavigationProvider>;
 }

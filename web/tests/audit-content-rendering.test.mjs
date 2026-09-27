@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
@@ -16,9 +16,11 @@ const resourcesPath = fileURLToPath(new URL("../app/_lib/dashboard-resource.ts",
 const temporaryRoot = mkdtempSync(join(tmpdir(), "aurum-audit-content-"));
 test.after(() => rmSync(temporaryRoot, { recursive: true, force: true }));
 
-const resourceUrls = ["/api/status", "/api/audit", "/api/audit-briefs", "/api/audit-stories"];
+const newsIndexUrl = `/api/news-index?page=1&limit=${JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url))).newsPageSize}&review_state=COMPLETED`;
+const resourceUrls = [newsIndexUrl,"/api/status", "/api/audit", "/api/audit-briefs", "/api/audit-stories", "/api/news-evidence?mode=eligible&page=1&limit=20"];
 const built = await build({
   bundle: true, write: false, platform: "node", format: "esm", jsx: "automatic",
+  loader: { ".webp": "dataurl" },
   define: {__AURUM_DEPLOYMENT__: JSON.stringify({is_preview: false})},
   nodePaths: [join(dependencyPackage, "..", "node_modules")],
   banner: { js: "import {createRequire} from 'node:module'; const require=createRequire(import.meta.url);" },
@@ -26,16 +28,20 @@ const built = await build({
     resolveDir: fileURLToPath(new URL("..", import.meta.url)), loader: "tsx",
     contents: `import React from 'react';
       import {renderToStaticMarkup} from 'react-dom/server';
-      import AuditView, {NewsRow, StoryCard} from ${JSON.stringify(viewPath)};
+      import AuditView, {NewsRow, StoryCard, PaginationButton, MacroData} from ${JSON.stringify(viewPath)};
       import PreviewBanner from ${JSON.stringify(fileURLToPath(new URL("../app/_components/PreviewBanner.tsx", import.meta.url)))};
       import LiveRoomView from ${JSON.stringify(fileURLToPath(new URL('../app/_views/LiveRoomView.tsx', import.meta.url)))};
       import {OverviewCards,validOverviewBriefs,validOverviewEvents} from ${JSON.stringify(fileURLToPath(new URL('../app/_components/OverviewNews.tsx', import.meta.url)))};
+      import DashboardPageSkeleton from ${JSON.stringify(fileURLToPath(new URL('../app/_components/DashboardPageSkeleton.tsx', import.meta.url)))};
+      export function renderSkeleton(room) {return renderToStaticMarkup(React.createElement(DashboardPageSkeleton,{location:{room,auditView:"news"}}));}
       export {validOverviewBriefs,validOverviewEvents};
       export function renderOverview(props) {return renderToStaticMarkup(React.createElement(OverviewCards,props));}
       import StatusView from ${JSON.stringify(fileURLToPath(new URL("../app/_views/StatusView.tsx", import.meta.url)))};
       import {clearDashboardResource,updateDashboardResource} from ${JSON.stringify(resourcesPath)};
       export function renderPreview(payload) { updateDashboardResource("/api/status",()=>payload); return renderToStaticMarkup(React.createElement(PreviewBanner)); }
       export function renderLive(payload) { updateDashboardResource("/api/status",()=>payload); return renderToStaticMarkup(React.createElement(LiveRoomView)); }
+      export function renderMacro(rows) {return renderToStaticMarkup(React.createElement(MacroData,{rows}));}
+      export function renderPageButton(props) {return renderToStaticMarkup(React.createElement(PaginationButton,props));}
       export function renderStory(story,expanded=false) {return renderToStaticMarkup(React.createElement(StoryCard,{story,expanded}));}
       export function renderNews(row) { return renderToStaticMarkup(React.createElement(NewsRow,{row})); }
       export function renderStatus(payload) { return renderToStaticMarkup(React.createElement(StatusView,{initialPayload:payload})); }
@@ -48,7 +54,20 @@ const built = await build({
 });
 const renderedModule = join(temporaryRoot, "audit.mjs");
 writeFileSync(renderedModule, built.outputFiles[0].contents);
-const { render, renderNews, renderStatus, renderLive, renderPreview, renderOverview, renderStory, validOverviewBriefs, validOverviewEvents } = await import(pathToFileURL(renderedModule).href);
+const { renderSkeleton, renderMacro, renderPageButton, render, renderNews, renderStatus, renderLive, renderPreview, renderOverview, renderStory, validOverviewBriefs, validOverviewEvents } = await import(pathToFileURL(renderedModule).href);
+
+test("overview decorations arrive with the view instead of separate image requests", () => {
+  const html = renderLive({system:{online:false},counts:{},sources:{},latest:null});
+  const sources = [...html.matchAll(/<img[^>]+src="(data:image\/webp;base64,[^"]+)"/g)].map(match => match[1]);
+  const originals = ["overview-gold.webp", "overview-waves.webp"].map(name =>
+    readFileSync(new URL(`../public/images/${name}`, import.meta.url)));
+  assert.equal(sources.length, 2);
+  sources.forEach((url,index) => assert.deepEqual(Buffer.from(url.split(",")[1],"base64"), originals[index]));
+  assert.ok(originals.reduce((bytes,original) => bytes + original.length,0) < 50_000,
+    "Only these small decorations should be carried in the view bundle");
+  assert.doesNotMatch(html, /src="\/images\/overview-/);
+  assert.match(html, /class="overview-gold"[^>]*width="88" height="88"/);
+});
 
 test("article row expands publisher provenance with one coherent public label", () => {
   const row = {headline: "政策会议展望", emerging_topic_zh: "政策会议展望", event_type: "macro_preview",
@@ -330,7 +349,7 @@ test("brief prose hides packet refs in every field without rewriting evidence", 
 test("overview links to current events without asserting omitted status counts", () => {
   const html = renderLive({generated_at: "2026-09-26T08:00:00Z", system: {online:false,quote_age_seconds:null}, counts:{}, sources:{}, news_metrics:{articles:{received:10,stored_revisions:12},events:{independent:0,currently_model_eligible:0}}});
   assert.match(html, /href="\/audit\?view=evidence"/);
-  assert.match(html, /<h2>当前事件<\/h2>/);
+  assert.match(html, /<h2>[\s\S]*?当前事件<\/h2>/);
   assert.doesNotMatch(html, /0.*个独立事件/);
 });
 
@@ -353,7 +372,7 @@ test("overview retains only three original headlines from latest date and revisi
   assert.equal(validOverviewBriefs({daily_news_briefs:[{...data.daily_news_briefs[0],brief_date:null}]}),false);
   const before=JSON.stringify(data);
   const html=renderOverview({briefs:{data,error:null},events:{data:events,error:null},snapshot:true});
-  assert.match(html,/2026\/09\/26/);
+  assert.match(html,/<time dateTime="2026-09-26" title="2026-09-26">09\/26<\/time>/i);
   assert.match(html,/LATEST2/); assert.match(html,/EVENT2/);
   assert.doesNotMatch(html,/LATEST3|EVENT3|OLDER|OLDREV|LONG SUMMARY|E01|今日/);
   assert.match(html,/预览快照/);
@@ -398,4 +417,243 @@ test("story cards default to latest summary and reveal a newest-first complete c
   const fallbackHtml=renderStory(fallback,true);
   assert.ok(fallbackHtml.indexOf('headline-fallback')<fallbackHtml.indexOf('headline-new'));
   assert.ok(fallbackHtml.indexOf('headline-new')<fallbackHtml.indexOf('headline-unknown'));
+});
+
+
+test("branch coverage keeps compact provenance without a full-width snapshot notice", () => {
+  const status = {...baseline["/api/status"], preview: {
+    is_preview: true,
+    branch_snapshot: {generated_at: generatedAt, status_paths: ["factor_coverage"]},
+  }};
+  const html = render("coverage", {...baseline, "/api/status": status});
+  assert.doesNotMatch(html, /分支构建快照|此页使用分支重新计算/);
+  assert.match(html, /<small>分支快照<\/small>/);
+  assert.match(html, /<option value="coverage"[^>]*>[^<]*分支快照<\/option>/);
+  assert.match(html, /暂无宏观数据/);
+  assert.match(html, /所选资源时间[^<]*19:00:00/);
+});
+
+
+test("brief heading uses the selected date regardless of generated title or phase", () => {
+  for (const [date, phase, title] of [["2026-09-27", "INTRADAY", "2026-09-27 黄金市场简报"], ["2026-09-26", "FINAL", "黄金周线料将收跌"]]) {
+    const html = render("briefs", {...baseline, "/api/audit-briefs": {...details.briefs,
+      daily_news_briefs: [{brief_date:date, generated_at:generatedAt, phase, model_version:"gemma", brief:{title,overview:"Retained overview",items:[]}}]}});
+    assert.match(html, new RegExp(`<h2>${date} 黄金市场简报</h2>`));
+    assert.doesNotMatch(html, /<h2>黄金周线料将收跌/);
+    assert.match(html, /Retained overview/);
+  }
+});
+
+test("audit removes the statistics rules disclosure and uses named pagination icons", () => {
+  const html = render("evidence", baseline);
+  assert.doesNotMatch(html, /查看统计规则|evidence-rule-note/);
+  for (const [direction,label] of [["previous","上一页"],["next","下一页"]]) {
+    const button = renderPageButton({direction,disabled:true});
+    assert.match(button, new RegExp(`aria-label="${label}"`));
+    assert.match(button, /<svg[^>]*aria-hidden="true"/);
+    assert.match(button, /disabled=""/);
+    assert.doesNotMatch(button, new RegExp(`>${label}<`));
+  }
+});
+
+
+test("macro reading displays six observed series without collector or model status", () => {
+  const html = renderMacro([
+    {domain:"利率",value:4.87,unit:"percent",observed_at:"2026-09-24",status:"WARMING_UP"},
+    {domain:"流动性",value:6747704,unit:"USD millions",observed_at:"2026-09-23"},
+    {domain:"风险偏好",value:14.21,unit:"index",observed_at:"2026-09-22"},
+    {domain:"黄金自身",status:"LIVE",action_bearing:true},
+    {domain:"通胀",status:"COLLECTING"},
+  ]);
+  assert.equal((html.match(/<article>/g) ?? []).length, 6);
+  assert.match(html, /4.87<small>%/);
+  assert.match(html, /6.748<small>万亿美元/);
+  assert.match(html, /VIX 波动率指数/);
+  assert.match(html, /美联储广义美元指数/);
+  assert.match(html, /观测日期 2026-09-24/);
+  assert.match(html, /暂无观测数据/);
+  assert.doesNotMatch(html, /黄金自身|通胀|11\/11|等待训练|实时|采集中/);
+  for (const value of [null, NaN, Infinity]) {
+    assert.doesNotMatch(renderMacro([{domain:"利率",value,unit:"percent"}]), /NaN|Infinity|0.00/);
+  }
+  assert.doesNotMatch(renderMacro([{domain:"流动性",value:6747704,unit:"index"}]), /6.748|6747704/);
+});
+
+test("story reading never displays deployment diagnostics including Preview snapshots", () => {
+  for (const status of ["PREVIEW_SNAPSHOT", "DEPLOYMENT_DRIFT", "MATCHED"]) {
+    const html = render("stories", {...baseline, "/api/status": {...baseline["/api/status"],system:{deployment:{status,runtime_git_sha:"abcd1234",expected_git_sha:"abcd1234"}}},"/api/audit-stories":details.stories});
+    assert.doesNotMatch(html, /deployment-proof|版本正常|版本暂时无法核对|版本需要更新|abcd1234/);
+    assert.match(html, /事件脉络/);
+  }
+});
+
+const curatedEvent = (id, published, extra = {}) => ({
+  event_key: id, canonical_headline: `整理后的事件-${id}`, canonical_source: "wire",
+  source_published_time: published, collector_first_seen_time: published,
+  broad_model_eligible: true, topics: ["rates_fed"], member_count: 3,
+  independent_publishers: 2, publisher_domains: ["publisher.test", "second.test"],
+  ...extra,
+});
+function renderEvents(items, total = items.length, extras = {}) {
+  return selectedBody(render("evidence", {...baseline,
+    "/api/status": {...baseline["/api/status"], news_evidence: items,
+      news_evidence_summary: {broad_model_eligible: total}, ...extras},
+  }));
+}
+test("curated events read newest first without model audit concepts", () => {
+  const old = curatedEvent("old", "2026-09-26T01:00:00Z");
+  const latest = curatedEvent("new", "2026-09-27T01:00:00Z", {
+    model_seen: true, frozen_decisions: 999, frozen_model_uses: 999,
+    model_identities: ["FULL"], model_unseen_reason_codes: ["NEEDS_CONFIRMATION"],
+  });
+  const html = renderEvents([old, latest, latest,
+    curatedEvent("excluded", "2026-09-28T01:00:00Z", {broad_model_eligible:false})]);
+  assert.match(html, /已整理、合并重复报道，最新在前/);
+  assert.ok(html.indexOf("整理后的事件-new") < html.indexOf("整理后的事件-old"));
+  assert.equal((html.match(/整理后的事件-new/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /整理后的事件-excluded|模型|预测|训练|历史上用过|从未用过|NEWS USED|SHADOW|35%/);
+  assert.match(html, /3 篇报道 · 2 个独立来源/);
+  assert.match(html, /publisher.test · second.test/);
+  assert.match(html, /09\/27 09:00:00/);
+  assert.match(html, /<details class="current-event-sources">/);
+  assert.doesNotMatch(html, /<details[^>]* open/);
+  assert.match(html, /aria-label="新闻事件翻页"/);
+});
+test("event source fallbacks stay readable and do not invent links or times", () => {
+  const html = renderEvents([curatedEvent("missing", null, {publisher_domains:[],
+    source_identity_organizations:["A reporting organization"], topics:null})]);
+  assert.match(html, /发布时间未提供|A reporting organization/);
+  assert.doesNotMatch(html, /href="https:|Invalid Date|模型|预测/);
+});
+
+
+test("room loading renders bounded content skeletons with one accessible status", () => {
+  for (const room of ["audit", "live", "health"]) {
+    const html = renderSkeleton(room);
+    assert.equal((html.match(/role="status"/g) || []).length, 1);
+    assert.equal((html.match(/class="news-skeleton-row"/g) || []).length, 6);
+    assert.match(html, /aria-busy="true"/);
+    assert.match(html, /aria-hidden="true"/);
+    assert.equal(html.includes('class="skeleton-navigation"'), room === "audit");
+  }
+});
+
+test("an empty initial news read shows list skeletons instead of blank rows", () => {
+  const html = selectedBody(render("news", baseline));
+  assert.match(html, /class="news-list-skeleton" role="status"/);
+  assert.equal((html.match(/class="news-skeleton-row"/g) || []).length, 6);
+});
+
+test("navigation skeleton tracks current imports and recovers from failures", async () => {
+  const appPath = fileURLToPath(new URL("../app/_components/DashboardApp.tsx", import.meta.url));
+  const output = await build({
+    bundle:true, write:false, platform:"node", format:"esm", jsx:"automatic",
+    nodePaths:[join(dependencyPackage,"..","node_modules")],
+    banner:{js:"import {createRequire} from 'node:module'; const require=createRequire(import.meta.url);"},
+    plugins:[{name:"navigation-boundary",setup(b){
+      b.onResolve({filter:/^react$/}, a=>a.importer===appPath?{path:"hooks",namespace:"nav"}:null);
+      b.onLoad({filter:/.*/,namespace:"nav"},()=>({contents:`
+        export * from ${JSON.stringify(require.resolve("react"))};
+        export function useState(v){const h=globalThis.__navHarness,i=h.index++;if(!(i in h.state))h.state[i]=v;
+          return [h.state[i],n=>h.state[i]=typeof n==='function'?n(h.state[i]):n];}
+        export function useRef(v){return useState({current:v})[0];}
+        export function useCallback(v){return v;} export function useMemo(fn){return fn();}
+        export function useEffect(fn){globalThis.__navHarness.effects.push(fn);} export function useLayoutEffect(){}
+      `,loader:"js",resolveDir:fileURLToPath(new URL("..",import.meta.url))}));
+      b.onResolve({filter:/_views\//},a=>a.importer===appPath?{path:a.path,namespace:"nav-view"}:null);
+      b.onLoad({filter:/.*/,namespace:"nav-view"},a=>({contents:a.path.endsWith("LiveRoomView")
+        ? `export default function View(){return <main>Preserved overview</main>}`
+        : `await globalThis.__navHarness.gates[${JSON.stringify(a.path.split('/').pop())}].promise;
+           export default function View(){return <main>Loaded destination</main>}`,
+        loader:"tsx",resolveDir:fileURLToPath(new URL("..",import.meta.url))}));
+      b.onResolve({filter:/^\.\/Dashboard(Shell|ContentBoundary|Navigation)$/},a=>a.importer===appPath?{path:a.path,namespace:"nav-shell"}:null);
+      b.onLoad({filter:/.*/,namespace:"nav-shell"},()=>({contents:`
+        export default function Pass({children}){return children;}
+        export function DashboardNavigationProvider({value,children}){globalThis.__navHarness.navigation=value;return children;}
+      `,loader:"js",resolveDir:fileURLToPath(new URL("..",import.meta.url))}));
+    }}],
+    stdin:{resolveDir:fileURLToPath(new URL("..",import.meta.url)),loader:"tsx",contents:`
+      import React from 'react';import {renderToStaticMarkup} from 'react-dom/server';
+      import DashboardApp from ${JSON.stringify(appPath)};
+      export function render(){const h=globalThis.__navHarness;h.index=0;h.effects=[];
+        return renderToStaticMarkup(<DashboardApp initialLocation={{room:'live',auditView:'news'}}/>);}
+    `},
+  });
+  const path=join(temporaryRoot,"navigation.mjs");writeFileSync(path,output.outputFiles[0].contents);
+  const {render:draw}=await import(pathToFileURL(path).href);
+  const original=globalThis.window;
+  const gate=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};};
+  const h={index:0,state:[],effects:[],gates:{AuditView:gate(),HealthView:gate(),RetryView:gate()}};
+  globalThis.__navHarness=h;
+  const history=[];let popstate;
+  globalThis.window={location:{href:"https://dashboard.test/"},scrollY:0,
+    history:{pushState(a,b,href){history.push(href);},replaceState(a,b,href){history.push(href);}},
+    addEventListener(name,fn){if(name==='popstate')popstate=fn;},removeEventListener(){}};
+  try {
+    assert.match(draw(),/Preserved overview/);
+    const first=h.navigation.navigate('/audit?view=news');
+    assert.match(draw(),/新闻与事件加载中/);
+    assert.match(draw(),/hidden=""[^>]*><main>Preserved overview/);
+    const second=h.navigation.navigate('/health');
+    h.gates.AuditView.resolve();await first;
+    assert.match(draw(),/aria-label="页面加载中"/);
+    assert.deepEqual(history,[]);
+    h.gates.HealthView.reject(new Error('test import failure'));await second;
+    assert.match(draw(),/目标页面暂不可用/);assert.match(draw(),/Preserved overview/);
+    assert.doesNotMatch(draw(),/hidden=""|page-skeleton/);
+    h.effects.at(-1)();window.location.href='https://dashboard.test/admin/retry-jobs';popstate();
+    assert.match(draw(),/page-skeleton/);
+    h.gates.RetryView.reject(new Error('test popstate failure'));
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.doesNotMatch(draw(),/hidden=""|page-skeleton/);assert.equal(history.at(-1),'/');
+    await h.navigation.navigate('/audit?view=news');draw();
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.match(draw(),/Loaded destination/);
+    assert.doesNotMatch(draw(),/hidden=""|page-skeleton|目标页面暂不可用/);
+    assert.equal(history.at(-1),'/audit?view=news');
+  } finally {globalThis.window=original;delete globalThis.__navHarness;}
+});
+
+
+test("cached news remains visible while missing totals are refreshed", () => {
+  const html = selectedBody(render("news", {...baseline, [newsIndexUrl]: {
+    items:[{source:"wire",source_item_id:"cached",headline:"Retained cached article",model_visibility:"MODEL_INELIGIBLE",content_status:"FULL_TEXT",annotation_status:"READY",category:"利率/Fed"}],
+    total:1,all_total:1,category_counts:{},page:1,page_size:12,totals_scope:"LOADING",
+    review_state:"COMPLETED",review_state_counts:{COMPLETED:1,PROCESSING:0},
+  }}));
+  assert.match(html,/Retained cached article/);
+  assert.doesNotMatch(html,/class="news-list-skeleton"/);
+});
+
+test("article reading badges retain status distinctions without model permissions", () => {
+  const base={source:"wire",source_item_id:"reading-state",headline:"Original headline",
+    content_status:"FULL_TEXT",content_characters:500,annotation_status:"READY",summary_zh:"Original summary"};
+  for (const [visibility,impact,label,tone] of [
+    ["MODEL_VISIBLE","ACTIVE","时效内","current"],
+    ["MODEL_VISIBLE","PENDING_IMPACT","待评估","pending"],
+    ["MODEL_VISIBLE",undefined,"待评估","pending"],
+    ["MODEL_INELIGIBLE","DUPLICATE_REPORT","重复报道","reference"],
+    ["MODEL_INELIGIBLE","COMMENTARY_ONLY","评论观点","reference"],
+    ["MODEL_INELIGIBLE","HISTORICAL_CONTEXT","历史资料","reference"],
+    ["MODEL_INELIGIBLE","BACKGROUND","背景资料","reference"],
+    ["MODEL_INELIGIBLE","MISSING_PUBLICATION_TIME","时间待核实","reference"],
+    ["MODEL_INELIGIBLE",undefined,"仅供参考","reference"],
+    ["IMPACT_EXPIRED","EXPIRED","已过时效","reference"],
+    ["IMPACT_EXPIRED","EXPIRED_ON_RECEIPT","已过时效","reference"],
+    ["IMPACT_PENDING","PENDING_IMPACT","待评估","pending"],
+    ["NOT_YET_PARSED",undefined,"待整理","pending"],
+    ["WAITING_CONTENT",undefined,"待补正文","pending"],
+    ["CONTENT_UNAVAILABLE",undefined,"正文缺失","reference"],
+    ["DISPLAY_ONLY",undefined,"阅读参考","reference"],
+    ["COLLECT_ONLY",undefined,"采集留存","reference"],
+    ["FUTURE_STATE",undefined,"状态待确认","reference"],
+  ]) {
+    const row={...base,model_visibility:visibility,impact_status:impact};
+    const original=JSON.stringify(row),html=renderNews(row);
+    assert.match(html,new RegExp(`class="eligibility-badge news-reading-${tone}"[^>]*>${label}</small>`));
+    assert.match(html,/>新闻状态<\/dt>/);
+    assert.match(html,/Original headline/);assert.match(html,/Original summary/);
+    assert.doesNotMatch(html,/可用于模型|不可用于模型|模型权限|进入模型|影响已结束|FUTURE_STATE/);
+    assert.equal(JSON.stringify(row),original,"presentation must not rewrite eligibility evidence");
+  }
 });

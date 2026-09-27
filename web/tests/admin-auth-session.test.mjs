@@ -96,12 +96,37 @@ test("falls back to a full-page handoff when the browser blocks the popup", () =
   let fallbackCalls = 0;
   let openedUrl;
   const popup = { focus() {} };
+  const opener = {screenX:0,screenY:0,outerWidth:1440,outerHeight:900};
   assert.equal(openAdminAuthPopup((url) => {
     openedUrl = url;
     return popup;
-  }, () => { fallbackCalls += 1; }), popup);
+  }, () => { fallbackCalls += 1; }, opener), popup);
   assert.equal(openedUrl, ADMIN_AUTH_COMPLETE_PATH);
   assert.equal(fallbackCalls, 0);
-  assert.equal(openAdminAuthPopup(() => null, () => { fallbackCalls += 1; }), null);
+  assert.equal(openAdminAuthPopup(() => null, () => { fallbackCalls += 1; }, opener), null);
   assert.equal(fallbackCalls, 1);
+});
+
+
+test("login popup is centered on its opener including secondary monitors and small windows", () => {
+  for (const opener of [
+    {screenX:0,screenY:0,outerWidth:1440,outerHeight:900},
+    {screenX:1920,screenY:180,outerWidth:1280,outerHeight:900},
+    {screenX:-1920,screenY:-900,outerWidth:1440,outerHeight:900},
+    {screenX:120,screenY:90,outerWidth:390,outerHeight:600},
+  ]) {
+    let features;
+    openAdminAuthPopup((url,target,value) => {
+      assert.equal(url,ADMIN_AUTH_COMPLETE_PATH);
+      assert.equal(target,"xauusd-admin-auth");
+      features=Object.fromEntries(value.split(',').map(item=>item.split('=')));
+      return {};
+    },()=>assert.fail("must not fall back when a popup opens"),opener);
+    const {width,height,left,top}=Object.fromEntries(Object.entries(features).map(([key,value])=>[key,Number(value)]));
+    assert.ok(width<=opener.outerWidth && height<=opener.outerHeight);
+    assert.ok(width<=520 && height<=680);
+    assert.equal(left+width/2,opener.screenX+opener.outerWidth/2);
+    assert.equal(top+height/2,opener.screenY+opener.outerHeight/2);
+    assert.equal(features.resizable,"yes");assert.equal(features.scrollbars,"yes");
+  }
 });

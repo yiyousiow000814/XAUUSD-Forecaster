@@ -4,6 +4,39 @@ This specification defines the required visual behavior of the dashboard's
 data-dense navigation, metric grids, tables, and expandable evidence panels.
 It applies to both desktop and phone layouts.
 
+## Article reading status
+
+Article badges describe processing, reference type and the existing validity
+window, not model access or confirmed membership in current events. Show an
+active assessed article as within its validity window; expired windows as past
+their validity window; and duplicate reports, commentary and background as
+reference material, without error styling. Pending assessment must not appear
+active. Unknown states remain unconfirmed rather than exposing storage codes.
+Current events retain their independent consolidation and eligibility rules.
+Keep stored visibility codes, APIs and filtering unchanged when changing these
+reader-facing labels. An expired window does not claim the real event is over.
+
+## Header status and login placement
+
+The public status link owns hover, current-page and keyboard-focus treatment.
+Keep padding around its dot and text; do not draw a tightly fitted pill outline
+inside the link. All states retain a 44px interaction height on phones.
+The login explanation remains a viewport-centered modal. Its separate login
+window requests centering relative to the current browser window, including
+negative coordinates on secondary monitors, with dimensions bounded by the
+opener. Browser window-placement policy may adjust the requested geometry.
+Popup-blocked fallback and authentication authority remain unchanged.
+
+## Navigation loading
+
+Room imports show a bounded skeleton inside the content area, below the shared
+header. Do not use travelling navigation underlines or viewport-height loading
+lines. Keep the previous view mounted but hidden until the active navigation
+succeeds; restore it with the existing retry action on failure. Superseded
+requests cannot clear or replace the current pending state. The initial empty
+news read uses list skeletons; cached rows remain readable during refresh.
+Skeletons announce loading once, respect reduced motion, and fit phone widths.
+
 ## Retry tasks
 
 The retry page shows supported unresolved failed jobs and active manual schedule
@@ -139,12 +172,14 @@ The dashboard has one product shell. `DashboardApp` supplies the current
 location and page content to that shell; individual Views do not recreate any
 part of it.
 
-1. The canonical product brand is `AU`, `AURUM SIGNAL ROOM`, and
-   `XAUUSD · Forward-only intelligence`. It is identical on every top-level
-   View and links to the realtime room.
-2. The public global destination order is `总览`, `新闻与事件`, `系统`, and
-   `管理员登录`. The first three stable entry routes are `/`,
-   `/audit?view=news`, and `/health`. `管理员登录` first opens a local
+1. The canonical product brand is `黄金资讯` and links to the overview.
+   Public overview, news and health share the C visual system: gold/navy brand,
+   white header, cool light background, sans-serif typography, teal selection
+   and rounded white content panels. Public route changes preserve header
+   geometry and navigation controls. Content density may differ by page.
+2. The public global destination order is `总览`, `新闻与事件`, and
+   `管理员登录`. The public reading routes are `/` and `/audit?view=news`.
+   The shell status link opens `/health`. `管理员登录` first opens a local
    explanation dialog; only its explicit Google login action performs a normal
    browser navigation to the Access-protected `/admin` route.
 3. Desktop and mobile navigation derive labels, order, routes, and active
@@ -163,9 +198,13 @@ part of it.
    (`/admin/ai-usage`).
 7. Global destination labels and order are product contracts. A back-style
    action such as `返回实时室` is not a global destination.
-8. The global system-state indicator has one shell-owned location and consumes
-   the shared `/api/status` dashboard resource. It must not create a competing
-   polling or interpretation path.
+8. The global system-state indicator is shell-owned: public desktop header
+   and public phone header. Both consume the same `/api/status` resource and
+   interpretation owner; responsive placement must not add a polling owner.
+   Public phones use the same native disclosure menu on all reading routes.
+   The current destination is marked; Escape closes the menu and returns focus,
+   and selecting a destination closes it. Audit section selection remains
+   subordinate inside the page. Private Admin retains its workspace controls.
 9. New top-level Views plug into the canonical shell. Copying an existing
    shell-level structure instead of extending its owner is design drift.
 10. Deterministic source and rendered-route contracts must prevent design
@@ -291,3 +330,58 @@ Display timeline entries newest first by event time, then publication time or
 first-seen time when unavailable; preserve source records and relation labels.
 Unknown times sort last. Expanded chains use page scrolling, not a separate
 fixed-height scrolling region. Collapsing restores the compact card.
+
+## Public reading density and interaction
+
+The daily brief page title is the selected brief date followed by
+`黄金市场简报`, regardless of generation phase or generated editorial title.
+Audit pagination uses previous/next chevron icons with accessible names,
+disabled boundary states and 44px targets. The redundant statistics-rules
+disclosure is omitted from the current-events reading surface.
+
+Public reading pages omit the redundant branded footer; navigation and status
+remain in the shared header. On phones, news uses compact divided rows rather
+than large individual cards. Collapsed rows show the headline, category and
+publication time; opening restores the complete headline, source, receipt time,
+processing status and article detail. Filters, paging and disclosures retain
+44px interaction targets. Secondary statistics do not dominate the first screen.
+
+Public hover feedback uses a short color transition, without a mouse-only focus
+outline. Keyboard focus remains visible inside rounded boundaries. Reduced
+motion disables these transitions. Scrollbar chrome is hidden throughout the
+app while existing scrolling, keyboard navigation and scroll ownership remain.
+
+## Macro reading and story diagnostics
+
+The retained `/audit?view=coverage` URL is labeled `宏观数据`. It presents six
+observed series: two-year Treasury yield, ten-year TIPS yield, the Fed broad
+Dollar index, WTI spot, Federal Reserve total assets and VIX. Each card exposes
+its precise series identity, value, unit and individual observation date.
+WALCL values in USD millions are divided by one million for USD trillions.
+Missing, non-finite or incompatible-unit values remain unavailable, never zero.
+These are background indicators, not directional signals or a live-data claim.
+Collector states and the legacy 11/11 coverage score are not shown here.
+Underlying collection and API provenance are unchanged; Preview labels remain.
+
+Story reading omits deployment hashes and version-verdict banners. Release
+identity and operational diagnosis belong to their existing owners, not a
+story card. Removing the presentation does not fabricate a matching revision
+or weaken deployment checks.
+
+
+## Current news event reading
+
+The retained `当前可用新闻事件` destination presents the existing current,
+consolidated event selection as a compact reading list, newest publication
+first. Headlines and categories are visible immediately; reporting domains,
+independent-source counts and receipt time are available in a native disclosure.
+Headlines remain complete on phones. Source disclosures and pagination retain
+44px targets and keyboard operation.
+
+This reader omits model use, prediction counts, training statistics, eligibility
+badges, historical-use filters and the prediction-audit table. The existing
+`eligible` transport selector and retained selection policy remain unchanged;
+this presentation change does not change event admission or delete historical
+records. `新闻` remains the full article archive. The current event payload does
+not supply article summaries or original article URLs, so the reader must not
+invent those fields or promise a nonexistent full-article destination.

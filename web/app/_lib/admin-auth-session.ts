@@ -70,11 +70,17 @@ export function isTrustedAdminAuthMessage(
 export function openAdminAuthPopup(
   openWindow: (url: string, target: string, features: string) => Window | null,
   fallback: () => void,
+  opener: Pick<Window, "screenX" | "screenY" | "outerWidth" | "outerHeight">,
 ) {
+  const width = Math.min(520, opener.outerWidth);
+  const height = Math.min(680, opener.outerHeight);
+  // Screen coordinates can be negative on monitors left of or above the primary.
+  const left = Math.round(opener.screenX + (opener.outerWidth - width) / 2);
+  const top = Math.round(opener.screenY + (opener.outerHeight - height) / 2);
   const popup = openWindow(
     ADMIN_AUTH_COMPLETE_PATH,
     "xauusd-admin-auth",
-    "popup=yes,width=520,height=680,resizable=yes,scrollbars=yes",
+    `popup=yes,width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`,
   );
   if (!popup) fallback();
   return popup;
