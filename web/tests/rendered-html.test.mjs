@@ -2186,6 +2186,8 @@ test("live room reports articles without treating omitted event counts as zero",
   assert.doesNotMatch(source, /newsMetrics|metric-grid|source-panel/);
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /\.overview-more[^}]*min-height:48px/);
+  // The overview phone header must override the shared stacked topbar.
+  assert.match(css, /@media\(max-width:850px\)[\s\S]*\.dashboard-shell\.is-live \.dashboard-header \{[^}]*flex-direction:row;[^}]*flex-wrap:nowrap;/);
   // Desktop owns one panel boundary and one divider; phones own two complete cards.
   assert.match(css, /\.overview-news \{[^}]*border:1px solid/);
   assert.match(css, /\.overview-news-card\+\.overview-news-card \{[^}]*border-left:1px solid/);
