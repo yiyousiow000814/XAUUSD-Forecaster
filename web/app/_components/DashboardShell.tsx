@@ -159,17 +159,28 @@ function OverviewMobileMenu({ adminAuthenticated, openAdminLogin }: {
   adminAuthenticated: boolean; openAdminLogin: () => void;
 }) {
   const menu = useRef<HTMLDetailsElement>(null);
-  return <details className="overview-mobile-menu" ref={menu}
-    onKeyDown={event => {
-      if (event.key === "Escape" && menu.current) {
-        menu.current.open = false;
-        menu.current.querySelector("summary")?.focus();
+  useEffect(() => {
+    const element = menu.current;
+    if (!element) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        element.open = false;
+        element.querySelector("summary")?.focus();
       }
-    }}>
+    };
+    const closeOnNavigation = (event: MouseEvent) => {
+      if (event.target instanceof Element && event.target.closest("a,button")) element.open = false;
+    };
+    element.addEventListener("keydown", closeOnEscape);
+    element.addEventListener("click", closeOnNavigation);
+    return () => {
+      element.removeEventListener("keydown", closeOnEscape);
+      element.removeEventListener("click", closeOnNavigation);
+    };
+  }, []);
+  return <details className="overview-mobile-menu" ref={menu}>
     <summary aria-label="打开或关闭导航"><HamburgerMenuIcon className="menu-open-icon" aria-hidden="true" /><Cross2Icon className="menu-close-icon" aria-hidden="true" /></summary>
-    <div className="overview-menu-content" onClick={event => {
-      if ((event.target as HTMLElement).closest("a,button") && menu.current) menu.current.open = false;
-    }}>
+    <div className="overview-menu-content">
       <GlobalNavigation activeDestination="live" adminAuthenticated={adminAuthenticated} openAdminLogin={openAdminLogin} />
       <DashboardLink href="/health">运行状态</DashboardLink>
     </div>
