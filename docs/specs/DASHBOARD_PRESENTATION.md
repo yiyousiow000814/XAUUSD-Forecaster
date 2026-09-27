@@ -65,17 +65,19 @@ deadline it is stale; never refresh the timestamp of historical evidence.
 
 ## Grid boundaries
 
-The overview retains its quote banner and two equal news columns. Each of the
-latest three brief items shows its original headline and up to two lines of the
-existing reader-safe summary. Current events show up to two headline lines and
+The overview retains its quote banner and two equal news columns. The latest
+daily brief is one article: its title, up to five lines of its existing overall
+summary, and up to three supporting headline points. Only the footer links to
+the complete brief; points are not separate article links. Missing overall
+summaries are labeled without inventing a replacement. Current events show up to two headline lines and
 their media publication time in the fixed operator timezone; missing or invalid
 times remain explicitly unavailable. Neither list uses ranking numbers. Full
 text remains available through the existing brief and event destinations.
 Phone layouts stack the same sections without adding nested feature cards.
 The news panel uses an explicit Chinese sans-serif font stack and compact title,
-summary, and metadata sizes. Desktop lists distribute available height across
-their rows, keeping dividers aligned when both columns have three items instead
-of leaving unused space below the shorter list. Phone rows use natural heights.
+summary, and metadata sizes. Desktop event lists distribute available height
+across their rows; the brief has a continuous reading flow without row dividers.
+Phone rows use natural heights.
 
 - A bordered grid has one continuous outer boundary and one visible one-pixel
   divider at every logical row and column boundary.
@@ -345,8 +347,10 @@ controls wrap while retaining their minimum target size.
 ## Overview and story reading
 
 The overview presents a prominent quote, a featured brief and a lighter current
-news list. Each news section keeps at most three headlines; full prose belongs
-in the retained detail pages. Phone layouts stack the sections without reducing
+news list. The brief leads with its title and overall summary, followed by at
+most three supporting points and a single complete-brief link. The event list
+keeps at most three headlines; full prose remains in the retained detail pages.
+Phone layouts stack the sections without reducing
 headlines to tiny dashboard labels.
 
 Story cards start collapsed on desktop and phones. The initial card contains

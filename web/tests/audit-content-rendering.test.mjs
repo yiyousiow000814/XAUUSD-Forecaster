@@ -361,8 +361,8 @@ test("preview hydration starts identically even after another server route prime
 });
 
 
-test("overview shows three latest brief summaries and event publication times", () => {
-  const row = (date,rev,title) => ({brief_date:date,revision_number:rev,model_version:"test",brief:{items:Array.from({length:4},(_,i)=>({headline:`${title}${i} [E01]`,summary:`${title} SUMMARY${i} [E01]`,evidence_ids:["E01"]}))}});
+test("overview reads as one latest brief with an overview and supporting points", () => {
+  const row = (date,rev,title) => ({brief_date:date,revision_number:rev,model_version:"test",brief:{title:`${title} BRIEF`,overview:`${title} OVERVIEW [E01]`,items:Array.from({length:4},(_,i)=>({headline:`${title}${i} [E01]`,summary:`${title} SUMMARY${i} [E01]`,evidence_ids:["E01"]}))}});
   const data = {daily_news_briefs:[row("2026-09-25",99,"OLDER"),row("2026-09-26",1,"OLDREV"),row("2026-09-26",2,"LATEST")]};
   const events = {mode:"eligible",snapshot_id:"snapshot",items:Array.from({length:4},(_,i)=>({event_key:String(i),canonical_headline:`EVENT${i}`,broad_model_eligible:true,source_published_time:["2026-09-26T18:30:00Z",null,"invalid",null][i]}))};
   assert.equal(validOverviewBriefs(data),true);
@@ -374,7 +374,10 @@ test("overview shows three latest brief summaries and event publication times", 
   const html=renderOverview({briefs:{data,error:null},events:{data:events,error:null},snapshot:true});
   assert.match(html,/<time dateTime="2026-09-26" title="2026-09-26">09\/26<\/time>/i);
   assert.match(html,/LATEST2/); assert.match(html,/EVENT2/);
-  assert.match(html,/LATEST SUMMARY0/); assert.match(html,/LATEST SUMMARY2/);
+  assert.match(html,/<h3>LATEST BRIEF<\/h3>/); assert.match(html,/LATEST OVERVIEW/);
+  assert.match(html,/本期要点/);
+  assert.doesNotMatch(html,/LATEST SUMMARY/);
+  assert.equal((html.match(/href="\/audit\?view=briefs"/g)||[]).length,1);
   assert.match(html,/>09\/27 02:30<\/time>/);
   assert.equal((html.match(/发布时间未提供/g)||[]).length,2);
   assert.doesNotMatch(html,/LATEST3|SUMMARY3|EVENT3|OLDER|OLDREV|E01|今日|Invalid Date/);
@@ -390,7 +393,7 @@ test("overview reading uses Chinese sans typography and distributes desktop row 
   assert.match(css, /\.overview-news \{[^}]*--font-sans:"Microsoft YaHei","PingFang SC"/);
   assert.match(css, /\.overview-news-card ul \{[^}]*display:grid;[^}]*grid-auto-rows:1fr/);
   assert.match(css, /\.overview-item-title \{[^}]*-webkit-line-clamp:2;[^}]*font-weight:600/);
-  assert.match(css, /\.overview-item-summary \{[^}]*-webkit-line-clamp:2/);
+  assert.match(css, /\.overview-brief-summary \{[^}]*-webkit-line-clamp:5/);
   assert.match(css, /\.overview-news-card ul \{ display:block; \}/);
 });
 
@@ -402,6 +405,10 @@ test("overview distinguishes loading, confirmed empty, failure and retained cont
   assert.match(renderOverview({briefs:pending,events:pending}),/正在读取/);
   const html=renderOverview({briefs:{data:empty,error:null},events:{data:{items:[]},error:null}});
   assert.match(html,/简报尚未生成/);assert.match(html,/暂无可用事件/);assert.doesNotMatch(html,/正在读取|重试/);
+  const missingOverview=renderOverview({briefs:{data:{daily_news_briefs:[{brief_date:"2026-09-27",revision_number:1,brief:{items:[]}}]},error:null},events:{data:{items:[]},error:null}});
+  assert.match(missingOverview,/2026\/09\/27 黄金简报/);
+  assert.match(missingOverview,/本期未提供整体摘要/);
+  assert.doesNotMatch(missingOverview,/本期要点|简报尚未生成/);
   const failed=renderOverview({briefs:{data:null,error:new Error("provider")},events:{data:{items:[{event_key:"one",canonical_headline:"KEPT"}]},error:new Error("refresh")}});
   assert.match(failed,/暂时无法读取/);assert.match(failed,/显示上次内容/);assert.match(failed,/KEPT/);
   assert.equal((failed.match(/>重试</g)||[]).length,2);

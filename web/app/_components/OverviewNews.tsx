@@ -10,7 +10,7 @@ import { scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 
 declare const __AURUM_DEPLOYMENT__: { is_preview: boolean };
 
-type Briefs = { daily_news_briefs: Array<{ brief_date: string; revision_number: number; brief: { items: Array<{ headline: string; summary: string }> } }> };
+type Briefs = { daily_news_briefs: Array<{ brief_date: string; revision_number: number; brief: { title?: string; overview?: string; items: Array<{ headline: string; summary: string }> } }> };
 type Events = { items: Array<{ event_key: string; canonical_headline: string; source_published_time?: string | null }> };
 type ReadState<T> = { data: T | null; error: Error | null };
 const BRIEFS = "/api/audit-briefs";
@@ -81,7 +81,13 @@ export function OverviewCards({ briefs, events, snapshot = false, retryBriefs, r
     <section className="overview-news-card overview-brief" aria-label="每日简报">
       <header><h2><ReaderIcon aria-hidden="true" />每日简报</h2><span>{latest && <time dateTime={latest.brief_date} title={latest.brief_date}>{latest.brief_date.slice(5).replace("-", "/")}</time>}{snapshot ? " · 预览快照" : ""}</span></header>
       <ReadNotice state={briefs} retry={retryBriefs} />
-      {headlines.length > 0 ? <ul>{headlines.map((item, index) => <li key={index}><DashboardLink href="/audit?view=briefs" className="overview-headline"><span className="overview-item-copy"><span className="overview-item-title">{publicBriefText(item.headline)}</span>{publicBriefText(item.summary) && <span className="overview-item-summary">{publicBriefText(item.summary)}</span>}</span><ChevronRightIcon aria-hidden="true" /></DashboardLink></li>)}</ul>
+      {latest ? <article className="overview-brief-reading">
+        <h3>{publicBriefText(latest.brief.title) || `${latest.brief_date.replaceAll("-", "/")} 黄金简报`}</h3>
+        {publicBriefText(latest.brief.overview)
+          ? <p className="overview-brief-summary">{publicBriefText(latest.brief.overview)}</p>
+          : <p className="overview-brief-summary">本期未提供整体摘要，可查看下方要点或完整简报。</p>}
+        {headlines.length > 0 && <><h4>本期要点</h4><ul className="overview-brief-points">{headlines.map((item, index) => <li key={index}>{publicBriefText(item.headline)}</li>)}</ul></>}
+      </article>
         : briefs.data && <p className="overview-empty">简报尚未生成</p>}
       <DashboardLink href="/audit?view=briefs" className="overview-more">查看完整简报 <ArrowRightIcon aria-hidden="true" /></DashboardLink>
     </section>
