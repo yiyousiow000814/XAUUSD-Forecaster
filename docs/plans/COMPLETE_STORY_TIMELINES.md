@@ -53,3 +53,32 @@ producer evidence, not proof of a subsequent remote sync. Dashboard/story
 tests passed (481 passed, one skipped); web tests passed (398 passed, six
 skipped), followed by 94 rendering tests after adding the border regression.
 Architecture compilation and document links passed.
+
+## Final adversarial review
+
+Reviewed the final implementation independently from the original plan:
+`status_resources._optional_resource_payload` invokes the bounded serializer;
+`sync.resources._audit_projection_bytes` validates matching source times and
+adds the producer revision; `_publish_audit_projection_bytes` uses the existing
+authenticated snapshot POST. The Worker route accepts the unchanged envelope
+under `AUDIT_DETAIL_SNAPSHOT_BYTES`, and its GET returns the retained payload
+without resampling. `StoryCard` copies/sorts nodes and conditionally renders its
+detail; the existing owner retains expansion state. No new recurring actor,
+schema migration, credential, source-evidence write or cache owner was added.
+
+Cold/invalid source still fails rather than publishing an empty replacement.
+Genuine empty detail uses the existing projection marker. Oversize rejection
+leaves the accepted remote snapshot intact and normal optional publication can
+retry. New UI with old producer displays the partial notice; old UI with new
+producer accepts the same fields. Restart reconstructs through the sole main
+runtime owner. Packing is bounded by the admitted row inventory; removed rows
+are display projections, not deleted source evidence. Long individual chains
+can still exceed the fixed envelope and fail explicitly, a documented limit.
+
+Deployed Preview at `ee0b50f9-aurum-signal-room.yiyousiow1234.workers.dev`
+passed desktop, 390x844 and 360x800 navigation, scrolling, expansion and return
+checks. No overflow or console warnings/errors; 44/48px targets. All five
+story-card outer boundaries, including the incomplete desktop row, remained
+intact. See the root design-qa.md for the selected C visual comparison.
+Task-created browser sessions after cleanup: zero. Thirty GitHub checks passed
+on implementation revision 31cff97d.
