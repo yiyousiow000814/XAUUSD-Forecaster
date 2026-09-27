@@ -611,7 +611,7 @@ test("renders static public shell and path-specific admin shells with one invari
     const header = html.match(/<header class="dashboard-header topbar">[\s\S]*?<\/header>/)?.[0];
     assert.ok(header, path);
     assert.doesNotMatch(header, /class="brand-mark"/, path);
-    assert.match(header.replace(/<[^>]+>/g, ""), /黄金资讯/, path);
+    assert.match(header, /(?:黄金资讯|<span class="brand-gold">黄金<\/span>资讯)/, path);
     assert.match(header, /<small>行情与新闻<\/small>/, path);
     // Every public route shares the same closed phone menu and brand authority.
     const publicRoute = !path.startsWith("/admin");
