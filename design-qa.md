@@ -1,5 +1,38 @@
 # Public dashboard design review
 
+## Latest follow-up: observed macro data and story diagnostics
+
+Verified application revision: `5a19d234`.
+Preview: https://c60a1d1f-aurum-signal-room.yiyousiow1234.workers.dev/audit?view=coverage.
+The coverage route is now named `宏观数据`, with six precise series, observed
+values, units, source identifiers and individual observation dates. Collector
+states, the 11/11 score and training copy are removed. Federal Reserve assets
+are converted from USD millions to USD trillions; absent, non-finite and
+incompatible-unit values remain unavailable. Collection and APIs are unchanged.
+
+Story reading no longer shows deployment hashes or version-verdict banners.
+Investigation of the preceding Preview found identical runtime/expected SHAs;
+the unhandled `PREVIEW_SNAPSHOT` status had triggered the unknown-version UI
+fallback. This was not evidence of actual revision drift. Backend provenance
+and release checks remain intact.
+
+Production/Preview builds and all 115 affected rendering/content tests passed.
+Architecture documentation and whitespace checks passed. Final diff review
+traced all six cards to `factor_coverage`, inspected loading/error states and
+unit conversion, and checked shared CSS selectors and retained news navigation.
+
+Desktop 1280x900 and phones 390x844/360x800 were checked on the deployed Preview.
+All six card boundaries, values, units and dates remained visible without
+horizontal overflow. Desktop uses three columns; phones use two. At 360x800,
+opened stories, expanded the six-step chain, confirmed newest-first order,
+collapsed it, returned to macro data and scrolled to the final row. No story
+version banner remained. Browser console had no warnings/errors. The task tab
+was closed and viewport reset; final task-created browser sessions: **0**.
+
+Captures: `C:/Users/yiyou/AppData/Local/Temp/macro-data-desktop.png` and
+`C:/Users/yiyou/AppData/Local/Temp/macro-data-360.png`.
+Production is unchanged; PR #562 remains a draft for visual review.
+
 ## Latest follow-up: brief headings and pagination
 
 Verified application revision: `0669b123`.
