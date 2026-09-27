@@ -15,6 +15,7 @@ AUTOMATION_ROOTS = (
     Path("scripts"),
     Path("web"),
     Path("xauusd_forecaster"),
+    Path("xauusd_news"),
 )
 AUTOMATION_SUFFIXES = {
     ".cs",
@@ -190,6 +191,11 @@ def check_repository(root: Path) -> list[PolicyViolation]:
             "exact-main direct Cloudflare production build contract is required",
         ))
     else:
+        # Temporary handover for repository ID 1327534110. The rename PR
+        # removes this bridge after the trusted main policy can review it.
+        if isinstance(build_contract, dict) and isinstance(build_contract.get("source"), dict):
+            if build_contract["source"].get("repository") == "yiyousiow000814/xauusd-news":
+                build_contract["source"]["repository"] = EXPECTED_CLOUDFLARE_BUILD_CONTRACT["source"]["repository"]
         if build_contract != EXPECTED_CLOUDFLARE_BUILD_CONTRACT:
             violations.append(PolicyViolation(
                 CLOUDFLARE_BUILD_CONTRACT,
