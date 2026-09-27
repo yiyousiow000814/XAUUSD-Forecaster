@@ -1,5 +1,48 @@
 # Public dashboard design review
 
+## Latest review: mobile reading and interaction repair
+
+Verified application revision: `5a6adc12`.
+Immutable Preview: https://70f359c6-aurum-signal-room.yiyousiow1234.workers.dev/.
+This section supersedes the previous footer, density and Preview conclusions.
+
+- Removed the redundant public footer and its CSS/component. Operational status
+  remains in the desktop and phone header; the menu preserves every destination.
+- Phone news now uses a divided list, 15px headlines and compact inline metadata.
+  Source, receipt time and processing details reappear on expansion, together
+  with the complete unclamped headline. The category label stays accessible.
+  Brief, story, overview and event typography/spacing were also reduced.
+- At 390x844, the first news row moved from y=676 to y=378 CSS pixels; the same
+  two-line row shrank from 259px to 95px. Measurements exclude the optional
+  runtime incident banner. Real operational warnings remain visible.
+- Desktop 1280x900 and phones 390x844/360x800 were inspected on deployed Preview.
+  Category filtering, next/previous page, article expand/collapse, menu/Escape,
+  overview return, brief date selection, six-node newest-first story expansion,
+  evidence metric expansion and 11-card coverage boundaries were exercised.
+  No unintended horizontal overflow was found. Menu targets remain 46px high;
+  selectors, paging and other primary controls retain at least 44px targets.
+- Actual desktop hover is rounded, without an outline, and uses 160ms color
+  transitions. Keyboard focus retains a solid 2px indicator. Reduced-motion
+  emulation yielded a 0s transition. Hidden scrollbar chrome does not prevent
+  scrolling: keyboard End reached scrollY=1686 on a 2586px document at 900px.
+- Final screenshots: `C:/Users/yiyou/AppData/Local/Temp/mobile-reading-390.png`
+  and `C:/Users/yiyou/AppData/Local/Temp/mobile-reading-desktop.png`.
+- Full web suite after the initial implementation: 400 passed, 6 skipped.
+  After the final CSS refinement, production build and all 111 affected
+  rendering/content/responsive tests passed. Final branch Preview build passed.
+  Architecture compile/check, architecture docs and whitespace checks passed.
+- An intermediate Preview logged one React hydration error. It did not recur
+  on the final Preview's initial navigation, route interactions or cold reload.
+  Its cause is not established; this report does not claim it was repaired.
+  No final-Preview console warning/error was recorded during these checks.
+- Final source review checked footer removal, responsive selector precedence,
+  menu/status ownership, restored expanded metadata, focus/reduced motion and
+  list/grid boundaries. API and data ownership remain unchanged. Browser tab
+  closed, viewport reset; remaining task-created browser sessions: **0**.
+
+Implementation and Preview checks passed within this UI scope. PR #562 remains
+a draft; neither production activation nor user visual acceptance is implied.
+
 ## Current review: continuity across public pages
 
 Final result: passed for implementation and branch Preview verification.
