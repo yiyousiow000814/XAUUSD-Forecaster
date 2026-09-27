@@ -1,5 +1,19 @@
 # Public dashboard design review
 
+## Latest follow-up: remove the coverage snapshot banner
+
+Verified application revision: `2c3c85d2`.
+Preview: https://67d73004-aurum-signal-room.yiyousiow1234.workers.dev/audit?view=coverage.
+The full-width branch snapshot notice is removed. Compact desktop-tab/phone-
+selector provenance, resource time, global PR identity and failure notices remain.
+The unused notice variant was removed from its shared component.
+
+All 14 content-rendering tests, the Preview build and architecture documentation
+check passed. Desktop 1280x900, phone 390x844 and 360x800 confirmed no long notice
+or horizontal overflow; phone navigation to news and back worked. Screenshot:
+`C:/Users/yiyou/AppData/Local/Temp/coverage-no-banner.png`. The task browser was
+closed and viewport reset; remaining task sessions: 0. No production activation.
+
 ## Latest review: mobile reading and interaction repair
 
 Verified application revision: `5a6adc12`.
