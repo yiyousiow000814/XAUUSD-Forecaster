@@ -35,6 +35,13 @@ and phones. Authentication and private resource permissions do not change.
 
 ## Navigation loading
 
+Switching audit subviews keeps the mounted tab bar and content owner visible;
+only the selected content changes, with resource-specific loading as needed.
+Same-room clicks and history navigation invalidate older room imports without
+starting a room skeleton or resetting saved filters and paging.
+The global operational warning banner is omitted; the status entry and health
+page retain access to operational evidence.
+
 Room imports show a bounded skeleton inside the content area, below the shared
 header. Do not use travelling navigation underlines or viewport-height loading
 lines. Keep the previous view mounted but hidden until the active navigation

@@ -29,7 +29,7 @@ const { publicImpactReason, publicNewsRecord } = await import("../app/_lib/publi
 const { sortNewsEvidenceByTime } = await import("../app/_lib/news-evidence-order.ts");
 const { assistantQueueOperationalAlerts, summarizeAssistantQueue } = await import("../app/api/_shared/assistant-operational-health.ts");
 const { normalizeOperationalEvent } = await import("../app/_lib/operational-health.ts");
-const { correlateOperationalEvents, globalOperationalIncidents } = await import("../app/_lib/operational-incidents.ts");
+const { correlateOperationalEvents } = await import("../app/_lib/operational-incidents.ts");
 const { operationalEventDiagnostic, operationalIncidentActionLabels, operationalIncidentNextRetryAt, operationalIncidentsNextRetryAt, operationalSummaryDetails } = await import("../app/_lib/operational-incident-presentation.ts");
 const { operationalEvidenceText } = await import("../app/_lib/operational-evidence.ts");
 const { sourceHealthErrorPresentation } = await import("../app/_lib/source-health-presentation.ts");
@@ -43,15 +43,6 @@ const {
   sourceScanState,
 } = await import("../app/_lib/health-scan-presentation.ts");
 const { compactPreviewAuditDetail, compactPreviewStatus } = await import("../build/preview-learning.ts");
-
-test("reserves the global shell alert for blocking operational faults", () => {
-  const warning = { code: "OPS_AI_BACKLOG_OVERDUE", severity: "WARNING", scope: "ACTIVE_IMPACT", message_zh: "积压", blocking: false, evidence: {} };
-  const blocking = { code: "OPS_RUNTIME_UPDATE_FAILED", severity: "ERROR", scope: "DEPLOYMENT", message_zh: "更新失败", blocking: true, evidence: {} };
-  assert.deepEqual(globalOperationalIncidents(correlateOperationalEvents([warning])), []);
-  const incidents = globalOperationalIncidents(correlateOperationalEvents([warning, blocking]));
-  assert.equal(incidents.length, 1);
-  assert.equal(incidents[0].root_event.code, blocking.code);
-});
 
 test("current Web operational emitters use catalog-allowed severities", () => {
   const definition = {
@@ -1366,11 +1357,7 @@ test("keeps System Health separate from the dedicated retry workspace", async ()
   assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.retry-job-row \{ grid-template-columns:44px minmax\(0,1fr\)/);
   assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.retry-job-control \{ position:absolute; top:8px; right:10px; width:96px/);
   assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.retry-job-plan > div \{ grid-template-columns:1fr 1fr/);
-  assert.match(layout, /<OperationalAlertBanner \/>/);
-  const banner = readFileSync(new URL("../app/_components/OperationalAlertBanner.tsx", import.meta.url), "utf8");
-  assert.match(banner, /globalOperationalIncidents/);
-  assert.match(banner, /className="operational-alert-toggle"/);
-  assert.match(banner, /aria-expanded=\{expanded\}/);
+  assert.doesNotMatch(layout, /OperationalAlertBanner/);
   assert.match(view, /CURRENT PROBLEMS/);
   assert.doesNotMatch(view, /health-at-a-glance|当前结论/);
   assert.match(view, /className="incident-operator-summary"/);
@@ -1448,7 +1435,6 @@ test("keeps System Health separate from the dedicated retry workspace", async ()
   assert.doesNotMatch(css, /\.component-status>div \{[^}]*grid-template-columns:repeat\(6/);
   assert.doesNotMatch(css, /\.component-status article:not\(:nth-child\(3n\)\)/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.component-card-grid,\.source-health-grid \{ grid-template-columns:1fr; \}/);
-  assert.match(css, /\.operational-alert-banner a \{[^}]*min-height: 44px/);
   assert.match(css, /\.incident-technical-details > button[^}]*min-height:44px/);
   assert.match(css, /\.component-technical-details>summary,\.source-technical-details>summary \{[^}]*min-height:44px/);
   assert.match(css, /article\.is-healthy summary,\.source-health article\.is-healthy summary \{[^}]*min-height:48px/);
@@ -1462,8 +1448,6 @@ test("keeps System Health separate from the dedicated retry workspace", async ()
   assert.doesNotMatch(css, /\.health-at-a-glance|\.health-conclusion-mark|\.health-current-conclusion/);
   assert.match(css, /\.incident-summary-panel time,\.component-status time,\.source-health time,\.incident-raw-evidence \{[^}]*font-family:var\(--font-mono\)/);
   assert.match(css, /\.operational-incident-card \{[^}]*min-width:0/);
-  assert.match(css, /\.operational-alert-toggle \{ display:none; cursor:pointer; \}/);
-  assert.match(css, /\.operational-alert-banner\.is-expanded \.operational-alert-detail \{ display:flex/);
   assert.match(css, /@media \(max-width: 640px\)[\s\S]*\.scheduler-health-grid \{ grid-template-columns: 1fr; \}/);
 });
 
@@ -1474,7 +1458,6 @@ test("separates anonymous health data from owner-only Admin evidence", async () 
   const adminStatus = readFileSync(new URL("../app/api/admin-status/route.ts", import.meta.url), "utf8");
   const assistantHealth = readFileSync(new URL("../app/api/assistant-health/route.ts", import.meta.url), "utf8");
   const healthView = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
-  const alertBanner = readFileSync(new URL("../app/_components/OperationalAlertBanner.tsx", import.meta.url), "utf8");
   const adminOverview = readFileSync(new URL("../app/_views/AdminOverviewView.tsx", import.meta.url), "utf8");
   const adminClient = readFileSync(new URL("../app/_lib/admin-client.ts", import.meta.url), "utf8");
   const statusView = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
@@ -1489,7 +1472,6 @@ test("separates anonymous health data from owner-only Admin evidence", async () 
   ]) assert.match(statusContract, new RegExp(`"${field}"`));
   assert.match(statusProjection, /PUBLIC_STATUS_PRIVATE_FIELDS/);
   assert.doesNotMatch(healthView, /operator-retry|assistant-health|AdminOverview/);
-  assert.doesNotMatch(alertBanner, /assistant-health|AssistantOperationalHealth/);
   assert.match(adminOverview, /fetch\(`\$\{ADMIN_API_PREFIX\}\/operator-retry`/);
   assert.match(adminOverview, /fetch\(`\$\{ADMIN_API_PREFIX\}\/assistant-health`/);
   assert.match(adminOverview, /assistantHealthPresentation\(assistantHealth\)/);
@@ -2009,7 +1991,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(page, /aria-label="切换证据台页面"/);
   assert.match(page, /navigation\.navigate\(`/);
   assert.doesNotMatch(page, /window\.history\.(?:replaceState|pushState)/);
-  assert.match(dashboard, /pendingScrollTop\.current = currentScrollTop;[\s\S]*useLayoutEffect\(\(\) => \{[\s\S]*const cancel = settleResponsiveScroll\(options => window\.scrollTo\(options\), \(\) => window\.scrollY, pendingScrollTop\.current!\);[\s\S]*return cancel;[\s\S]*\}, \[location\]\)/);
+  assert.match(dashboard, /pendingScrollTop\.current = changesRoom \? currentScrollTop : null;[\s\S]*useLayoutEffect\(\(\) => \{[\s\S]*const cancel = settleResponsiveScroll\(options => window\.scrollTo\(options\), \(\) => window\.scrollY, pendingScrollTop\.current!\);[\s\S]*return cancel;[\s\S]*\}, \[location\]\)/);
   assert.match(responsiveScroll, /matchMedia\("\(max-width: 850px\)"\)\.matches/);
   assert.match(responsiveScroll, /if \(isPhoneViewport\(\)\) \{[\s\S]*scroll\(\{ top: 0, left: 0, behavior: "instant" \}\)/);
   assert.match(responsiveScroll, /let remainingFrames = 30/);

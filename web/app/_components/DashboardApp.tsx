@@ -107,25 +107,28 @@ export default function DashboardApp({
       return;
     }
     const sequence = ++navigationSequence.current;
-    setPendingLocation(destination);
-    try {
-      await preloadRoom(destination.room);
-    } catch {
-      if (sequence === navigationSequence.current) {
-        setPendingLocation(null);
-        setNavigationFailure(canonicalHref(destination));
+    const changesRoom = destination.room !== location.room;
+    if (changesRoom) {
+      setPendingLocation(destination);
+      try {
+        await preloadRoom(destination.room);
+      } catch {
+        if (sequence === navigationSequence.current) {
+          setPendingLocation(null);
+          setNavigationFailure(canonicalHref(destination));
+        }
+        return;
       }
-      return;
     }
     if (sequence !== navigationSequence.current) return;
     const nextHref = canonicalHref(destination);
     if (replace) window.history.replaceState(null, "", nextHref);
     else window.history.pushState(null, "", nextHref);
-    pendingScrollTop.current = currentScrollTop;
+    pendingScrollTop.current = changesRoom ? currentScrollTop : null;
     setNavigationFailure(null);
     setPendingLocation(null);
     setLocation(destination);
-  }, []);
+  }, [location.room]);
 
   useLayoutEffect(() => {
     const currentUrl = new URL(window.location.href);
@@ -185,6 +188,13 @@ export default function DashboardApp({
       const destination = parseDashboardUrl(new URL(window.location.href));
       if (!destination) return;
       const sequence = ++navigationSequence.current;
+      if (destination.room === location.room) {
+        pendingScrollTop.current = null;
+        setNavigationFailure(null);
+        setPendingLocation(null);
+        setLocation(destination);
+        return;
+      }
       setPendingLocation(destination);
       void preloadRoom(destination.room).then(() => {
         if (sequence !== navigationSequence.current) return;
