@@ -1972,12 +1972,12 @@ test("shows single events immediately and keeps later changes in one thread", ()
   assert.match(page, /expandedStorylines/);
   assert.match(css, /\.single-event-index>div:not\(\.show-all-mobile-items\)>article:nth-child\(n\+9\)/);
   assert.match(css, /\.story-grid:not\(\.show-all-mobile-items\)>article:nth-child\(n\+5\)/);
-  assert.match(css, /\.story-grid ol\.story-timeline \{ display:none/);
-  assert.match(css, /\.story-grid ol\.story-timeline\.is-open \{ display:block/);
+  assert.match(page, /expanded && <div className="story-detail"/);
+  assert.match(css, /\.story-timeline-toggle \{[^}]*min-height:48px/);
   assert.match(css, /\.single-event-index>\.mobile-reveal-button \{ display:block;[^}]*min-height:48px/);
-  assert.match(css, /\.story-grid \{ gap:18px; border:0; background:transparent; \}/);
+  assert.match(css, /\.story-grid \{ gap:16px; padding:0; border:0; background:transparent; \}/);
   assert.doesNotMatch(page, /暂无后续进展/);
-  assert.match(page, /第一次进展立即显示，后续变化接在一起/);
+  assert.match(page, /先看最新进展，展开查看完整脉络/);
   assert.ok(page.indexOf('className="story-grid"') < page.indexOf('className="theme-streams"'), "events must appear before secondary topic streams");
   assert.match(page, /版本需要更新/);
   assert.doesNotMatch(page, /还没有形成故事链/);
@@ -1986,7 +1986,7 @@ test("shows single events immediately and keeps later changes in one thread", ()
   assert.doesNotMatch(page, /Runtime Git SHA/);
   assert.doesNotMatch(page, /Story Policy/);
   assert.match(page, /未归属事件/);
-  assert.match(css, /\.story-grid[^}]+background:#aaa59a/);
+  assert.match(css, /\.story-grid>article \{[^}]*border:1px solid/);
   assert.match(css, /html \{ background:var\(--paper\)/);
   assert.doesNotMatch(css, /\.story-grid[^}]+background:var\(--ink\)/);
 });

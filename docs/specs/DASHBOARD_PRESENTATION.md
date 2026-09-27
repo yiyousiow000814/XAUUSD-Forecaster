@@ -275,3 +275,19 @@ on the left, mode and breadcrumbs sharing the available right-hand space.
 It inherits the shell gutter without a second inset. Admin navigation bottom
 borders belong to the actual tabs, not the empty leading spacer. On phones,
 controls wrap while retaining their minimum target size.
+
+
+## Overview and story reading
+
+The overview presents a prominent quote, a featured brief and a lighter current
+news list. Each news section keeps at most three headlines; full prose belongs
+in the retained detail pages. Phone layouts stack the sections without reducing
+headlines to tiny dashboard labels.
+
+Story cards start collapsed on desktop and phones. The initial card contains
+the title, latest development, update time and an explicit disclosure control.
+Evidence coverage, attachments and the complete timeline appear on expansion.
+Display timeline entries newest first by event time, then publication time or
+first-seen time when unavailable; preserve source records and relation labels.
+Unknown times sort last. Expanded chains use page scrolling, not a separate
+fixed-height scrolling region. Collapsing restores the compact card.

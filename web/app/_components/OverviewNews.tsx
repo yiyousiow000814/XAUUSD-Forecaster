@@ -66,14 +66,14 @@ export function OverviewCards({ briefs, events, snapshot = false, retryBriefs, r
   const headlines = latest?.brief.items.slice(0, 3) ?? [];
   const rows = events.data?.items.slice(0, 3) ?? [];
   return <div className="overview-news">
-    <section className="overview-news-card" aria-label="每日简报">
+    <section className="overview-news-card overview-brief" aria-label="每日简报">
       <header><h2>每日简报</h2><span>{latest?.brief_date.replaceAll("-", "/")}{snapshot ? " · 预览快照" : ""}</span></header>
       <ReadNotice state={briefs} retry={retryBriefs} />
-      {headlines.length > 0 ? <ol>{headlines.map((item, index) => <li key={index}><span>{publicBriefText(item.headline)}</span></li>)}</ol>
+      {headlines.length > 0 ? <ol>{headlines.map((item, index) => <li key={index}><small aria-hidden="true">{String(index + 1).padStart(2, "0")}</small><span>{publicBriefText(item.headline)}</span></li>)}</ol>
         : briefs.data && <p className="overview-empty">简报尚未生成</p>}
       <DashboardLink href="/audit?view=briefs" className="overview-more">查看完整简报 <span aria-hidden="true">↗</span></DashboardLink>
     </section>
-    <section className="overview-news-card" aria-label="当前事件">
+    <section className="overview-news-card overview-events" aria-label="当前事件">
       <header><h2>当前事件</h2><span>{snapshot ? "预览快照" : "精选新闻"}</span></header>
       <ReadNotice state={events} retry={retryEvents} />
       {rows.length > 0 ? <ul>{rows.map(row => <li key={row.event_key}><span>{row.canonical_headline}</span></li>)}</ul>

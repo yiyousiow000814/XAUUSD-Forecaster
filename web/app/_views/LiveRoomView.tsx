@@ -102,13 +102,12 @@ export default function LiveRoomView() {
             <strong>{fmt(mid)}</strong>
             <span className="currency">USD</span>
           </div>
-          <div className="overview-quote-detail">
-            <span>买价 <b>{fmt(latest?.bid)}</b></span>
-            <span>卖价 <b>{fmt(latest?.ask)}</b></span>
-            <span>报价时间 <time>{localTime(latest?.source_received_time)}</time></span>
-          </div>
         </div>
-
+        <div className="overview-quote-detail">
+          <span>买价 <b>{fmt(latest?.bid)}</b></span>
+          <span>卖价 <b>{fmt(latest?.ask)}</b></span>
+          <span>报价时间 <time>{localTime(latest?.source_received_time)}</time></span>
+        </div>
       </section>
 
       {error && <div className="error-banner">{error}。行情采集可能仍在运行，但网页数据服务已停止。</div>}
