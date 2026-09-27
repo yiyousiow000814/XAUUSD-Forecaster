@@ -306,6 +306,9 @@ the main-only release contract; data preservation and transport invariants remai
   oversized card fails explicitly and preserves the last accepted snapshot.
   During update, older sampled rows remain readable but must be labelled as
   partial by comparing delivered timeline length with `event_count`.
+  Advance the disposable audit read-model contract when its projection changes;
+  restarting with unchanged source data must rebuild obsolete cached semantics
+  through the existing owner rather than republish them under new code identity.
 - The coordinated migration seeds a missing fixed `news_metrics` aggregate from
   the last valid legacy audit owner into the bounded audit summary. This is a
   one-time, reverse-compatible handover write: Stable ignores the split row,

@@ -82,3 +82,24 @@ story-card outer boundaries, including the incomplete desktop row, remained
 intact. See the root design-qa.md for the selected C visual comparison.
 Task-created browser sessions after cleanup: zero. Thirty GitHub checks passed
 on implementation revision 31cff97d.
+
+## Durable-cache activation follow-up
+
+After #560 deployed, the main runtime and sync producer were on 5aaabb92,
+but the durable audit read model still held the prior six-node projection.
+The owner reuses a valid row when its source revision and contract match, even
+after restart. A source update eventually rebuilds it, but a quiet source can
+retain the obsolete projection indefinitely. Advance only the disposable audit
+read-model contract, using the existing mismatch/rebuild path. Leave market
+charts, source rows, transport schema and public API unchanged. A mismatched
+local cache reports unavailable until its normal owner publishes the complete
+replacement; the remote last accepted snapshot remains readable and explicitly
+partial. Cover restart with unchanged source revision, exactly one audit rebuild,
+complete replacement and no sibling rebuild. No manual cache/database mutation.
+
+The 101 dashboard API/read-model tests passed, including unchanged-source
+upgrade from a real v2 contract fixture. Architecture checks passed. Final
+review traced both read and refresh through the shared READ_MODEL_CONTRACTS
+authority: the reader rejects the obsolete disposable cache, the existing
+background owner replaces it atomically, and the subsequent refresh is a no-op.
+This follow-up changes no web source or schema and reuses #560's UI verification.
