@@ -159,7 +159,7 @@ def test_audit_story_projection_keeps_production_shaped_detail_below_transport_l
     }
 
     previous_selection = module.audit_stories_payload(
-        payload, storyline_limit=20, timeline_limit=8,
+        payload, storyline_limit=20,
         candidate_limit=50, stream_limit=12,
     )
     previous_bytes = json.dumps(
@@ -232,3 +232,26 @@ def test_news_index_batches_stay_bounded() -> None:
             {"items": batch}, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
         assert len(encoded) <= module.NEWS_INDEX_BATCH_LIMIT_BYTES
+
+
+def test_story_budget_drops_whole_cards_without_sampling_retained_chains() -> None:
+    rows = [{"storyline_id": str(i), "event_count": 40, "timeline": [
+        {"headline": f"{i}-{j}" + "x" * 900} for j in range(40)
+    ], "covered_roles": [], "missing_roles": [], "market_reactions": [],
+        "commentary": [], "background": []} for i in range(12)]
+    payload = {"storylines": rows, "storyline_summary": {"total": 12}}
+    before = copy.deepcopy(payload)
+    encoded = module.audit_stories_snapshot(payload)
+    result = json.loads(encoded)
+    assert 0 < len(result["storylines"]) < 12
+    assert len(encoded) <= module.AUDIT_DETAIL_LIMIT_BYTES
+    assert result["storyline_summary"] == {"total": 12}
+    assert all(row == rows[i] for i, row in enumerate(result["storylines"]))
+    assert payload == before
+    oversized = copy.deepcopy(payload)
+    oversized["storylines"] = [dict(rows[0], timeline=[{"headline": "x" * 120_001}])]
+    with pytest.raises(module.PayloadContractError):
+        module.audit_stories_snapshot(oversized)
+    invalid = {"storylines": "invalid"}
+    with pytest.raises(module.PayloadContractError):
+        module.audit_stories_snapshot(invalid)

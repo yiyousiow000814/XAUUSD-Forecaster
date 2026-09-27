@@ -85,7 +85,7 @@ def test_audit_detail_projections_bound_items_and_nested_growth() -> None:
     assert len(briefs["daily_news_briefs"]) == 3
     assert all("brief_json" not in row for row in briefs["daily_news_briefs"])
     assert len(stories["storylines"]) == 12
-    assert all(len(row["timeline"]) == 6 for row in stories["storylines"])
+    assert all(row["timeline"] == list(range(100)) for row in stories["storylines"])
     assert all(row["timeline"][:3] == [0, 1, 2] for row in stories["storylines"])
     assert all(row["timeline"][-3:] == [97, 98, 99] for row in stories["storylines"])
     assert all(len(row["commentary"]) == 4 for row in stories["storylines"])

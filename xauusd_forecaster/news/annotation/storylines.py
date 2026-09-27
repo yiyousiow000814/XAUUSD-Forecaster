@@ -583,7 +583,7 @@ def _story_row(episode: str, core: list[dict], attached: list[dict]) -> dict:
          if str(row.get("primary_story_title_zh") or "").strip()),
         episode.replace("_", " "),
     )
-    timeline = [_timeline_row(row, first=index == 0) for index, row in enumerate(core[-20:])]
+    timeline = [_timeline_row(row, first=index == 0) for index, row in enumerate(core)]
     identity = hashlib.sha256(episode.encode()).hexdigest()[:16]
     role_order = (
         "OFFICIAL_PRIMARY", "SINGLE_RELIABLE", "SINGLE_SOURCE",

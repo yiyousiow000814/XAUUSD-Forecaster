@@ -526,6 +526,7 @@ export function StoryCard({ story, expanded = false, onToggle }: {
           <button className="story-timeline-toggle" type="button" aria-expanded={expanded} aria-controls={`story-${story.storyline_id}`} onClick={onToggle}><span>{expanded ? "收起故事链" : `展开故事链 · ${formatExactCount(story.timeline.length)} 个进展`}</span><span aria-hidden="true">{expanded ? "−" : "+"}</span></button>
           {expanded && <div className="story-detail" id={`story-${story.storyline_id}`}>
           <p className="story-order-note">最新在前</p>
+          {story.timeline.length < story.event_count && <p className="story-order-note" role="status">当前仅载入 {formatExactCount(story.timeline.length)} / {formatExactCount(story.event_count)} 条进展，完整记录尚未同步。</p>}
           <div className="story-meta"><span>证据文件 {formatExactCount(story.evidence_document_count)}</span><span>独立组织 {formatExactCount(story.independent_organization_count)}</span><span>{story.independent_confirmation ? "跨组织确认" : "尚未跨组织确认"}</span></div>
           <section className="story-coverage"><div><b>证据覆盖 {formatExactCount(story.coverage_count)}/{formatExactCount(story.coverage_total)}</b>{story.covered_roles.map(role => <span key={role.key}>{role.label}</span>)}{story.missing_roles.map(role => <em className="missing" key={role.key}>仍缺：{role.label}</em>)}</div></section>
 

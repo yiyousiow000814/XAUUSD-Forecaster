@@ -97,11 +97,11 @@ export default function LiveRoomView() {
     <main className="overview-page">
       <section className="overview-quote" aria-label="黄金行情">
         <div>
-          <p className="eyebrow">{marketClosed ? "休市 · 最近报价" : online ? "黄金实时行情" : "黄金行情 · 最近报价"}</p>
+          <p className="eyebrow">现货黄金 <span>（USD）</span></p>
           <div className="overview-price">
             <strong>{fmt(mid)}</strong>
-            <span className="currency">USD</span>
           </div>
+          <p className="overview-market-state">{marketClosed ? "休市 · 最近报价" : online ? "实时行情" : "最近报价"}</p>
         </div>
         <div className="overview-quote-detail">
           <span>买价 <b>{fmt(latest?.bid)}</b></span>
