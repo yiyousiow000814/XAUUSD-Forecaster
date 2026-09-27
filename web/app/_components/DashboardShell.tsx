@@ -188,14 +188,6 @@ function PublicMobileMenu({ activeDestination, adminAuthenticated, openAdminLogi
   </details>;
 }
 
-function PublicFooter({ active }: { active: boolean }) {
-  return <footer className="public-site-footer">
-    <div><span className="overview-footer-name">黄金资讯</span><span className="overview-footer-note">关注黄金市场的重要信息</span></div>
-    <nav aria-label="页面页脚"><DashboardLink href="/audit?view=briefs">每日简报</DashboardLink><DashboardLink href="/audit?view=evidence">当前事件</DashboardLink><DashboardLink href="/health">运行状态</DashboardLink></nav>
-    <div className="overview-footer-state"><GlobalSystemState active={active} /></div>
-  </footer>;
-}
-
 function AdminSectionNavigation({ location }: { location: DashboardLocation }) {
   if (activeDashboardDestination(location.room) !== "admin") return null;
   return <nav className="dashboard-section-nav admin-section-nav" aria-label="管理后台区域">
@@ -335,7 +327,6 @@ export default function DashboardShell({ children, location }: { children: React
       <AdminSectionNavigation location={location} />
     </div>
     {children}
-    {activeDestination !== "admin" && <PublicFooter active={location.room === "health"} />}
     <dialog
       className="admin-login-dialog"
       onClose={() => setAdminLoginOpen(false)}

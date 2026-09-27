@@ -619,6 +619,7 @@ test("renders static public shell and path-specific admin shells with one invari
     const publicRoute = !path.startsWith("/admin");
     if (publicRoute) {
       assert.match(html, /class="dashboard-shell [^"]*is-public"/);
+      assert.doesNotMatch(html, /public-site-footer/);
       assert.match(header, /class="brand-gold">黄金<\/span>资讯/);
     }
     assert.equal(header.match(/aria-current="page"/g)?.length, publicRoute ? 2 : 1, path);
@@ -2194,7 +2195,7 @@ test("live room reports articles without treating omitted event counts as zero",
   assert.match(css, /\.overview-more[^}]*min-height:48px/);
   // The overview phone header must override the shared stacked topbar.
   assert.match(css, /@media\(max-width:850px\)[\s\S]*\.dashboard-shell\.is-public \.dashboard-header \{[^}]*flex-direction:row;[^}]*flex-wrap:nowrap;/);
-  assert.match(css, /\.dashboard-shell\.is-public \.public-site-footer \{[^}]*flex-direction:row;/);
+
   // Desktop owns one panel boundary and one divider; phones own two complete cards.
   assert.match(css, /\.overview-news \{[^}]*border:1px solid/);
   assert.match(css, /\.overview-news-card\+\.overview-news-card \{[^}]*border-left:1px solid/);
@@ -2983,5 +2984,17 @@ test("public reading grids own complete responsive boundaries", () => {
   assert.match(css, /\.is-public \.coverage-card:last-child:nth-child\(n\) \{ grid-column:auto/);
   assert.match(css, /\.is-public \.evidence-summary article:nth-child\(3n\) \{ border-right:0/);
   assert.match(css, /\.is-public \.evidence-summary article:nth-child\(2n\) \{ border-right:0/);
-  assert.match(css, /\.is-public \.news-row,\.is-public \.news-row:last-child \{ border:1px solid var\(--line\)/);
+  assert.match(css, /\.is-public \.news-row\+\.news-row \{ border-top:1px solid var\(--line\)/);
+});
+
+
+test("public reading preserves focus and scrolling while compacting phone rows", () => {
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /html,body,\* \{ scrollbar-width:none/);
+  assert.match(css, /\*::-webkit-scrollbar \{ display:none/);
+  assert.match(css, /\.is-public \.audit-tabs a:hover \{[^}]*outline:none/);
+  assert.match(css, /\.is-public \.audit-tabs a:focus-visible \{ outline:2px solid/);
+  assert.match(css, /@media\(prefers-reduced-motion:reduce\)[\s\S]*transition:none/);
+  assert.match(css, /\.is-public \.news-row:not\(\[open\]\) \.news-row-title small/);
+  assert.match(css, /\.is-public \.news-row\[open\] \.news-row-title strong \{ display:block; -webkit-line-clamp:unset/);
 });

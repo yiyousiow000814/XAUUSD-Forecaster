@@ -166,7 +166,7 @@ part of it.
 7. Global destination labels and order are product contracts. A back-style
    action such as `返回实时室` is not a global destination.
 8. The global system-state indicator is shell-owned: public desktop header
-   and public phone footer. Both consume the same `/api/status` resource and
+   and public phone header. Both consume the same `/api/status` resource and
    interpretation owner; responsive placement must not add a polling owner.
    Public phones use the same native disclosure menu on all reading routes.
    The current destination is marked; Escape closes the menu and returns focus,
@@ -297,3 +297,17 @@ Display timeline entries newest first by event time, then publication time or
 first-seen time when unavailable; preserve source records and relation labels.
 Unknown times sort last. Expanded chains use page scrolling, not a separate
 fixed-height scrolling region. Collapsing restores the compact card.
+
+## Public reading density and interaction
+
+Public reading pages omit the redundant branded footer; navigation and status
+remain in the shared header. On phones, news uses compact divided rows rather
+than large individual cards. Collapsed rows show the headline, category and
+publication time; opening restores the complete headline, source, receipt time,
+processing status and article detail. Filters, paging and disclosures retain
+44px interaction targets. Secondary statistics do not dominate the first screen.
+
+Public hover feedback uses a short color transition, without a mouse-only focus
+outline. Keyboard focus remains visible inside rounded boundaries. Reduced
+motion disables these transitions. Scrollbar chrome is hidden throughout the
+app while existing scrolling, keyboard navigation and scroll ownership remain.
