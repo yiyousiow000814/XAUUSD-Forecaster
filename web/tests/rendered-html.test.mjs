@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
 import { unstable_splitSqlQuery } from "wrangler";
 
 const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -565,7 +568,7 @@ test("keeps global shell ownership centralized and prevents view-level design dr
 
   assert.match(app, /<DashboardShell location=\{location\}>/);
   assert.match(shell, /<header className="dashboard-header topbar">/);
-  assert.match(shell, /黄金资讯/);
+  assert.match(shell, /brand-gold.*黄金.*资讯/);
   assert.match(shell, /行情与新闻/);
   assert.match(shell, /DASHBOARD_GLOBAL_DESTINATIONS\.map/);
   assert.match(shell, /DASHBOARD_ADMIN_DESTINATIONS\.map/);
@@ -573,7 +576,8 @@ test("keeps global shell ownership centralized and prevents view-level design dr
   assert.doesNotMatch(css.match(/\.dashboard-section-nav \{([^}]+)\}/)?.[1] ?? "", /border-bottom/);
   assert.match(css.match(/\.dashboard-section-nav a \{([^}]+)\}/)?.[1] ?? "", /border-bottom:1px solid var\(--ink\)/);
   assert.match(css.match(/\.dashboard-section-nav a \{([^}]+)\}/)?.[1] ?? "", /flex:1 1 0/);
-  assert.match(mobile, /DASHBOARD_GLOBAL_DESTINATIONS\.map/);
+  assert.match(shell, /<MobileDashboardNav>[\s\S]*<GlobalNavigation/);
+  assert.doesNotMatch(mobile, /DASHBOARD_GLOBAL_DESTINATIONS/);
   assert.doesNotMatch(mobile, /const SECTIONS|MobileDashboardSection/);
   assert.equal(navigation.match(/label: "(?:总览|新闻与事件|系统|管理员登录)"/g)?.length, 3);
   assert.match(navigation, /href: "\/audit\?view=news"/);
@@ -610,6 +614,7 @@ test("renders static public shell and path-specific admin shells with one invari
     assert.equal(html.match(/class="dashboard-header topbar"/g)?.length, 1, path);
     const header = html.match(/<header class="dashboard-header topbar">[\s\S]*?<\/header>/)?.[0];
     assert.ok(header, path);
+    assert.match(html, /class="dashboard-shell [^"]*is-product/, path);
     assert.doesNotMatch(header, /class="brand-mark"/, path);
     assert.match(header, /(?:黄金资讯|<span class="brand-gold">黄金<\/span>资讯)/, path);
     assert.match(header, /<small>行情与新闻<\/small>/, path);
@@ -620,8 +625,8 @@ test("renders static public shell and path-specific admin shells with one invari
       assert.doesNotMatch(html, /public-site-footer/);
       assert.match(header, /class="brand-gold">黄金<\/span>资讯/);
     }
-    assert.equal(header.match(/aria-current="page"/g)?.length, publicRoute ? 2 : 1, path);
-    if (publicRoute) {
+    assert.equal(header.match(/aria-current="page"/g)?.length, 2, path);
+    {
       const menu = header.match(/<details class="public-mobile-menu">[\s\S]*?<\/details>/)?.[0];
       assert.ok(menu);
       assert.doesNotMatch(menu, /<details[^>]*\sopen/);
@@ -634,20 +639,20 @@ test("renders static public shell and path-specific admin shells with one invari
     assert.doesNotMatch(header, /返回实时室|学习曲线|AI 模型用量|系统健康|重试任务/, path);
 
     const globalNav = header.match(/<nav class="dashboard-global-nav"[\s\S]*?<\/nav>/)?.[0];
-    const mobileNav = header.match(/<select aria-label="切换主要区域"[\s\S]*?<\/select>/)?.[0];
+    const mobileNav = header.match(/<details class="public-mobile-menu">[\s\S]*?<\/details>/)?.[0];
     assert.ok(globalNav && mobileNav, path);
     let previousGlobal = -1;
     let previousMobile = -1;
     for (const label of publicLabels) {
       const globalIndex = globalNav.indexOf(`>${label}</a>`);
-      const mobileIndex = mobileNav.indexOf(`>${label}</option>`);
+      const mobileIndex = mobileNav.indexOf(`>${label}</a>`);
       assert.ok(globalIndex > previousGlobal, `${path}: desktop ${label}`);
       assert.ok(mobileIndex > previousMobile, `${path}: mobile ${label}`);
       previousGlobal = globalIndex;
       previousMobile = mobileIndex;
     }
     assert.match(globalNav, />管理员登录<\/button>/);
-    assert.match(mobileNav, />管理员登录<\/option>/);
+    assert.match(mobileNav, />管理员登录<\/button>/);
   }
   const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
   assert.match(app, /useLayoutEffect/);
@@ -681,12 +686,13 @@ test("keeps Admin login intent local until the explicit Access handoff", () => {
   assert.match(shellCss, /\.dashboard-admin-login-trigger \{[^}]*border-style:dashed/);
   assert.match(shellCss, /\.admin-login-dialog \{ width:min\(420px/);
   assert.match(shellCss, /\.admin-login-dialog footer \{[^}]*flex-direction:row/);
-  assert.match(mobile, /destination\?\.private[\s\S]*openAdminLogin\(\)/);
+  assert.match(shell, /destination\.private && !adminAuthenticated[\s\S]*onClick=\{openAdminLogin\}/);
+  assert.match(mobile, /event\.target\.closest\("a,button"\)/);
 });
 
 test("renders one canonical Admin navigation with direct child active state", async () => {
   for (const [path, label, marker] of [
-    ["/admin", "概览", /OWNER OPERATIONS/],
+    ["/admin", "概览", /管理后台/],
     ["/admin/assistant", "Assistant", /ASSISTANT/],
     ["/admin/retry-jobs", "重试任务", /PRIVATE OPERATOR QUEUE/],
     ["/admin/ai-usage", "AI 模型用量", /AI 模型使用状态/],
@@ -1519,7 +1525,7 @@ test("separates anonymous health data from owner-only Admin evidence", async () 
   assert.doesNotMatch(adminOverview, /进入私有对话|查看 Windows 应用进度|查看模型额度/);
   assert.match(adminOverview, /className="admin-overview-health"/);
   const adminCss = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(adminCss, /\.admin-overview-card \{[^}]*min-height:198px/);
+  assert.match(adminCss, /\.admin-overview-card \{[^}]*border:1px solid var\(--line\);[^}]*border-radius:12px/);
   assert.match(overview.html, /aria-current="page"[^>]*>概览<\/a>/);
 });
 
@@ -1529,8 +1535,8 @@ test("uses one Chinese system-state presentation across every dashboard page", (
   const contract = readFileSync(new URL("../app/_lib/system-state.ts", import.meta.url), "utf8");
   const freshness = readFileSync(new URL("../app/_components/CurrentDataState.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(css, /\.dashboard-shell\.is-public \.dashboard-global-state \{[^}]*min-height:44px;[^}]*padding:0 10px;[^}]*border-radius:8px/);
-  assert.match(css, /\.dashboard-shell\.is-public \.dashboard-global-state\[aria-current="page"\] \.live-pill \{ box-shadow:none/);
+  assert.match(css, /\.dashboard-shell\.is-product \.dashboard-global-state \{[^}]*min-height:44px;[^}]*padding:0 10px;[^}]*border-radius:8px/);
+  assert.match(css, /\.dashboard-shell\.is-product \.dashboard-global-state\[aria-current="page"\] \.live-pill \{ box-shadow:none/);
   assert.match(css, /\.dashboard-global-state \.live-pill>span \{ flex-shrink:0/);
   assert.match(component, /systemStatePresentation/);
   assert.match(component, /data-read-state/);
@@ -2012,17 +2018,17 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(responsiveScroll, /cancelAnimationFrame\(frame\)/);
   assert.doesNotMatch(page, /scrollAuditTabs|auditTabsRef|向左查看更多审计视图|向右查看更多审计视图/);
   assert.match(shell, /<MobileDashboardNav[\s\S]*activeDestination=\{activeDestination\}/);
-  assert.match(mobileNav, /DASHBOARD_GLOBAL_DESTINATIONS/);
+  assert.match(shell, /<MobileDashboardNav>[\s\S]*<GlobalNavigation/);
   assert.doesNotMatch(mobileNav, /const SECTIONS|学习曲线|AI 模型用量|系统健康/);
   for (const label of ["总览", "新闻与事件", "系统", "管理员登录"]) {
     assert.match(navigation, new RegExp(label));
   }
-  assert.match(mobileNav, /aria-label="切换主要区域"/);
+  assert.match(mobileNav, /aria-label="打开或关闭导航"/);
   assert.match(shell, /DASHBOARD_ADMIN_DESTINATIONS\.map/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.dashboard-section-nav a \{ min-width:0; flex:1 1 0; \}/);
   assert.match(css, /\.topbar \{ align-items:stretch; flex-direction:column/);
   assert.match(css, /\.dashboard-global-nav \{ display:none; \}/);
-  assert.match(css, /\.dashboard-header \.mobile-dashboard-nav \{ grid-column:1; display:grid; grid-template-columns:minmax\(0,1fr\)/);
+  assert.match(css, /\.public-mobile-menu \{ display:block; position:relative/);
   assert.match(css, /\.audit-tabs-shell \{ display:none; \}/);
   assert.match(css, /\.audit-view-picker \{ position:sticky; top:0;[\s\S]*?grid-template-columns:auto minmax\(0,1fr\)/);
   assert.match(css, /\.audit-main \.audit-intro>div:first-child \{ display:none; \}/);
@@ -2169,7 +2175,7 @@ test("live room reports articles without treating omitted event counts as zero",
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /\.overview-more[^}]*min-height:48px/);
   // The overview phone header must override the shared stacked topbar.
-  assert.match(css, /@media\(max-width:850px\)[\s\S]*\.dashboard-shell\.is-public \.dashboard-header \{[^}]*flex-direction:row;[^}]*flex-wrap:nowrap;/);
+  assert.match(css, /@media\(max-width:850px\)[\s\S]*\.dashboard-shell\.is-product \.dashboard-header \{[^}]*flex-direction:row;[^}]*flex-wrap:nowrap;/);
 
   // Desktop owns one panel boundary and one divider; phones own two complete cards.
   assert.match(css, /\.overview-news \{[^}]*border:1px solid/);
@@ -2495,7 +2501,7 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-rail-scrim \{[^}]*z-index:1010/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-news-dialog \{[^}]*inset:50% 12px auto; width:auto; max-width:none; height:auto; max-height:calc\(100dvh - 24px\); margin:0 auto;[^}]*transform:translateY\(-50%\)/);
   assert.match(css, /\.assistant-news-dialog \{[^}]*position:fixed; inset:0;[^}]*width:min\(720px,calc\(100vw - 48px\)\);[^}]*margin:auto/);
-  assert.match(css, /\.dashboard-header \.mobile-dashboard-nav>label \{ grid-template-columns:auto minmax\(0,1fr\)/);
+  assert.match(css, /\.public-menu-content [^{]*\{[^}]*width:232px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell form \{[^}]*grid-template-columns:minmax\(0,1fr\) 52px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell \{[^}]*min-height:69px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell textarea \{[^}]*height:52px;[^}]*max-height:52px/);
@@ -2954,4 +2960,45 @@ test("macro observations use independently bordered responsive cards", () => {
   assert.match(css, /\.macro-grid \{ display:grid; grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
   assert.match(css, /\.macro-grid article \{[^}]*border:1px solid var\(--line\)/);
   assert.match(css, /@media\(max-width:850px\)[\s\S]*\.macro-grid \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+});
+
+
+test("keeps the account slot and mobile destinations stable across authentication", async () => {
+  const compiled = await build({
+    stdin: {
+      contents: `import {createElement} from "react";
+        import {renderToStaticMarkup} from "react-dom/server";
+        import {DashboardHeader} from "./app/_components/DashboardShell";
+        export const renderHeader = (room, authenticated) => renderToStaticMarkup(createElement(DashboardHeader, {
+          location: {room, auditView: "news"}, adminAuthenticated: authenticated, openAdminLogin: () => {},
+        }));`,
+      resolveDir: fileURLToPath(new URL("../", import.meta.url)), loader: "tsx",
+    },
+    bundle: true, packages: "external", platform: "node", format: "cjs",
+    jsx: "automatic", write: false, define: { "import.meta.env": "{}" },
+    logOverride: { "empty-import-meta": "silent" },
+  });
+  const module = { exports: {} };
+  new Function("require", "module", "exports", compiled.outputFiles[0].text)(createRequire(import.meta.url), module, module.exports);
+  for (const room of ["live", "audit", "health", "admin", "assistant", "retry", "status", "architecture"]) {
+    for (const authenticated of [false, true]) {
+      const html = module.exports.renderHeader(room, authenticated);
+      const navigations = [...html.matchAll(/<nav class="dashboard-global-nav"[^>]*>([\s\S]*?)<\/nav>/g)];
+      assert.equal(navigations.length, 2, "desktop and phone share destination rendering");
+      assert.equal(navigations[0][1], navigations[1][1]);
+      const nav = navigations[0][1];
+      assert.match(nav, /总览[\s\S]*新闻与事件[\s\S]*dashboard-admin-entry/);
+      assert.equal((nav.match(/dashboard-admin-entry/g) ?? []).length, 1);
+      assert.match(nav, authenticated
+        ? /<a[^>]*class="[^"]*dashboard-admin-entry[^>]*href="\/admin">管理后台<\/a>/
+        : /<button[^>]*class="[^"]*dashboard-admin-entry[\s\S]*管理员登录<\/button>/);
+      assert.match(html, /<details class="public-mobile-menu">/);
+      assert.doesNotMatch(html, /<select|主要区域/);
+    }
+  }
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  const accountRule = css.match(/\.dashboard-shell\.is-product \.dashboard-admin-entry \{([^}]+)\}/)?.[1] ?? "";
+  assert.match(accountRule, /margin-left:auto/);
+  assert.match(accountRule, /flex:0 0 108px/);
+  assert.doesNotMatch(css, /\.dashboard-admin-login-trigger \{[^}]*margin-left/);
 });

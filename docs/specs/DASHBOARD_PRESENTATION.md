@@ -27,6 +27,12 @@ negative coordinates on secondary monitors, with dimensions bounded by the
 opener. Browser window-placement policy may adjust the requested geometry.
 Popup-blocked fallback and authentication authority remain unchanged.
 
+The Admin entry retains the same right-aligned desktop slot and width before
+and after authentication; only its label and login/link behavior change. Admin
+uses the shared sans-serif typography, light surfaces and teal selection. Its
+overview has independent rounded cards, each with a complete border on desktop
+and phones. Authentication and private resource permissions do not change.
+
 ## Navigation loading
 
 Room imports show a bounded skeleton inside the content area, below the shared
@@ -173,9 +179,9 @@ location and page content to that shell; individual Views do not recreate any
 part of it.
 
 1. The canonical product brand is `黄金资讯` and links to the overview.
-   Public overview, news and health share the C visual system: gold/navy brand,
+   Public overview, news, health and private Admin share the C visual system: gold/navy brand,
    white header, cool light background, sans-serif typography, teal selection
-   and rounded white content panels. Public route changes preserve header
+   and rounded white content panels. All route changes preserve header
    geometry and navigation controls. Content density may differ by page.
 2. The public global destination order is `总览`, `新闻与事件`, and
    `管理员登录`. The public reading routes are `/` and `/audit?view=news`.
@@ -203,8 +209,9 @@ part of it.
    interpretation owner; responsive placement must not add a polling owner.
    Public phones use the same native disclosure menu on all reading routes.
    The current destination is marked; Escape closes the menu and returns focus,
-   and selecting a destination closes it. Audit section selection remains
-   subordinate inside the page. Private Admin retains its workspace controls.
+   and selecting a destination closes it. Admin uses the same phone menu; its
+   secondary workspace controls remain below the shared header. Audit section
+   selection remains subordinate inside the page.
 9. New top-level Views plug into the canonical shell. Copying an existing
    shell-level structure instead of extending its owner is design drift.
 10. Deterministic source and rendered-route contracts must prevent design

@@ -78,20 +78,20 @@ export default function AdminOverviewView() {
 
   return <main className="admin-overview-main">
     <header className="admin-overview-hero">
-      <div><p>OWNER OPERATIONS</p><h1>管理后台</h1></div>
-      <p>一个登录会话内查看私有工具与需要处理的运维状态。</p>
+      <h1>管理后台</h1>
+      <p>工具与运行维护</p>
     </header>
     {preview ? <p className="admin-preview-notice">PR Preview 使用合成只读 Admin 数据，不代表 Cloudflare Access 已完成登录，也不具有生产操作权限。</p> : null}
     {authRequired ? <p className="admin-preview-notice is-auth">需要管理员登录。 <a href="/admin">管理员登录</a></p> : null}
     <section className="admin-overview-grid" aria-label="管理概览">
       <DashboardLink className="admin-overview-card" href="/admin/assistant">
-        <span>ASSISTANT</span><h2>Assistant</h2>
+        <h2>Assistant</h2>
         <strong>{ASSISTANT_ACCEPTING_TURNS ? "可接受新对话" : "已暂停"}</strong>
         <small className="admin-overview-health">{assistantError?.message ?? assistantHealthPresentation(assistantHealth)}</small>
         <b>打开 Assistant →</b>
       </DashboardLink>
       <DashboardLink className="admin-overview-card is-retry" href="/admin/retry-jobs">
-        <span>SCHEDULER</span><h2>重试任务</h2>
+        <h2>重试任务</h2>
         {retryError ? <strong>{retryError.message}</strong> : <dl>
           <div><dt>总任务</dt><dd>{retrySummary.total}</dd></div>
           <div><dt>等待应用</dt><dd>{retrySummary.applying}</dd></div>
@@ -100,13 +100,13 @@ export default function AdminOverviewView() {
         <b>打开重试队列 →</b>
       </DashboardLink>
       <DashboardLink className="admin-overview-card" href="/admin/architecture">
-        <span>ARCHITECTURE</span><h2>系统架构</h2>
+        <h2>系统架构</h2>
         <strong>源码关系与证据</strong>
         <small className="admin-overview-health">查看组件关系、源码位置和验证范围。</small>
         <b>打开系统架构 →</b>
       </DashboardLink>
       <DashboardLink className="admin-overview-card" href="/admin/ai-usage">
-        <span>PROVIDER CAPACITY</span><h2>AI 模型用量</h2>
+        <h2>AI 模型用量</h2>
         <strong>权威配额账本</strong>
         <b>打开用量状态 →</b>
       </DashboardLink>

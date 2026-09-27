@@ -1,49 +1,31 @@
 "use client";
 
-import {
-  DASHBOARD_GLOBAL_DESTINATIONS,
-  type DashboardGlobalDestinationId,
-} from "./DashboardNavigation";
-import { useDashboardNavigation } from "./DashboardNavigation";
+import { HamburgerMenuIcon, Cross2Icon } from "@radix-ui/react-icons";
+import { useEffect, useRef, type ReactNode } from "react";
 
-export default function MobileDashboardNav({
-  activeDestination, adminAuthenticated, openAdminLogin,
-}: {
-  activeDestination: DashboardGlobalDestinationId;
-  adminAuthenticated: boolean;
-  openAdminLogin: () => void;
-}) {
-  const navigation = useDashboardNavigation();
-  const currentHref = DASHBOARD_GLOBAL_DESTINATIONS.find(
-    destination => destination.id === activeDestination,
-  )?.href ?? "";
-
-  return <div className="mobile-dashboard-nav">
-    <label>
-      <span>主要区域</span>
-      <select
-        aria-label="切换主要区域"
-        value={currentHref}
-        onChange={event => {
-          const href = event.currentTarget.value;
-          const destination = DASHBOARD_GLOBAL_DESTINATIONS.find(item => item.href === href);
-          if (destination?.private && !adminAuthenticated) {
-            openAdminLogin();
-            event.currentTarget.value = currentHref;
-            return;
-          }
-          if (navigation) void navigation.navigate(href);
-          else window.location.assign(href);
-        }}
-      >
-        {activeDestination === "system" ? <option value="" disabled>当前：运行状态</option> : null}
-        {DASHBOARD_GLOBAL_DESTINATIONS.map(destination => (
-          <option key={destination.id} value={destination.href}>
-            {adminAuthenticated && destination.authenticatedLabel
-              ? destination.authenticatedLabel : destination.label}
-          </option>
-        ))}
-      </select>
-    </label>
-  </div>;
+export default function MobileDashboardNav({ children }: { children: ReactNode }) {
+  const menu = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const element = menu.current;
+    if (!element) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        element.open = false;
+        element.querySelector("summary")?.focus();
+      }
+    };
+    const closeOnNavigation = (event: MouseEvent) => {
+      if (event.target instanceof Element && event.target.closest("a,button")) element.open = false;
+    };
+    element.addEventListener("keydown", closeOnEscape);
+    element.addEventListener("click", closeOnNavigation);
+    return () => {
+      element.removeEventListener("keydown", closeOnEscape);
+      element.removeEventListener("click", closeOnNavigation);
+    };
+  }, []);
+  return <details className="public-mobile-menu" ref={menu}>
+    <summary aria-label="打开或关闭导航"><HamburgerMenuIcon className="menu-open-icon" aria-hidden="true" /><Cross2Icon className="menu-close-icon" aria-hidden="true" /></summary>
+    <div className="public-menu-content">{children}</div>
+  </details>;
 }
