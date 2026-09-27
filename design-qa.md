@@ -1,5 +1,33 @@
 # Public dashboard design review
 
+## Latest follow-up: overview image arrival
+
+Verified application revision: `21f4eb5e`.
+Preview: https://ebd010d6-aurum-signal-room.yiyousiow1234.workers.dev/.
+On the preceding Preview, navigation from events started two separate image
+requests: gold 9,826 bytes / 397ms and waves 32,684 bytes / 394ms in this browser
+sample. Both small WebP files now use Vite inline asset imports, so artwork
+arrives with the already loaded overview module. Image bytes and layout are
+unchanged. This trades approximately 42.5 KB of raw artwork in the module for
+removing the navigation-time image round trips; it is not a general policy for
+inlining large images.
+
+Production/Preview builds and 118 affected tests passed. Regression coverage
+compares both rendered data URLs byte-for-byte with the source images, keeps a
+50 KB combined artwork budget and checks the reserved gold dimensions. Generated
+source evidence was refreshed and its input check passed. Final review checked
+the existing eager LiveRoomView import in DashboardApp and unchanged CSS sizing.
+
+On the deployed Preview, opened events then selected overview: both images were
+complete with nonzero natural widths and no `/images/overview-*` resource
+requests. Checked desktop 1280x900, phones 390x844 and 360x800, navigated from
+overview to events and back and scrolled the phone page. No horizontal overflow
+or browser warnings/errors. One navigation wait timed out, but the requested
+page had loaded and its exact revision was verified before continuing. The task
+tab was closed and viewport reset; remaining task-created browser sessions: 0.
+Screenshot: `C:/Users/yiyou/AppData/Local/Temp/overview-inline-images.png`.
+Production is unchanged; PR #562 remains a draft.
+
 ## Latest follow-up: curated event reading
 
 Verified application revision: `6fcd4a28` (UI implementation `89b60f45`).
