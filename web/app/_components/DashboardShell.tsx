@@ -306,6 +306,7 @@ export default function DashboardShell({ children, location }: { children: React
     popupRef.current = openAdminAuthPopup(
       (url, target, features) => window.open(url, target, features),
       () => window.location.assign("/admin"),
+      window,
     );
     if (!popupRef.current) return;
     popupRef.current.focus();

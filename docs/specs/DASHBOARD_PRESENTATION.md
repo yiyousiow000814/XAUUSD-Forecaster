@@ -4,6 +4,17 @@ This specification defines the required visual behavior of the dashboard's
 data-dense navigation, metric grids, tables, and expandable evidence panels.
 It applies to both desktop and phone layouts.
 
+## Header status and login placement
+
+The public status link owns hover, current-page and keyboard-focus treatment.
+Keep padding around its dot and text; do not draw a tightly fitted pill outline
+inside the link. All states retain a 44px interaction height on phones.
+The login explanation remains a viewport-centered modal. Its separate login
+window requests centering relative to the current browser window, including
+negative coordinates on secondary monitors, with dimensions bounded by the
+opener. Browser window-placement policy may adjust the requested geometry.
+Popup-blocked fallback and authentication authority remain unchanged.
+
 ## Navigation loading
 
 Room imports show a bounded skeleton inside the content area, below the shared

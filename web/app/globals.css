@@ -1976,6 +1976,13 @@ html,body,* { scrollbar-width:none; }
 .dashboard-shell.is-public .dashboard-global-link:hover { background:#f1f7f8; }
 .dashboard-shell.is-public .dashboard-admin-login-trigger { margin-left:auto; font-size:12px; color:#708094; }
 .dashboard-shell.is-public .live-pill { border:0; font-size:14px; font-weight:400; letter-spacing:0; padding-inline:0; gap:12px; }
+/* The link owns interaction states; the status dot and text keep their spacing. */
+.dashboard-shell.is-public .dashboard-global-state { flex:0 0 auto; min-height:44px; padding:0 10px; border-radius:8px; transition:background-color .16s ease; }
+.dashboard-shell.is-public .dashboard-global-state:hover,.dashboard-shell.is-public .dashboard-global-state[aria-current="page"] { background:#edf6f7; }
+.dashboard-shell.is-public .dashboard-global-state:focus-visible { outline:2px solid #007c89; outline-offset:2px; }
+.dashboard-shell.is-public .dashboard-global-state[aria-current="page"] .live-pill { box-shadow:none; }
+.dashboard-global-state .live-pill>span { flex-shrink:0; }
+@media(prefers-reduced-motion:reduce) { .dashboard-shell.is-public .dashboard-global-state { transition:none; } }
 .dashboard-shell.is-public .live-pill.is-live span { background:var(--green); box-shadow:none; }
 .dashboard-shell>main.overview-page ,
 .dashboard-shell>.dashboard-view-content>main.overview-page { width:min(1136px,100%); min-height:0; margin:0 auto; padding:28px 24px 40px; }

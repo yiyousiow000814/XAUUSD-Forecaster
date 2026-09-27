@@ -672,6 +672,7 @@ test("keeps Admin login intent local until the explicit Access handoff", () => {
   assert.match(shell, /candidateInspection \? null : <button/);
   assert.match(shell, /className="admin-login-primary"[\s\S]*onClick=\{beginAdminLogin\}/);
   assert.match(shell, /openAdminAuthPopup[\s\S]*window\.location\.assign\("\/admin"\)/);
+  assert.match(shell, /window\.location\.assign\("\/admin"\),\s*window,\s*\)/);
   assert.match(shell, /isTrustedAdminAuthMessage[\s\S]*revalidateAdminSession/);
   assert.match(shell, /adminAuthState === "AUTHENTICATED"/);
   assert.match(shell, /<button type="button" onClick=\{closeAdminLogin\}>取消<\/button>/);
@@ -1527,6 +1528,10 @@ test("uses one Chinese system-state presentation across every dashboard page", (
   const shell = readFileSync(new URL("../app/_components/DashboardShell.tsx", import.meta.url), "utf8");
   const contract = readFileSync(new URL("../app/_lib/system-state.ts", import.meta.url), "utf8");
   const freshness = readFileSync(new URL("../app/_components/CurrentDataState.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.dashboard-shell\.is-public \.dashboard-global-state \{[^}]*min-height:44px;[^}]*padding:0 10px;[^}]*border-radius:8px/);
+  assert.match(css, /\.dashboard-shell\.is-public \.dashboard-global-state\[aria-current="page"\] \.live-pill \{ box-shadow:none/);
+  assert.match(css, /\.dashboard-global-state \.live-pill>span \{ flex-shrink:0/);
   assert.match(component, /systemStatePresentation/);
   assert.match(component, /data-read-state/);
   assert.match(contract, /运行正常/);

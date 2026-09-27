@@ -1,5 +1,14 @@
 # Public dashboard design review
 
+## In progress: header status and login placement
+
+Scope: public status-link selected/hover/focus presentation and the geometry
+passed to the existing login popup. Authentication, trusted-message checks,
+callback URL, popup ownership/polling and blocked-popup fallback are unchanged.
+The opener supplies its live window geometry; negative monitor coordinates
+remain valid. Check desktop and both phone viewports, active/inactive status,
+modal open/cancel/Escape, scrolled-page centering and popup geometry regression.
+
 ## Latest follow-up: navigation loading presentation
 
 Boundary: transient dashboard navigation presentation only. DashboardApp remains
