@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ButtonHTMLAttributes, type KeyboardEvent } from "react";
 import { ChevronLeftIcon, ChevronRightIcon } from "@radix-ui/react-icons";
-import { newsArticleDetailUrl, type NewsArticleReference } from "../_lib/news-article-reference";
+import { type NewsArticleReference } from "../_lib/news-article-reference";
+import { useNewsDetail } from "../_components/useNewsDetail";
 import CountValue from "../_components/CountValue";
 import { useDashboardNavigation, useNewsNavigationView, type AuditViewName } from "../_components/DashboardNavigation";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
@@ -41,6 +42,7 @@ const AUDIT_DETAIL_RESOURCES: Record<AuditDetailView, string> = {
 
 type News = {
   detail_key: string;
+  cluster_id?: string;
   category: string;
   source: string;
   source_item_id: string;
@@ -286,12 +288,6 @@ type NewsIndexResponse = {
   source_receipt_digest?: string;
 };
 
-type NewsDetailResponse = { payload: Partial<News> };
-type NewsDetailBatchResponse = {
-  items: Record<string, NewsDetailResponse>;
-  missing: string[];
-};
-
 const time = (value?: string | null) => value ? new Intl.DateTimeFormat("zh-CN", {
   day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
   second: "2-digit", hour12: false, timeZone: "Asia/Kuala_Lumpur",
@@ -397,37 +393,22 @@ function closeNewsMenuOnEscape(event: KeyboardEvent<HTMLElement>) {
 
 export function CurrentEvent({ row }: { row: NewsEvidence }) {
   const [expanded, setExpanded] = useState(false);
-  const [detail, setDetail] = useState<NewsDetailResponse | null>(null);
-  const [failed, setFailed] = useState(false);
-  const [attempt, setAttempt] = useState(0);
-  const detailUrl = row.canonical_article ? newsArticleDetailUrl(row.canonical_article) : null;
-  useEffect(() => {
-    if (!expanded || !detailUrl || detail) return;
-    let cancelled = false;
-    void loadDashboardResource<NewsDetailResponse>(detailUrl, {maxAgeMs:0}).then(value => {
-      if (!cancelled) setDetail(value);
-    }).catch(() => { if (!cancelled) setFailed(true); });
-    return () => { cancelled = true; };
-  }, [expanded, detailUrl, detail, attempt]);
+  const {payload, failed, retry} = useNewsDetail(row.canonical_article ?? null, expanded);
+  const detail = payload as Partial<News> | null;
   const sources = row.publisher_domains?.length ? row.publisher_domains
     : row.source_identity_organizations?.length ? row.source_identity_organizations
       : row.source_names?.length ? row.source_names : [row.canonical_source].filter(Boolean);
-  return <details className="current-event" onToggle={event => {
-    if (event.target === event.currentTarget) {
-      if (event.currentTarget.open) setFailed(false);
-      setExpanded(event.currentTarget.open);
-    }
-  }}>
+  return <details className="current-event" onToggle={event => { if (event.target === event.currentTarget) setExpanded(event.currentTarget.open); }}>
     <summary className="current-event-toggle">
       <div className="current-event-meta"><span>{(row.topics ?? []).map(topic => TOPIC_LABELS[topic] ?? topic).join(" · ") || "新闻事件"}</span><time>{row.source_published_time ? time(row.source_published_time) : "发布时间未提供"}</time></div>
       <div className="current-event-title"><h3>{row.canonical_headline}</h3><ChevronRightIcon aria-hidden="true" /></div>
     </summary>
-    {!detailUrl ? <p role="status">未找到对应的 raw 新闻关联。</p>
-      : failed ? <p role="alert">原文详情暂时无法读取。<button className="current-event-retry" type="button" onClick={() => {setFailed(false); setAttempt(value => value + 1);}}>重试</button></p>
+    {!row.canonical_article ? <p role="status">未找到对应的 raw 新闻关联。</p>
+      : failed ? <p role="alert">原文详情暂时无法读取。<button className="current-event-retry" type="button" onClick={retry}>重试</button></p>
       : !detail ? <p role="status">正在读取原文摘要…</p>
       : <>
-        <NewsSummary summary={detail.payload.summary_zh} label="摘要" />
-        {detail.payload.impact_reason_zh && <section className="gemini-summary current-event-explanation"><span>补充说明</span><p>{publicImpactReason(detail.payload.impact_reason_zh)}</p></section>}
+        <NewsSummary summary={detail.summary_zh} label="摘要" />
+        {detail.impact_reason_zh && <section className="gemini-summary current-event-explanation"><span>补充说明</span><p>{publicImpactReason(detail.impact_reason_zh)}</p></section>}
       </>}
     <details className="current-event-sources">
       <summary><span>{formatExactCount(row.member_count)} 篇报道 · {formatExactCount(row.independent_publishers)} 个独立来源</span><span className="current-event-source-action">来源详情 <ChevronRightIcon aria-hidden="true" /></span></summary>
@@ -560,23 +541,18 @@ export function StoryCard({ story, expanded = false, onToggle }: {
 }
 
 export function NewsRow({
-  row, prefetchedDetail,
+  row,
 }: {
   row: News;
-  prefetchedDetail?: Partial<News>;
 }) {
-  const [detail, setDetail] = useState<Partial<News> | null>(
-    row.summary_zh !== undefined ? row : (prefetchedDetail ?? null),
-  );
-  const [detailState, setDetailState] = useState<"idle" | "loading" | "ready" | "error">(
-    row.summary_zh !== undefined || prefetchedDetail ? "ready" : "idle",
-  );
+  const [expanded, setExpanded] = useState(false);
+  const {payload, failed, retry: retryDetail, retryCount: detailRetryCount} = useNewsDetail(row.detail_key ? row : null, expanded);
   const detailElement = useRef<HTMLDetailsElement>(null);
-  const [detailRetryCount, setDetailRetryCount] = useState(0);
   const [showSlowLoading, setShowSlowLoading] = useState(false);
   const [showSupportingEvidence, setShowSupportingEvidence] = useState(false);
-  const resolvedDetailState = prefetchedDetail ? "ready" : detailState;
-  const current = { ...row, ...(detail ?? prefetchedDetail ?? {}) };
+  const detail = payload as Partial<News> | null;
+  const resolvedDetailState = row.summary_zh !== undefined || detail ? "ready" : failed ? "error" : "loading";
+  const current = { ...row, ...(detail ?? {}) };
   const annotationStatus = row.annotation_status === "QUEUED"
     && row.model_visibility !== "NOT_YET_PARSED"
     ? "NOT_REQUIRED"
@@ -595,48 +571,12 @@ export function NewsRow({
   const translated = Boolean(
     current.original_headline && current.headline !== current.original_headline,
   );
-  const fetchDetail = useCallback(async () => {
-    if (!row.detail_key) {
-      setDetailState("error");
-      return;
-    }
-    setShowSlowLoading(false);
-    setDetailState("loading");
-    try {
-      const body = await loadDashboardResource<NewsDetailResponse>(
-        `/api/news-content?key=${encodeURIComponent(row.detail_key)}`,
-        { maxAgeMs: Number.POSITIVE_INFINITY },
-      );
-      setDetail(body.payload);
-      setDetailState("ready");
-      setDetailRetryCount(0);
-    } catch {
-      setDetailState("error");
-    }
-  }, [row.detail_key]);
-  const loadDetail = (event: React.SyntheticEvent<HTMLDetailsElement>) => {
-    if (!event.currentTarget.open || resolvedDetailState === "loading" || resolvedDetailState === "ready") return;
-    void fetchDetail();
-  };
-  const retryDetail = () => {
-    setDetailRetryCount(0);
-    void fetchDetail();
-  };
-  useEffect(() => {
-    if (resolvedDetailState !== "error" || detailRetryCount >= 3) return;
-    const timer = window.setTimeout(() => {
-      if (!detailElement.current?.open) return;
-      setDetailRetryCount(count => count + 1);
-      void fetchDetail();
-    }, 3000);
-    return () => window.clearTimeout(timer);
-  }, [detailRetryCount, resolvedDetailState, fetchDetail]);
   useEffect(() => {
     if (resolvedDetailState !== "loading" || !detailElement.current?.open) return;
     const timer = window.setTimeout(() => setShowSlowLoading(true), 180);
     return () => window.clearTimeout(timer);
-  }, [resolvedDetailState]);
-  return <details ref={detailElement} className="news-row" onToggle={loadDetail} aria-busy={resolvedDetailState === "loading"}>
+  }, [resolvedDetailState, expanded]);
+  return <details ref={detailElement} className="news-row" onToggle={event => { if (event.target === event.currentTarget) setExpanded(event.currentTarget.open); }} aria-busy={resolvedDetailState === "loading"}>
     <summary>
       <div className="news-row-stamp"><b>{row.category}</b><time title="媒体发布时间；列表按此时间排序">发布 {row.source_published_time ? time(row.source_published_time) : "未知"}</time><small title="系统首次采集到这篇新闻的时间">收到 {time(row.collector_first_seen_time)}</small><small className={`eligibility-badge news-reading-${readingStatus.tone}`} title="单篇新闻的整理与时效状态；不表示已纳入当前可用事件">{readingStatus.label}</small></div>
       <div className="news-row-title"><strong>{row.headline}</strong><small>{newsSourceLabel(row)}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}{(row.syndicated_source_count ?? 0) > 1 ? ` · ${row.syndicated_source_count} 个转载来源` : ""}</small></div>
@@ -728,7 +668,6 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
   const [auditError, setAuditError] = useState<string | null>(null);
   const [evidenceError, setEvidenceError] = useState<string | null>(null);
   const [newsError, setNewsError] = useState<string | null>(null);
-  const [newsDetails, setNewsDetails] = useState<Record<string, Partial<News>>>({});
   const view = initialView;
   const newsNavigationView = useNewsNavigationView(view);
   const navigation = useDashboardNavigation();
@@ -757,28 +696,6 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
   const [showAllStoryEvents, setShowAllStoryEvents] = useState(false);
   const [showAllStorylines, setShowAllStorylines] = useState(false);
   const [expandedStorylines, setExpandedStorylines] = useState<Set<string>>(() => new Set());
-  const pageDetailKeys = newsIndex.items
-    .map(row => row.detail_key)
-    .filter((key): key is string => Boolean(key))
-    .join(",");
-  useEffect(() => {
-    if (view !== "news" || !pageDetailKeys) return;
-    let cancelled = false;
-    void loadDashboardResource<NewsDetailBatchResponse>(
-      `/api/news-content?keys=${encodeURIComponent(pageDetailKeys)}`,
-      { maxAgeMs: Number.POSITIVE_INFINITY },
-    ).then(body => {
-      if (cancelled) return;
-      setNewsDetails(currentDetails => {
-        const next = { ...currentDetails };
-        for (const [key, item] of Object.entries(body.items)) next[key] = item.payload;
-        return next;
-      });
-    }).catch(() => {
-      // Opening one row still uses the existing single-detail retry path.
-    });
-    return () => { cancelled = true; };
-  }, [pageDetailKeys, view]);
   const fullStatusReadyRef = useRef(Boolean(cachedStatus && !cachedStatus.preview_status_summary));
   const fullNewsIndexReadyRef = useRef(Boolean(
     cachedNewsIndex && authoritativeNewsTotals(cachedNewsIndex),
@@ -1396,7 +1313,6 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
           {visibleNews.map(row => <NewsRow
             key={`${row.source}-${row.source_item_id}-${row.revision_number}`}
             row={row}
-            prefetchedDetail={newsDetails[row.detail_key]}
           />)}
           {newsPhase !== "loading" && Array.from({ length: emptyNewsRows }, (_, index) => <div className="news-row-placeholder" aria-hidden="true" key={`empty-news-row-${index}`} />)}
         </section>

@@ -1110,10 +1110,9 @@ test("keeps every D1 migration compatible with remote compound-statement parsing
   }
 });
 
-test("prefetches bounded news details and avoids a fast loading-label flash", () => {
+test("avoids a fast loading-label flash in news details", () => {
   const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(source, /api\/news-content\?keys=/);
   assert.match(source, /setShowSlowLoading\(true\), 180/);
   assert.doesNotMatch(source, /正在读取新闻详情/);
   assert.match(css, /\.news-detail-skeleton\.is-visible/);
@@ -1601,7 +1600,6 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /文章 \/ Revision/);
   assert.doesNotMatch(source, /当前达到 Broad 门槛/);
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(source, /api\/news-content\?key=/);
   assert.match(source, /api\/news-index\?/);
   assert.match(source, /briefs: "\/api\/audit-briefs"/);
   assert.match(source, /stories: "\/api\/audit-stories"/);
@@ -1618,7 +1616,6 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /读取中/);
   assert.match(source, /学习数据暂不可用|暂不可用/);
   assert.doesNotMatch(source, /payload\?\.system\.online && !error/);
-  assert.match(source, /api\/news-content\?keys=/);
   assert.doesNotMatch(source, /这些新闻处理到哪里了/);
   assert.match(source, /条近60天可读新闻/);
   assert.doesNotMatch(source, /条已隔离待查/);

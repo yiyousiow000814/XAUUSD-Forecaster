@@ -704,21 +704,22 @@ test("article reading badges retain status distinctions without model permission
 });
 
 
-test("current event fetches raw detail only on expansion and recovers after failure", async () => {
+test("current event preloads shared raw detail before expansion and recovers after failure", async () => {
   const output=await build({bundle:true,write:false,platform:"node",format:"esm",jsx:"automatic",
     nodePaths:[join(dependencyPackage,"..","node_modules")],
     banner:{js:"import {createRequire} from 'node:module';const require=createRequire(import.meta.url);"},
     plugins:[{name:"event-effects",setup(b){
-      b.onResolve({filter:/^react$/},a=>a.importer===viewPath?{path:"hooks",namespace:"event-test"}:null);
+      b.onResolve({filter:/^react$/},a=>(a.importer===viewPath||a.importer.endsWith("useNewsDetail.ts"))?{path:"hooks",namespace:"event-test"}:null);
       b.onLoad({filter:/.*/,namespace:"event-test"},()=>({contents:`
         export * from ${JSON.stringify(require.resolve("react"))};
+        export function useCallback(fn){return fn;}
         export function useState(v){const h=globalThis.__eventHarness,i=h.index++;
           if(!(i in h.state))h.state[i]=v;return [h.state[i],n=>h.state[i]=typeof n==='function'?n(h.state[i]):n];}
         export function useEffect(fn,deps){const h=globalThis.__eventHarness,i=h.index++;
           const old=h.deps[i];if(!old||deps.some((v,j)=>v!==old[j])){
             h.cleanups[i]?.();h.effects.push(()=>h.cleanups[i]=fn());h.deps[i]=deps;}}
       `,loader:"js",resolveDir:fileURLToPath(new URL("..",import.meta.url))}));
-      b.onResolve({filter:/dashboard-resource$/},a=>a.importer===viewPath?{path:"resource",namespace:"event-resource"}:null);
+      b.onResolve({filter:/dashboard-resource$/},a=>(a.importer===viewPath||a.importer.endsWith("news-detail-loader.ts"))?{path:"resource",namespace:"event-resource"}:null);
       b.onLoad({filter:/.*/,namespace:"event-resource"},()=>({contents:`
         export function loadDashboardResource(url){return globalThis.__eventHarness.load(url);}
         export function useDashboardResource(){} export function clearDashboardResource(){}
@@ -738,16 +739,15 @@ test("current event fetches raw detail only on expansion and recovers after fail
   const requests=[];let fail=true;
   const h={index:0,state:[],deps:[],cleanups:[],effects:[],load:async url=>{
     requests.push(url);if(fail)throw new Error("temporary");
-    return {payload:{summary_zh:"raw 原有摘要 <script>bad</script>",impact_reason_zh:"raw 原有说明"}};
+    return {detail_key:"d".repeat(64),payload:{summary_zh:"raw 原有摘要 <script>bad</script>",impact_reason_zh:"raw 原有说明"}};
   }};
   globalThis.__eventHarness=h;
   const settle=async()=>{h.effects.forEach(fn=>fn());await new Promise(resolve=>setImmediate(resolve));};
   const findButton=node=>!node||typeof node!=="object"?null:node.type==="button"?node:
     [node.props?.children].flat(Infinity).map(findButton).find(Boolean);
   try {
-    let view=draw(row);await settle();assert.equal(requests.length,0);
-    const target={open:true};view.tree.props.onToggle({target,currentTarget:target});
-    draw(row);await settle();view=draw(row);assert.match(view.html,/原文详情暂时无法读取/);
+    let view=draw(row);await settle();assert.equal(requests.length,1);
+    view=draw(row);assert.match(view.html,/原文详情暂时无法读取/);
     assert.deepEqual(JSON.parse(new URL(requests[0],"http://local").searchParams.get("article")),article);
     fail=false;findButton(view.tree).props.onClick();draw(row);await settle();
     view=draw(row);assert.match(view.html,/raw 原有摘要 &lt;script&gt;bad&lt;\/script&gt;/);
