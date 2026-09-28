@@ -559,7 +559,7 @@ test("news options retain their routes and render the canonical report summary",
   assert.match(html, /主报道摘要 &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.match(html, /补充说明 · 主报道/);
   assert.match(html, /本次发布更新了此前的数据。/);
-  assert.doesNotMatch(html, /摘要暂未同步|<script>|accepted-1/);
+  assert.doesNotMatch(html, /摘要暂未同步|<script>|accepted-1/i);
   const missing = renderEvents([curatedEvent("old-snapshot", null)]);
   assert.match(missing, /摘要暂未同步/);
   assert.doesNotMatch(missing, /补充说明 · 主报道|主报道摘要/);
