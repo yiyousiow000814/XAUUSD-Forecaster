@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ButtonHTMLAttributes } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ButtonHTMLAttributes, type KeyboardEvent } from "react";
 import { ChevronLeftIcon, ChevronRightIcon } from "@radix-ui/react-icons";
 import CountValue from "../_components/CountValue";
 import { useDashboardNavigation, type AuditViewName } from "../_components/DashboardNavigation";
@@ -391,20 +391,31 @@ function NewsSummary({ summary, label }: { summary?: string | null; label: strin
   return <section className="gemini-summary"><span>{label}</span><p>{summary || "摘要暂未同步"}</p></section>;
 }
 
+function closeNewsMenuOnEscape(event: KeyboardEvent<HTMLElement>) {
+  if (event.key !== "Escape") return;
+  const menu = event.currentTarget.closest("details");
+  if (menu) {
+    menu.open = false;
+    menu.querySelector("summary")?.focus();
+  }
+}
+
 export function CurrentEvent({ row }: { row: NewsEvidence }) {
   const sources = row.publisher_domains?.length ? row.publisher_domains
     : row.source_identity_organizations?.length ? row.source_identity_organizations
       : row.source_names?.length ? row.source_names : [row.canonical_source].filter(Boolean);
-  return <article className="current-event">
-    <div className="current-event-meta"><span>{(row.topics ?? []).map(topic => TOPIC_LABELS[topic] ?? topic).join(" · ") || "新闻事件"}</span><time>{row.source_published_time ? time(row.source_published_time) : "发布时间未提供"}</time></div>
-    <h3>{row.canonical_headline}</h3>
+  return <details className="current-event">
+    <summary className="current-event-toggle">
+      <div className="current-event-meta"><span>{(row.topics ?? []).map(topic => TOPIC_LABELS[topic] ?? topic).join(" · ") || "新闻事件"}</span><time>{row.source_published_time ? time(row.source_published_time) : "发布时间未提供"}</time></div>
+      <div className="current-event-title"><h3>{row.canonical_headline}</h3><ChevronRightIcon aria-hidden="true" /></div>
+    </summary>
     <NewsSummary summary={row.canonical_reading?.summary_zh} label="GEMINI 中文摘要 · 主报道" />
     {row.canonical_reading?.impact_reason_zh && <section className="gemini-summary current-event-explanation"><span>补充说明 · 主报道</span><p>{publicImpactReason(row.canonical_reading.impact_reason_zh)}</p></section>}
     <details className="current-event-sources">
       <summary><span>{formatExactCount(row.member_count)} 篇报道 · {formatExactCount(row.independent_publishers)} 个独立来源</span><span className="current-event-source-action">来源详情 <ChevronRightIcon aria-hidden="true" /></span></summary>
       <div className="current-event-source-body"><dl><div><dt>报道来源</dt><dd>{sources.join(" · ") || "未提供"}</dd></div><div><dt>首次收录</dt><dd>{time(row.collector_first_seen_time)}</dd></div></dl></div>
     </details>
-  </article>;
+  </details>;
 }
 
 function mergeUnique(values: Array<string[] | null | undefined>): string[] {
@@ -1162,8 +1173,16 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
       <nav className="audit-tabs" aria-label="审计视图">
         <a href="/audit?view=briefs" className={view === "briefs" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("briefs"); }}>每日简报 <b><MetricValue phase={statusState}>{payload?.daily_news_brief_summary?.brief_date ? shortBriefDate(payload.daily_news_brief_summary.brief_date) : "—"}</MetricValue></b></a>
         <a href="/audit?view=search" className={view === "search" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("search"); }}>搜索 <b aria-hidden="true">⌕</b></a>
-        <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>新闻 <b><MetricValue phase={statusState}><CountValue value={newsMetrics.events.currently_model_eligible} /></MetricValue></b></a>
-        <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>raw 新闻 <b><MetricValue phase={newsPhase}><CountValue value={readableNewsTotal} /></MetricValue></b></a>
+        <details className={`audit-news-menu${view === "evidence" || view === "news" ? " active" : ""}`}
+          onPointerEnter={event => { if (event.pointerType === "mouse") event.currentTarget.open = true; }}
+          onPointerLeave={event => { if (event.pointerType === "mouse") event.currentTarget.open = false; }}
+          onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false; }}>
+          <summary onKeyDown={closeNewsMenuOnEscape}>当前新闻 <b><MetricValue phase={statusState}><CountValue value={newsMetrics.events.currently_model_eligible} /></MetricValue></b><ChevronRightIcon aria-hidden="true" /></summary>
+          <div className="audit-news-options">
+            <a href="/audit?view=evidence" aria-current={view === "evidence" ? "page" : undefined} onKeyDown={closeNewsMenuOnEscape} onClick={event => { event.preventDefault(); event.currentTarget.closest("details")?.removeAttribute("open"); selectView("evidence"); }}>当前新闻 <b><MetricValue phase={statusState}><CountValue value={newsMetrics.events.currently_model_eligible} /></MetricValue></b></a>
+            <a href="/audit?view=news" aria-current={view === "news" ? "page" : undefined} onKeyDown={closeNewsMenuOnEscape} onClick={event => { event.preventDefault(); event.currentTarget.closest("details")?.removeAttribute("open"); selectView("news"); }}>raw 新闻 <b><MetricValue phase={newsPhase}><CountValue value={readableNewsTotal} /></MetricValue></b></a>
+          </div>
+        </details>
         <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b><MetricValue phase={statusState}><CountValue value={activeEventTotal} /></MetricValue></b></a>
         <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>宏观数据 <b><MetricValue phase={coveragePhase} snapshotLabel="分支快照" snapshotTitle="只读分支快照；各项观测日期见下方">参考指标</MetricValue></b></a>
       </nav>
@@ -1174,8 +1193,10 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         <select aria-label="切换证据台页面" value={view} onChange={event => selectView(event.currentTarget.value as AuditDeskView)}>
           <option value="briefs">每日简报{payload?.daily_news_brief_summary?.brief_date ? ` · ${shortBriefDate(payload.daily_news_brief_summary.brief_date)}` : ""}</option>
           <option value="search">搜索新闻</option>
-          <option value="evidence">新闻 · {formatExactCount(newsMetrics.events.currently_model_eligible)}</option>
-          <option value="news">raw 新闻 · {formatExactCount(readableNewsTotal)}</option>
+          <optgroup label="新闻">
+            <option value="evidence">当前新闻 · {formatExactCount(newsMetrics.events.currently_model_eligible)}</option>
+            <option value="news">raw 新闻 · {formatExactCount(readableNewsTotal)}</option>
+          </optgroup>
           <option value="stories">事件脉络 · {formatExactCount(activeEventTotal)}</option>
           <option value="coverage">宏观数据{coveragePhase === "snapshot" ? " · 分支快照" : ""}</option>
         </select>
@@ -1362,8 +1383,8 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
         </nav>}
       </>}
 
-      {view === "evidence" && <section className="current-events" aria-label="新闻">
-        <header className="current-events-heading"><div><h2>新闻</h2><p>已整理、合并重复报道，最新在前。</p></div><span>{formatExactCount(evidenceModeTotal)} 个事件</span></header>
+      {view === "evidence" && <section className="current-events" aria-label="当前新闻">
+        <header className="current-events-heading"><div><h2>当前新闻</h2><p>已整理、合并重复报道，最新在前。</p></div><span>{formatExactCount(evidenceModeTotal)} 个事件</span></header>
         {visibleEvidence.length === 0 ? <p className="current-events-empty" role="status">{evidenceError ? "新闻事件暂时无法读取，请重试。" : !evidenceArchiveReady ? "正在读取新闻事件…" : evidenceModeTotal > 0 ? "当前列表暂无明细，请稍后重试。" : "暂无当前事件，有新进展时会显示在这里。"}</p>
           : <div className="current-events-list">{visibleEvidence.map(row => <CurrentEvent key={`${evidencePage}:${row.event_key}`} row={row} />)}</div>}
         <nav className="market-history-nav current-events-pagination" aria-label="新闻事件翻页">

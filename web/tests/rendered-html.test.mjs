@@ -1595,7 +1595,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(html, /行情与新闻/);
   assert.match(html, /新闻与事件/);
   const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
-  assert.match(source, />新闻 <b>/);
+  assert.match(source, />当前新闻 <b>/);
   assert.match(source, />raw 新闻 <b>/);
   assert.match(source, /evidence-intro evidence-intro-compact/);
   assert.doesNotMatch(source, /文章 \/ Revision/);
@@ -2929,8 +2929,8 @@ test("public reading preserves focus and scrolling while compacting phone rows",
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /html,body,\* \{ scrollbar-width:none/);
   assert.match(css, /\*::-webkit-scrollbar \{ display:none/);
-  assert.match(css, /\.is-public \.audit-tabs a:hover \{[^}]*outline:none/);
-  assert.match(css, /\.is-public \.audit-tabs a:focus-visible \{ outline:2px solid/);
+  assert.match(css, /\.is-public \.audit-tabs>a:hover \{[^}]*outline:none/);
+  assert.match(css, /\.is-public \.audit-tabs>a:focus-visible \{ outline:2px solid/);
   assert.match(css, /@media\(prefers-reduced-motion:reduce\)[\s\S]*transition:none/);
   assert.match(css, /\.is-public \.news-row:not\(\[open\]\) \.news-row-title small/);
   assert.match(css, /\.is-public \.news-row\[open\] \.news-row-title strong \{ display:block; -webkit-line-clamp:unset/);
