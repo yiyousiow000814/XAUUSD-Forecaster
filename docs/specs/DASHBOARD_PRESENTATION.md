@@ -439,3 +439,16 @@ are not copied into event rows. Show loading while reading, a retry control on
 failure, and an explicit missing association for older rows without references.
 Only a successfully read raw detail with no summary may show that no summary is
 available. Keep the disclosure closed initially and preserve the raw archive UI.
+
+## Shared article details
+
+Current and raw news use one browser detail loader and row hook. Mounting a
+page preloads its visible rows; expansion reads the same accepted detail.
+Raw detail keys are immutable cache identities. Validated article references
+resolve through the existing raw-article endpoint and alias the returned key;
+exact raw source/revision/content identities can seed the reverse alias.
+Article aliases expire after 15 seconds to permit updated annotations. The
+session cache retains at most 128 details and 128 aliases. Failed or missing
+items are retryable and never replace successful siblings. Raw requests batch
+at most 12 keys, with at most two detail transports running at once. Current
+news does not generate or maintain a separate summary.
