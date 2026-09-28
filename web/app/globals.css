@@ -2252,6 +2252,7 @@ html,body,* { scrollbar-width:none; }
 .current-event-source-body dd { margin:0; overflow-wrap:anywhere; }
 .current-event .gemini-summary { margin:14px 0; border-radius:0 8px 8px 0; }
 .current-event .gemini-summary p { overflow-wrap:anywhere; }
+.current-event-retry { min-width:44px; min-height:44px; margin-left:12px; padding:8px 12px; cursor:pointer; }
 .current-event .current-event-explanation { border-left-color:var(--gold); }
 .current-event .current-event-explanation>span { color:#89631b; }
 .current-events-empty { padding:24px; border:1px solid var(--line); border-radius:12px; background:#fff; color:var(--muted); }

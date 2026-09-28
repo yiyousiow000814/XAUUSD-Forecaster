@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ButtonHTMLAttributes, type KeyboardEvent } from "react";
 import { ChevronLeftIcon, ChevronRightIcon } from "@radix-ui/react-icons";
+import { newsArticleDetailUrl, type NewsArticleReference } from "../_lib/news-article-reference";
 import CountValue from "../_components/CountValue";
 import { useDashboardNavigation, type AuditViewName } from "../_components/DashboardNavigation";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
@@ -95,13 +96,7 @@ type NewsEvidence = {
   event_key: string;
   canonical_headline: string;
   canonical_source: string;
-  canonical_reading?: {
-    summary_zh?: string | null;
-    impact_reason_zh?: string | null;
-    source: string;
-    source_item_id: string;
-    annotation_id: string;
-  } | null;
+  canonical_article?: NewsArticleReference | null;
   source_published_time: string | null;
   collector_first_seen_time: string;
   economic_age_minutes: number | null;
@@ -388,7 +383,7 @@ const TOPIC_LABELS: Record<string, string> = {
   central_bank_gold: "央行购金", risk_sentiment: "风险情绪 / 避险", regulation_other: "监管 / 其他",
 };
 function NewsSummary({ summary, label }: { summary?: string | null; label: string }) {
-  return <section className="gemini-summary"><span>{label}</span><p>{summary || "摘要暂未同步"}</p></section>;
+  return <section className="gemini-summary"><span>{label}</span><p>{summary || "这篇 raw 新闻暂无摘要"}</p></section>;
 }
 
 function closeNewsMenuOnEscape(event: KeyboardEvent<HTMLElement>) {
@@ -401,16 +396,39 @@ function closeNewsMenuOnEscape(event: KeyboardEvent<HTMLElement>) {
 }
 
 export function CurrentEvent({ row }: { row: NewsEvidence }) {
+  const [expanded, setExpanded] = useState(false);
+  const [detail, setDetail] = useState<NewsDetailResponse | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const detailUrl = row.canonical_article ? newsArticleDetailUrl(row.canonical_article) : null;
+  useEffect(() => {
+    if (!expanded || !detailUrl || detail) return;
+    let cancelled = false;
+    void loadDashboardResource<NewsDetailResponse>(detailUrl, {maxAgeMs:0}).then(value => {
+      if (!cancelled) setDetail(value);
+    }).catch(() => { if (!cancelled) setFailed(true); });
+    return () => { cancelled = true; };
+  }, [expanded, detailUrl, detail, attempt]);
   const sources = row.publisher_domains?.length ? row.publisher_domains
     : row.source_identity_organizations?.length ? row.source_identity_organizations
       : row.source_names?.length ? row.source_names : [row.canonical_source].filter(Boolean);
-  return <details className="current-event">
+  return <details className="current-event" onToggle={event => {
+    if (event.target === event.currentTarget) {
+      if (event.currentTarget.open) setFailed(false);
+      setExpanded(event.currentTarget.open);
+    }
+  }}>
     <summary className="current-event-toggle">
       <div className="current-event-meta"><span>{(row.topics ?? []).map(topic => TOPIC_LABELS[topic] ?? topic).join(" · ") || "新闻事件"}</span><time>{row.source_published_time ? time(row.source_published_time) : "发布时间未提供"}</time></div>
       <div className="current-event-title"><h3>{row.canonical_headline}</h3><ChevronRightIcon aria-hidden="true" /></div>
     </summary>
-    <NewsSummary summary={row.canonical_reading?.summary_zh} label="GEMINI 中文摘要 · 主报道" />
-    {row.canonical_reading?.impact_reason_zh && <section className="gemini-summary current-event-explanation"><span>补充说明 · 主报道</span><p>{publicImpactReason(row.canonical_reading.impact_reason_zh)}</p></section>}
+    {!detailUrl ? <p role="status">未找到对应的 raw 新闻关联。</p>
+      : failed ? <p role="alert">原文详情暂时无法读取。<button className="current-event-retry" type="button" onClick={() => {setFailed(false); setAttempt(value => value + 1);}}>重试</button></p>
+      : !detail ? <p role="status">正在读取原文摘要…</p>
+      : <>
+        <NewsSummary summary={detail.payload.summary_zh} label="GEMINI 中文摘要 · 主报道" />
+        {detail.payload.impact_reason_zh && <section className="gemini-summary current-event-explanation"><span>补充说明 · 主报道</span><p>{publicImpactReason(detail.payload.impact_reason_zh)}</p></section>}
+      </>}
     <details className="current-event-sources">
       <summary><span>{formatExactCount(row.member_count)} 篇报道 · {formatExactCount(row.independent_publishers)} 个独立来源</span><span className="current-event-source-action">来源详情 <ChevronRightIcon aria-hidden="true" /></span></summary>
       <div className="current-event-source-body"><dl><div><dt>报道来源</dt><dd>{sources.join(" · ") || "未提供"}</dd></div><div><dt>首次收录</dt><dd>{time(row.collector_first_seen_time)}</dd></div></dl></div>
@@ -1386,7 +1404,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
       {view === "evidence" && <section className="current-events" aria-label="当前新闻">
         <header className="current-events-heading"><div><h2>当前新闻</h2><p>已整理、合并重复报道，最新在前。</p></div><span>{formatExactCount(evidenceModeTotal)} 个事件</span></header>
         {visibleEvidence.length === 0 ? <p className="current-events-empty" role="status">{evidenceError ? "新闻事件暂时无法读取，请重试。" : !evidenceArchiveReady ? "正在读取新闻事件…" : evidenceModeTotal > 0 ? "当前列表暂无明细，请稍后重试。" : "暂无当前事件，有新进展时会显示在这里。"}</p>
-          : <div className="current-events-list">{visibleEvidence.map(row => <CurrentEvent key={`${evidencePage}:${row.event_key}`} row={row} />)}</div>}
+          : <div className="current-events-list">{visibleEvidence.map(row => <CurrentEvent key={`${evidencePage}:${row.event_key}:${JSON.stringify(row.canonical_article)}`} row={row} />)}</div>}
         <nav className="market-history-nav current-events-pagination" aria-label="新闻事件翻页">
           <PaginationButton direction="previous" disabled={evidencePage <= 1} onClick={() => setEvidencePage(page => Math.max(1, page - 1))} />
           <span aria-live="polite" aria-label={`第 ${formatExactCount(evidencePage)} 页`}>{formatExactCount(evidencePage)}</span>

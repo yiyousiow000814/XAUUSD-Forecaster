@@ -4,6 +4,7 @@ import {
   NEWS_REVIEW_STATE_INVARIANT_SQL,
   type NewsReviewState,
 } from "../../_lib/news-review-state";
+import type { NewsArticleReference } from "../../_lib/news-article-reference";
 
 export const NEWS_PROJECTION_CONTRACT_VERSION = "news-projection-generation-v4";
 export const NEWS_DELTA_CONTRACT = "news-projection-delta-v1";
@@ -1242,4 +1243,50 @@ export async function readNewsProjectionDetails(
     }])),
     missing: detailKeys.filter(key => !rows.results.some(row => row.detail_key === key)),
   };
+}
+
+export async function readNewsProjectionArticle(
+  binding: D1Database, article: NewsArticleReference,
+) {
+  const state = await readNewsProjectionState(binding);
+  if (!state || state.projection_state !== "CURRENT") {
+    throw new NewsProjectionProtocolError("verified news archive is recovering", 503, "NEWS_PROJECTION_RECOVERY_REQUIRED");
+  }
+  // The raw reader already indexes clusters. Cap candidates before inspecting
+  // content identities; never scan the archive or match translated headlines.
+  const rows = await binding.prepare(
+    `SELECT detail_key,payload FROM news_index WHERE cluster_id=? AND ${ACTIVE_NEWS_SQL}
+       AND ?=(SELECT active_generation_id FROM news_projection_state WHERE id=1)
+       ORDER BY detail_key LIMIT 17`,
+  ).bind(article.cluster_id, state.active_generation_id).all<{detail_key:string;payload:string}>();
+  if (rows.results.length > 16) {
+    throw new NewsProjectionProtocolError("raw article cluster is ambiguous", 409, "NEWS_ARTICLE_AMBIGUOUS");
+  }
+  if (!rows.results.length) {
+    throw new NewsProjectionProtocolError("corresponding raw article is unavailable", 404, "NEWS_ARTICLE_MISSING");
+  }
+  const details = await readNewsProjectionDetails(binding, rows.results.map(row => row.detail_key));
+  if (details.generation_id !== state.active_generation_id) {
+    throw new NewsProjectionProtocolError("raw archive changed during reading", 409, "NEWS_ARTICLE_CHANGED");
+  }
+  const candidates = rows.results.flatMap(row => {
+    const detail = details.items[row.detail_key];
+    if (detail?.payload?.content_hash !== article.content_hash) return [];
+    return [{detail_key:row.detail_key, detail_hash:detail.detail_hash,
+      payload:{...JSON.parse(row.payload), ...detail.payload}}];
+  });
+  const exact = candidates.filter(row => row.payload.source === article.source
+    && row.payload.source_item_id === article.source_item_id
+    && row.payload.revision_number === article.revision_number);
+  const matches = exact.length ? exact : candidates;
+  if (matches.length !== 1) {
+    throw new NewsProjectionProtocolError("corresponding raw article cannot be identified",
+      matches.length ? 409 : 404, matches.length ? "NEWS_ARTICLE_AMBIGUOUS" : "NEWS_ARTICLE_MISSING");
+  }
+  const finalState = await readNewsProjectionState(binding);
+  if (finalState?.projection_state !== "CURRENT"
+      || finalState.active_generation_id !== state.active_generation_id) {
+    throw new NewsProjectionProtocolError("raw archive changed during reading", 409, "NEWS_ARTICLE_CHANGED");
+  }
+  return matches[0];
 }

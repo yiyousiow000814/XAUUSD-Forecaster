@@ -962,7 +962,7 @@ def _news_evidence_display_rows(
         "evidence_grade", "broad_model_eligible", "model_permission",
         "member_count", "independent_publishers", "source_names",
         "publisher_domains", "source_identity_organizations", "reason_codes",
-        "canonical_reading",
+        "canonical_article",
     )
     rows: list[dict] = []
     displayed_events: set[str] = set()
@@ -1153,7 +1153,7 @@ def _build_news_evidence_resource(
         connection.row_factory = sqlite3.Row
         connection.execute("BEGIN")
         try:
-            evidence = event_evidence_rows_from_connection(connection, now, include_reading=True)
+            evidence = event_evidence_rows_from_connection(connection, now, include_article=True)
             rows = _news_evidence_display_rows(connection, evidence)
         finally:
             connection.rollback()

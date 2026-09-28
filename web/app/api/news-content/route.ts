@@ -4,6 +4,7 @@ import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { readBoundedBody } from "../_shared/dashboard-snapshot";
 import { rejectPreviewWrite } from "../_shared/preview";
 import { publicNewsRecord } from "../../_lib/public-news-copy";
+import { parseNewsArticleReference } from "../../_lib/news-article-reference";
 import {
   authorizeReleaseValidation, isReleaseValidationContext, releaseValidationResponse,
 } from "../_shared/release-validation";
@@ -15,6 +16,7 @@ import {
   NEWS_DETAIL_MAX_BATCH_ITEMS,
   NewsProjectionProtocolError,
   readNewsProjectionDetails,
+  readNewsProjectionArticle,
   stageNewsProjectionBatch,
   type NewsProjectionDetailItem,
 } from "../_shared/news-projection-store";
@@ -42,13 +44,17 @@ function failure(reason: unknown) {
 
 export async function GET(request: Request) {
   const query = new URL(request.url).searchParams;
+  const article = parseNewsArticleReference(query.get("article"));
+  if (query.has("article") && (!article || query.has("key") || query.has("keys"))) {
+    return NextResponse.json({ error: "invalid raw article reference" }, { status: 400 });
+  }
   const detailKeys = [...new Set(
     (query.get("keys") ?? query.get("key") ?? "")
       .split(",").map(key => key.trim()).filter(Boolean),
   )];
   if (
-    !detailKeys.length || detailKeys.length > DETAIL_BATCH_LIMIT
-    || detailKeys.some(key => !DETAIL_KEY_PATTERN.test(key))
+    !article && (!detailKeys.length || detailKeys.length > DETAIL_BATCH_LIMIT
+    || detailKeys.some(key => !DETAIL_KEY_PATTERN.test(key)))
   ) {
     return NextResponse.json({ error: "invalid news detail keys" }, { status: 400 });
   }
@@ -56,6 +62,12 @@ export async function GET(request: Request) {
   if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   try {
     await requireD1Capabilities(binding, ["news_projection_generation"]);
+    if (article) {
+      const item = await readNewsProjectionArticle(binding, article);
+      return NextResponse.json(publicNewsRecord(item), {
+        headers: { "Cache-Control": "private, no-store" },
+      });
+    }
     const result = await readNewsProjectionDetails(binding, detailKeys);
     const items = Object.fromEntries(Object.entries(result.items).map(([key, value]) => [
       key, publicNewsRecord(value),
