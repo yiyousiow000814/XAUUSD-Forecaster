@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 
 export type DashboardRoom = "live" | "audit" | "health" | "admin" | "assistant" | "retry" | "status" | "architecture";
 export type AuditViewName = "briefs" | "search" | "news" | "evidence" | "stories" | "coverage";
@@ -56,4 +56,14 @@ export function DashboardNavigationProvider({ children, value }: { children: Rea
 
 export function useDashboardNavigation() {
   return useContext(DashboardNavigationContext);
+}
+
+export function useNewsNavigationView(view: AuditViewName) {
+  const [lastNewsView, setLastNewsView] = useState<"news" | "evidence">(
+    view === "news" ? "news" : "evidence",
+  );
+  useEffect(() => {
+    if (view === "news" || view === "evidence") setLastNewsView(view);
+  }, [view]);
+  return view === "news" || view === "evidence" ? view : lastNewsView;
 }
