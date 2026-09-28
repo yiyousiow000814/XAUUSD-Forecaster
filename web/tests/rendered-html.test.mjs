@@ -571,7 +571,7 @@ test("keeps global shell ownership centralized and prevents view-level design dr
   assert.doesNotMatch(mobile, /DASHBOARD_GLOBAL_DESTINATIONS/);
   assert.doesNotMatch(mobile, /const SECTIONS|MobileDashboardSection/);
   assert.equal(navigation.match(/label: "(?:总览|新闻与事件|系统|管理员登录)"/g)?.length, 3);
-  assert.match(navigation, /href: "\/audit\?view=news"/);
+  assert.match(navigation, /href: "\/audit\?view=evidence"/);
   assert.match(shell, /href="\/health"/);
   assert.match(navigation, /DASHBOARD_ADMIN_DESTINATIONS/);
   assert.match(navigation, /概览[\s\S]*Assistant[\s\S]*重试任务[\s\S]*AI 模型用量/);
@@ -1596,7 +1596,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(html, /新闻与事件/);
   const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   assert.match(source, />新闻 <b>/);
-  assert.match(source, /当前可用新闻事件/);
+  assert.match(source, />raw 新闻 <b>/);
   assert.match(source, /evidence-intro evidence-intro-compact/);
   assert.doesNotMatch(source, /文章 \/ Revision/);
   assert.doesNotMatch(source, /当前达到 Broad 门槛/);

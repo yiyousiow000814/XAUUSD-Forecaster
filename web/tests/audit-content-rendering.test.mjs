@@ -545,6 +545,29 @@ test("event source fallbacks stay readable and do not invent links or times", ()
   assert.doesNotMatch(html, /href="https:|Invalid Date|模型|预测/);
 });
 
+test("news options retain their routes and render the canonical report summary", () => {
+  const row = curatedEvent("reading", "2026-09-27T01:00:00Z", {canonical_reading:{
+    summary_zh: "主报道摘要 <script>alert(1)</script>",
+    impact_reason_zh: "本次发布更新了此前的数据。",
+    source:"wire", source_item_id:"article-1", annotation_id:"accepted-1",
+  }});
+  const html = renderEvents([row]);
+  assert.match(html, /GEMINI 中文摘要 · 主报道/);
+  assert.match(html, /主报道摘要 &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(html, /补充说明 · 主报道/);
+  assert.match(html, /本次发布更新了此前的数据。/);
+  assert.doesNotMatch(html, /摘要暂未同步|<script>|accepted-1/);
+  const missing = renderEvents([curatedEvent("old-snapshot", null)]);
+  assert.match(missing, /摘要暂未同步/);
+  assert.doesNotMatch(missing, /补充说明 · 主报道|主报道摘要/);
+  const full = render("evidence", baseline);
+  assert.match(full, /href="\/audit\?view=evidence"[^>]*>新闻 /);
+  assert.match(full, /href="\/audit\?view=news"[^>]*>raw 新闻 /);
+  assert.match(full, /<option value="evidence"[^>]*>新闻 · /);
+  assert.match(full, /<option value="news"[^>]*>raw 新闻 · /);
+  assert.doesNotMatch(full, /当前可用新闻事件/);
+});
+
 
 test("room loading renders bounded content skeletons with one accessible status", () => {
   for (const room of ["audit", "live", "health"]) {

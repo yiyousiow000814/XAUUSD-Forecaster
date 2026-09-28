@@ -188,6 +188,7 @@ def test_preview_evidence_fixture_is_stable_and_omits_display_age() -> None:
             "economic_age_minutes": 42.5,
             "broad_model_eligible": True,
             "model_seen": False,
+            "canonical_reading": {"summary_zh": "主报道摘要。", "annotation_id": "accepted-1"},
         }],
     }
 
@@ -201,6 +202,7 @@ def test_preview_evidence_fixture_is_stable_and_omits_display_age() -> None:
 
     assert later == first
     assert "economic_age_minutes" not in first["items"][0]
+    assert first["items"][0]["canonical_reading"] == status["news_evidence"][0]["canonical_reading"]
     changed = module._preview_news_evidence({
         **status,
         "news_evidence": [{

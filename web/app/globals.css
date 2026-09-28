@@ -2232,6 +2232,10 @@ html,body,* { scrollbar-width:none; }
 .current-event-source-body dl>div+div { margin-top:6px; }
 .current-event-source-body dt { color:var(--muted); }
 .current-event-source-body dd { margin:0; overflow-wrap:anywhere; }
+.current-event .gemini-summary { margin:14px 0; border-radius:0 8px 8px 0; }
+.current-event .gemini-summary p { overflow-wrap:anywhere; }
+.current-event .current-event-explanation { border-left-color:var(--gold); }
+.current-event .current-event-explanation>span { color:#89631b; }
 .current-events-empty { padding:24px; border:1px solid var(--line); border-radius:12px; background:#fff; color:var(--muted); }
 .current-events-pagination { margin-top:18px; border:0; background:transparent; }
 .current-events-count { margin:8px 0 0; text-align:center; font-size:12px; color:var(--muted); }

@@ -22,6 +22,18 @@
   the frozen snapshot has reached `CURRENT`. Ordinary source advancement never
   authorizes abandonment of a healthy in-flight generation.
 
+## Event reading projection
+
+The separate news-evidence page projection may carry `canonical_reading` with
+`summary_zh`, `impact_reason_zh`, `source`, `source_item_id` and `annotation_id`.
+It is an optional reading projection of the same point-in-time canonical
+annotation already selected for that event. It does not change event identity,
+eligibility, default model inputs or historical evidence. The evidence resource
+owner opts in; the existing frozen generation hash and bounded page transport
+cover the additional fields. Pending generations finish before a new generation
+publishes reading data. Consumers accept older rows without it and show missing
+text honestly; no title-based join or unrelated annotation fallback is allowed.
+
 ## Generation lifecycle
 
 - The lifecycle is `prepare -> details -> index -> reconcile -> validate ->

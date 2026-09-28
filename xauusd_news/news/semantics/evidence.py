@@ -246,7 +246,9 @@ def resolve_event_clock(
     return None, "UNKNOWN", "UNKNOWN"
 
 
-def event_evidence_rows_from_connection(connection, decision_time: datetime) -> list[dict]:
+def event_evidence_rows_from_connection(
+    connection, decision_time: datetime, *, include_reading: bool = False,
+) -> list[dict]:
     """Return one point-in-time canonical row per event cluster."""
     # Ledger timestamps are canonicalized with microseconds.  Keep the same
     # representation so an annotation parsed exactly at decision time remains
@@ -549,7 +551,7 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             event_clock.isoformat() if event_clock else None,
             EVIDENCE_POLICY_VERSION,
         ))
-        events.append({
+        event = {
             "event_cluster_id": event_id,
             "event_key": event_id,
             "event_id": event_id,
@@ -644,7 +646,16 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             ),
             "reason_codes": reasons,
             "source_hash": source_hash,
-        })
+        }
+        if include_reading:
+            event["canonical_reading"] = {
+                "summary_zh": annotation.get("summary_zh"),
+                "impact_reason_zh": canonical.get("impact_reason_zh"),
+                "source": canonical["source"],
+                "source_item_id": canonical["source_item_id"],
+                "annotation_id": canonical["annotation_id"],
+            }
+        events.append(event)
     return sorted(events, key=lambda row: (row["collector_first_seen_time"], row["event_cluster_id"]))
 
 

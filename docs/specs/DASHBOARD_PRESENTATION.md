@@ -205,7 +205,7 @@ part of it.
    and rounded white content panels. All route changes preserve header
    geometry and navigation controls. Content density may differ by page.
 2. The public global destination order is `总览`, `新闻与事件`, and
-   `管理员登录`. The public reading routes are `/` and `/audit?view=news`.
+   `管理员登录`. The public reading routes are `/` and `/audit?view=evidence`.
    The shell status link opens `/health`. `管理员登录` first opens a local
    explanation dialog; only its explicit Google login action performs a normal
    browser navigation to the Access-protected `/admin` route.
@@ -401,9 +401,11 @@ or weaken deployment checks.
 
 ## Current news event reading
 
-The retained `当前可用新闻事件` destination presents the existing current,
+The `新闻` destination (`view=evidence`, also the default audit destination) presents the existing current,
 consolidated event selection as a compact reading list, newest publication
-first. Headlines and categories are visible immediately; reporting domains,
+first. Headlines, categories and the canonical report's existing Chinese summary
+are visible immediately. Its impact explanation appears when supplied. These are
+labelled as the main report, not a new synthesis of all event members. Reporting domains,
 independent-source counts and receipt time are available in a native disclosure.
 Headlines remain complete on phones. Source disclosures and pagination retain
 44px targets and keyboard operation.
@@ -412,6 +414,12 @@ This reader omits model use, prediction counts, training statistics, eligibility
 badges, historical-use filters and the prediction-audit table. The existing
 `eligible` transport selector and retained selection policy remain unchanged;
 this presentation change does not change event admission or delete historical
-records. `新闻` remains the full article archive. The current event payload does
-not supply article summaries or original article URLs, so the reader must not
-invent those fields or promise a nonexistent full-article destination.
+records. `raw 新闻` (`view=news`) remains the full article archive, including its
+existing summaries and controls. Both choices appear in desktop tabs and the
+phone selector. Old links retain their original data destinations.
+
+The optional `canonical_reading` payload supplies text from the same accepted
+annotation selected for the event headline. An old snapshot without that payload
+shows `摘要暂未同步`; it must not borrow a summary from a similar headline or a
+different report. Original article URLs are not supplied, so the reader must not
+promise a nonexistent full-article destination.
