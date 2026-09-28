@@ -1134,29 +1134,36 @@ def _projection_provider_ack(generation, offsets, payload, *, active=False):
     return {"status": "OK", "generation_id": identity}
 
 
+@pytest.mark.parametrize("lost_response", [False, True])
 def test_news_generation_stages_all_details_before_index_and_activation(
-    monkeypatch, tmp_path,
+    monkeypatch, tmp_path, lost_response,
 ) -> None:
     from xauusd_news.dashboard.sync import resources as module
     generation = _projection_fixture()
     state_file = tmp_path / "news-state.json"
     posted: list[tuple[str, dict]] = []
     offsets = {"detail": 0, "index": 0}
+    accepted = {}
 
     def post(url, body, _config):
+        if body in accepted:
+            return accepted[body]
         payload = json.loads(body)
         posted.append((url, payload))
-        if payload["action"] == "prepare":
-            return _projection_provider_ack(generation, offsets, payload)
         if payload["action"] == "stage_details":
             offsets["detail"] += len(payload["items"])
         if payload["action"] == "stage_index":
             offsets["index"] += len(payload["items"])
-        return _projection_provider_ack(generation, offsets, payload)
+        ack = _projection_provider_ack(generation, offsets, payload)
+        if lost_response and payload["action"] != "prepare":
+            accepted[body] = ack
+            raise urllib.error.URLError(ConnectionResetError("accepted response lost"))
+        return ack
 
     manifest = generation.manifest
     monkeypatch.setattr(module, "_get_local_json", lambda url: _projection_local_get(generation, url))
     monkeypatch.setattr(module, "_post_json", post)
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
     monkeypatch.setattr(module, "_get_json", lambda *_a, **_k: {
         "status": "OK", "projection_state": "CURRENT", "verified_complete": True,
         "active_generation_id": manifest["generation_id"],
@@ -1210,7 +1217,7 @@ def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_pat
     with pytest.raises(TimeoutError, match="detail upload timed out"):
         module._sync_news({}, config)
 
-    assert posted == ["prepare", "stage_details"]
+    assert posted == ["prepare", "stage_details", "stage_details", "stage_details"]
 
 
 @pytest.mark.parametrize("release_after", [1, 3, None])
@@ -1397,7 +1404,8 @@ def test_deferred_heavy_turns_yield_to_due_resources_without_duplicate_owners(
     assert calls == ["deferred", "market_chart", "deferred", "deferred", "deferred"]
 
 
-def test_news_evidence_python_bytes_worker_store_and_ack_consumer(monkeypatch):
+@pytest.mark.parametrize("lost_response", [False, True])
+def test_news_evidence_python_bytes_worker_store_and_ack_consumer(monkeypatch, lost_response):
     import base64
     import shutil
     import subprocess
@@ -1437,14 +1445,50 @@ def test_news_evidence_python_bytes_worker_store_and_ack_consumer(monkeypatch):
         "content_digest": receipt_payload_hash(items),
     }
     for body, ack in zip(bodies, observed["results"], strict=True):
-        monkeypatch.setattr(module, "_post_json", lambda *_, ack=ack: ack)
+        sent = []
+        def post(_url, payload, _config):
+            sent.append(payload)
+            if lost_response and len(sent) == 1 and "cleanup_active_snapshot" not in json.loads(body):
+                raise ConnectionResetError("response lost after accepted write")
+            return ack
+        monkeypatch.setattr(module, "_post_json", post)
+        monkeypatch.setattr(module.time, "sleep", lambda _: None)
         assert module._post_news_evidence("https://fixture.invalid", body, {}) == ack
+        expected_attempts = 2 if lost_response and "cleanup_active_snapshot" not in json.loads(body) else 1
+        assert sent == [body] * expected_attempts
         with pytest.raises(module.PayloadContractError, match="NEWS_EVIDENCE_ACK_INVALID"):
             module._post_news_evidence("https://fixture.invalid", body + b" ", {})
 
 
+@pytest.mark.parametrize("failure,retryable", [
+    (ConnectionResetError("reset"), True),
+    (TimeoutError("timeout"), True),
+    (urllib.error.URLError(ConnectionResetError("reset")), True),
+    (urllib.error.URLError(TimeoutError("timeout")), True),
+    (urllib.error.URLError("DNS failure"), False),
+    (urllib.error.HTTPError("https://fixture.invalid", 503, "unavailable", {}, None), False),
+    (ValueError("invalid acknowledgement"), False),
+])
+def test_news_publication_transport_retry_is_bounded(monkeypatch, failure, retryable):
+    from xauusd_news.dashboard.sync import resources as module
+
+    attempts, delays = [], []
+    body = b'{"generation_id":"immutable"}'
+    def post(url, payload, config):
+        attempts.append((url, payload, config))
+        raise failure
+    monkeypatch.setattr(module, "_post_json", post)
+    monkeypatch.setattr(module.time, "sleep", delays.append)
+    with pytest.raises(type(failure)) as caught:
+        module._post_news_projection_json("https://fixture.invalid", body, {})
+    assert caught.value is failure
+    assert attempts == [("https://fixture.invalid", body, {})] * (3 if retryable else 1)
+    assert delays == ([0.5, 1.0] if retryable else [])
+
+
+@pytest.mark.parametrize("lost_response", [False, True])
 def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
-    monkeypatch, tmp_path,
+    monkeypatch, tmp_path, lost_response,
 ) -> None:
     from xauusd_news.dashboard.sync import resources as module
     snapshot_id = "a" * 64
@@ -1492,11 +1536,14 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
     posted = []
     remote_next_offset = 0
     remote_active = False
+    accepted = {}
 
     def post(url, body, _config):
         nonlocal remote_next_offset, remote_active
         payload = json.loads(body)
         posted.append((url, payload))
+        if body in accepted:
+            return accepted[body]
         if "prepare_snapshot" in payload:
             return _evidence_ack(body, {
                 "status": "OK", "active": remote_active,
@@ -1505,7 +1552,10 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
         if "items" in payload:
             assert payload["offset"] == remote_next_offset
             remote_next_offset += len(payload["items"])
-            return _evidence_ack(body, {"status": "OK", "received": len(payload["items"])})
+            accepted[body] = _evidence_ack(body, {"status": "OK", "received": len(payload["items"])})
+            if lost_response:
+                raise ConnectionResetError("accepted batch response lost")
+            return accepted[body]
         if "activate_snapshot" in payload:
             assert remote_next_offset == len(rows)
             remote_active = True
@@ -1514,6 +1564,7 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
 
     monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
     monkeypatch.setattr(module, "_post_json", post)
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
     config = {
         "local_status_url": "http://local/api/status",
         "remote_ingest_url": "https://remote/api/ingest",
@@ -1523,7 +1574,7 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
     config[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
 
     module._sync_news_evidence({}, config)
-    first_cycle_batches = [body for _url, body in posted if "items" in body]
+    first_cycle_batches = [body for _url, body in posted if "items" in body][::2 if lost_response else 1]
     assert not any("activate_snapshot" in body for _url, body in posted)
     assert len(first_cycle_batches) == module.NEWS_EVIDENCE_PAGES_PER_CYCLE
     assert sum("prepare_snapshot" in body for _, body in posted) == 1
@@ -1537,7 +1588,7 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
             break
         module._sync_news_evidence({}, config)
 
-    batches = [body for _url, body in posted if "items" in body]
+    batches = [body for _url, body in posted if "items" in body][::2 if lost_response else 1]
     activation = next(body for _url, body in posted if "activate_snapshot" in body)
     assert sum(len(body["items"]) for body in batches) == len(rows)
     assert [item["event_key"] for body in batches for item in body["items"]] == [
@@ -1957,13 +2008,16 @@ def test_news_evidence_activation_acknowledgement_replays_idempotently(
     }
     config[module.RUNTIME_STATE_ROOT_KEY] = str(tmp_path)
 
-    error_type = TimeoutError if failure == "lost" else module.PayloadContractError
-    reason = "response was lost" if failure == "lost" else "NEWS_EVIDENCE_ACK_INVALID"
-    with pytest.raises(error_type, match=reason):
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+    if failure == "lost":
         module._sync_news_evidence({}, config)
-    assert not state_path.exists() or "active_snapshot_id" not in json.loads(
-        state_path.read_text(encoding="utf-8")
-    )
+        assert json.loads(state_path.read_text(encoding="utf-8"))["active_snapshot_id"] == snapshot_id
+    else:
+        with pytest.raises(module.PayloadContractError, match="NEWS_EVIDENCE_ACK_INVALID"):
+            module._sync_news_evidence({}, config)
+        assert not state_path.exists() or "active_snapshot_id" not in json.loads(
+            state_path.read_text(encoding="utf-8")
+        )
 
     restarted = _sync_module()
     monkeypatch.setattr(restarted.urllib.request, "urlopen", lambda *_a, **_k: Response())

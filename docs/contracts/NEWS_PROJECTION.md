@@ -115,6 +115,13 @@ article that has no summary. Normal producer advancement supplies new references
   again; the 60-second discovery cadence applies only after completion.
   Failed attempts retain the existing bounded backoff. This slice is not an
   upload rate limit and must not introduce idle time while replay is pending.
+- Replay-safe news and news-evidence publication POSTs retry connection resets
+  and socket timeouts at most three times total, using identical request bytes
+  and 0.5/1 second delays. Existing per-request socket timeouts still apply;
+  this does not establish a total wall-clock deadline. HTTP rejections,
+  malformed acknowledgements and invariant failures do not receive immediate
+  retries. Cleanup requests retain their single-attempt behavior. Exhaustion
+  returns to the existing resource scheduler without advancing a checkpoint.
 - D1 retains at most one `CURRENT`, one replacement `STAGING`, and one
   short-lived `SUPERSEDED` receipt generation. A new prepare removes older
   superseded receipts and obsolete v3 staging rows. Staging expires after 24

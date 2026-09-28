@@ -27,6 +27,7 @@ import time
 
 
 import urllib.request
+import urllib.error
 
 
 from datetime import UTC, datetime, timedelta
@@ -215,6 +216,22 @@ def _post_json(url: str, payload: bytes, config: dict) -> dict:
     result = _transport_post_json(url, payload, config)
     _write_runtime_signal(result, config)
     return result
+
+
+def _post_news_projection_json(url: str, payload: bytes, config: dict) -> dict:
+    """Replay immutable publication bytes after a bounded transient failure."""
+    delays = (0.5, 1.0)
+    for attempt in range(len(delays) + 1):
+        try:
+            return _post_json(url, payload, config)
+        except (ConnectionResetError, TimeoutError, urllib.error.URLError) as error:
+            reason = error.reason if isinstance(error, urllib.error.URLError) else error
+            if (isinstance(error, urllib.error.HTTPError)
+                    or not isinstance(reason, (ConnectionResetError, TimeoutError))
+                    or attempt == len(delays)):
+                raise
+            time.sleep(delays[attempt])
+    raise AssertionError("unreachable news publication attempt")
 
 
 def _sync_operator_retry_mirror(
@@ -635,7 +652,7 @@ def _try_news_delta(config, state, manifest, news_index_url, frozen_generation):
         return False
     applied = applied_delta_manifest(request)
     try:
-        result = _post_json(news_index_url, json.dumps(
+        result = _post_news_projection_json(news_index_url, json.dumps(
             request, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
         ).encode(), config)
     except RemoteInvariantViolation as error:
@@ -722,7 +739,7 @@ def _sync_news(
     # Preserve a foreign staging generation and let the caller retry after the
     # owning producer advances it. Abandonment requires explicit recovery.
     prepare = _require_news_ack(
-        _post_json(news_index_url, prepare_payload, config),
+        _post_news_projection_json(news_index_url, prepare_payload, config),
         {"generation_id": generation_id}, action="prepare",
     )
     detail_offset = prepare.get("next_detail_offset")
@@ -760,7 +777,7 @@ def _sync_news(
             items = page.get("items")
         if not isinstance(items, list) or not items:
             raise PayloadContractError("local news detail batch did not advance")
-        result = _post_json(news_url, json.dumps({
+        result = _post_news_projection_json(news_url, json.dumps({
             "action": "stage_details", "generation_id": generation_id,
             "offset": detail_offset, "items": items,
         }, ensure_ascii=False, separators=(",", ":")).encode(), config)
@@ -787,7 +804,7 @@ def _sync_news(
             items = page.get("items")
         if not isinstance(items, list) or not items:
             raise PayloadContractError("local news index batch did not advance")
-        result = _post_json(news_index_url, json.dumps({
+        result = _post_news_projection_json(news_index_url, json.dumps({
             "action": "stage_index", "generation_id": generation_id,
             "offset": index_offset, "items": items,
         }, ensure_ascii=False, separators=(",", ":")).encode(), config)
@@ -805,14 +822,14 @@ def _sync_news(
     if not prepare.get("active") and complete:
         if receipt != manifest["expected_receipt_digest"]:
             raise PayloadContractError("remote news completed receipt mismatched")
-        activation = _post_json(news_index_url, json.dumps({
+        activation = _post_news_projection_json(news_index_url, json.dumps({
             "action": "activate", "generation_id": generation_id,
         }, separators=(",", ":")).encode(), config)
         _require_news_ack(activation, {
             "activated": generation_id, "index_count": manifest["expected_index_count"],
             "detail_count": manifest["expected_detail_count"],
         }, action="activate")
-        verification = _post_json(news_index_url, json.dumps({
+        verification = _post_news_projection_json(news_index_url, json.dumps({
             "action": "verify", "generation_id": generation_id,
         }, separators=(",", ":")).encode(), config)
         _require_news_ack(verification, {"generation_id": generation_id}, action="verify")
@@ -1164,7 +1181,8 @@ def _local_critical_status_url(config: dict) -> str:
 def _post_news_evidence(remote_url: str, payload: bytes, config: dict) -> dict:
     """Advance only on an exact, operation-complete remote acknowledgement."""
     request = json.loads(payload)
-    result = _post_json(remote_url, payload, config)
+    post = _post_json if "cleanup_active_snapshot" in request else _post_news_projection_json
+    result = post(remote_url, payload, config)
     snapshot_id = next((request[key] for key in (
         "prepare_snapshot", "snapshot_id", "activate_snapshot", "cleanup_active_snapshot",
     ) if key in request), None)
