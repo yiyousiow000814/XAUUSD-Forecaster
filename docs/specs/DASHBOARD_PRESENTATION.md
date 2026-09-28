@@ -424,8 +424,9 @@ nav. On phones, both destinations form a News optgroup in the existing native
 page selector; no hover interaction is required. Old links retain their original
 data destinations.
 
-The optional `canonical_reading` payload supplies text from the same accepted
-annotation selected for the event headline. An old snapshot without that payload
-shows `摘要暂未同步`; it must not borrow a summary from a similar headline or a
-different report. Original article URLs are not supplied, so the reader must not
-promise a nonexistent full-article destination.
+The optional `canonical_article` reference identifies the raw report. Expanding
+the headline reads its existing `/api/news-content` detail; summaries and reasons
+are not copied into event rows. Show loading while reading, a retry control on
+failure, and an explicit missing association for older rows without references.
+Only a successfully read raw detail with no summary may show that no summary is
+available. Keep the disclosure closed initially and preserve the raw archive UI.

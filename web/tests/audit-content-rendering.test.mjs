@@ -545,24 +545,18 @@ test("event source fallbacks stay readable and do not invent links or times", ()
   assert.doesNotMatch(html, /href="https:|Invalid Date|模型|预测/);
 });
 
-test("news options retain their routes and render the canonical report summary", () => {
-  const row = curatedEvent("reading", "2026-09-27T01:00:00Z", {canonical_reading:{
-    summary_zh: "主报道摘要 <script>alert(1)</script>",
-    impact_reason_zh: "本次发布更新了此前的数据。",
-    source:"wire", source_item_id:"article-1", annotation_id:"accepted-1",
+test("news options preserve collapsed direct raw detail reading", () => {
+  const row = curatedEvent("reading", "2026-09-27T01:00:00Z", {canonical_article:{
+    source:"wire", source_item_id:"article-1", revision_number:1,
+    cluster_id:"cluster", content_hash:"a".repeat(64),
   }});
   const html = renderEvents([row]);
   assert.match(html, /<details class="current-event"><summary class="current-event-toggle">/);
-  assert.match(html, /<\/summary><section class="gemini-summary">/);
   assert.doesNotMatch(html, /<details[^>]* open/);
-  assert.match(html, /GEMINI 中文摘要 · 主报道/);
-  assert.match(html, /主报道摘要 &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
-  assert.match(html, /补充说明 · 主报道/);
-  assert.match(html, /本次发布更新了此前的数据。/);
-  assert.doesNotMatch(html, /摘要暂未同步|<script>|accepted-1/i);
+  assert.match(html, /正在读取原文摘要/);
+  assert.doesNotMatch(html, /摘要暂未同步/);
   const missing = renderEvents([curatedEvent("old-snapshot", null)]);
-  assert.match(missing, /摘要暂未同步/);
-  assert.doesNotMatch(missing, /补充说明 · 主报道|主报道摘要/);
+  assert.match(missing, /未找到对应的 raw 新闻关联/);
   const full = render("evidence", baseline);
   assert.match(full, /href="\/audit\?view=evidence"[^>]*>当前新闻 /);
   assert.match(full, /href="\/audit\?view=news"[^>]*>raw 新闻 /);
@@ -704,4 +698,57 @@ test("article reading badges retain status distinctions without model permission
     assert.doesNotMatch(html,/可用于模型|不可用于模型|模型权限|进入模型|影响已结束|FUTURE_STATE/);
     assert.equal(JSON.stringify(row),original,"presentation must not rewrite eligibility evidence");
   }
+});
+
+
+test("current event fetches raw detail only on expansion and recovers after failure", async () => {
+  const output=await build({bundle:true,write:false,platform:"node",format:"esm",jsx:"automatic",
+    nodePaths:[join(dependencyPackage,"..","node_modules")],
+    banner:{js:"import {createRequire} from 'node:module';const require=createRequire(import.meta.url);"},
+    plugins:[{name:"event-effects",setup(b){
+      b.onResolve({filter:/^react$/},a=>a.importer===viewPath?{path:"hooks",namespace:"event-test"}:null);
+      b.onLoad({filter:/.*/,namespace:"event-test"},()=>({contents:`
+        export * from ${JSON.stringify(require.resolve("react"))};
+        export function useState(v){const h=globalThis.__eventHarness,i=h.index++;
+          if(!(i in h.state))h.state[i]=v;return [h.state[i],n=>h.state[i]=typeof n==='function'?n(h.state[i]):n];}
+        export function useEffect(fn,deps){const h=globalThis.__eventHarness,i=h.index++;
+          const old=h.deps[i];if(!old||deps.some((v,j)=>v!==old[j])){
+            h.cleanups[i]?.();h.effects.push(()=>h.cleanups[i]=fn());h.deps[i]=deps;}}
+      `,loader:"js",resolveDir:fileURLToPath(new URL("..",import.meta.url))}));
+      b.onResolve({filter:/dashboard-resource$/},a=>a.importer===viewPath?{path:"resource",namespace:"event-resource"}:null);
+      b.onLoad({filter:/.*/,namespace:"event-resource"},()=>({contents:`
+        export function loadDashboardResource(url){return globalThis.__eventHarness.load(url);}
+        export function useDashboardResource(){} export function clearDashboardResource(){}
+        export class DashboardResourceError extends Error {} export function readDashboardResource(){}
+        export function subscribeDashboardResource(){}
+      `,loader:"js"}));
+    }}],stdin:{resolveDir:fileURLToPath(new URL("..",import.meta.url)),loader:"tsx",contents:`
+      import {CurrentEvent} from ${JSON.stringify(viewPath)};
+      import {renderToStaticMarkup} from 'react-dom/server';
+      export function draw(row){const h=globalThis.__eventHarness;h.index=0;h.effects=[];
+        const tree=CurrentEvent({row});return {tree,html:renderToStaticMarkup(tree)};}
+    `}});
+  const path=join(temporaryRoot,"event-effects.mjs");writeFileSync(path,output.outputFiles[0].contents);
+  const {draw}=await import(pathToFileURL(path).href);
+  const article={source:"wire",source_item_id:"report",revision_number:1,cluster_id:"cluster",content_hash:"a".repeat(64)};
+  const row=curatedEvent("event",null,{canonical_article:article});
+  const requests=[];let fail=true;
+  const h={index:0,state:[],deps:[],cleanups:[],effects:[],load:async url=>{
+    requests.push(url);if(fail)throw new Error("temporary");
+    return {payload:{summary_zh:"raw 原有摘要 <script>bad</script>",impact_reason_zh:"raw 原有说明"}};
+  }};
+  globalThis.__eventHarness=h;
+  const settle=async()=>{h.effects.forEach(fn=>fn());await new Promise(resolve=>setImmediate(resolve));};
+  const findButton=node=>!node||typeof node!=="object"?null:node.type==="button"?node:
+    [node.props?.children].flat(Infinity).map(findButton).find(Boolean);
+  try {
+    let view=draw(row);await settle();assert.equal(requests.length,0);
+    const target={open:true};view.tree.props.onToggle({target,currentTarget:target});
+    draw(row);await settle();view=draw(row);assert.match(view.html,/原文详情暂时无法读取/);
+    assert.deepEqual(JSON.parse(new URL(requests[0],"http://local").searchParams.get("article")),article);
+    fail=false;findButton(view.tree).props.onClick();draw(row);await settle();
+    view=draw(row);assert.match(view.html,/raw 原有摘要 &lt;script&gt;bad&lt;\/script&gt;/);
+    assert.match(view.html,/raw 原有说明/);assert.doesNotMatch(view.html,/摘要暂未同步|<script>/i);
+    assert.equal(requests.length,2);
+  } finally {h.cleanups.forEach(fn=>fn?.());delete globalThis.__eventHarness;}
 });

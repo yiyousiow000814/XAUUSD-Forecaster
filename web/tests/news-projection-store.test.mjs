@@ -7,7 +7,7 @@ import {
   abandonNewsProjection, activateNewsProjection, advanceNewsReceiptDigest, EMPTY_RECEIPT_DIGEST,
   NEWS_PROJECTION_CONTRACT_VERSION, prepareNewsProjection,
   newsProjectionPayloadHash,
-  readNewsProjectionDetails, readNewsProjectionHealth, readNewsProjectionPage,
+  readNewsProjectionArticle, readNewsProjectionDetails, readNewsProjectionHealth, readNewsProjectionPage,
   stageNewsProjectionBatch, verifyNewsProjection,
 } from "../app/api/_shared/news-projection-store.ts";
 import { D1TestDatabase } from "./d1-test-database.mjs";
@@ -1003,4 +1003,87 @@ test("replacement detail replay treats cross-runtime object order as non-semanti
   const changesAfter = db.database.prepare("SELECT total_changes() total").get().total;
   assert.equal(changesAfter - changesBefore, 1,
     "unchanged logical detail writes only the append-only generation receipt");
+});
+
+
+test("event article resolution reads raw details by exact content identity", async () => {
+  const db = database();
+  const article = {source:"wire",source_item_id:"article",revision_number:1,
+    cluster_id:"cluster-1",content_hash:id("c")};
+  const raw = {...detail("1"),payload:{...detail("1").payload,
+    content_hash:article.content_hash,summary_zh:"同一份 raw 摘要"}};
+  const row = {...index("1"),...article,impact_reason_zh:"现有原文说明"};
+  await publish(db,await manifest("a",[raw],[row]),[raw],[row]);
+  const byKey = await readNewsProjectionDetails(db,[raw.detail_key]);
+  for (const ref of [article,{...article,source:"deduplicated-alias",source_item_id:"alias"}]) {
+    const result = await readNewsProjectionArticle(db,ref);
+    assert.equal(result.detail_key,raw.detail_key);
+    assert.equal(result.payload.summary_zh,byKey.items[raw.detail_key].payload.summary_zh);
+    assert.equal(result.payload.impact_reason_zh,row.impact_reason_zh);
+  }
+  for (const ref of [{...article,content_hash:id("d")},{...article,cluster_id:"missing"}]) {
+    await assert.rejects(readNewsProjectionArticle(db,ref), e=>e.code==="NEWS_ARTICLE_MISSING");
+  }
+  db.database.prepare("UPDATE news_projection_state SET projection_state='ACTIVATING'").run();
+  db.database.prepare("UPDATE news_index SET payload=json_set(payload,'$.annotation_status','SUPERSEDED_CONTRACT')").run();
+  db.database.prepare("UPDATE news_projection_state SET projection_state='CURRENT'").run();
+  await assert.rejects(readNewsProjectionArticle(db,article), e=>e.code==="NEWS_ARTICLE_MISSING");
+});
+
+test("article resolution rejects a generation switch during detail reading", async () => {
+  const db = database();
+  const article = {source:"wire",source_item_id:"article",revision_number:1,
+    cluster_id:"cluster-1",content_hash:id("c")};
+  const raw = {...detail("1"),payload:{content_hash:article.content_hash,summary_zh:"summary"}};
+  const row = {...index("1"),...article};
+  await publish(db,await manifest("a",[raw],[row]),[raw],[row]);
+  const prepare = db.prepare.bind(db);
+  db.prepare = sql => {
+    const stmt = prepare(sql);
+    if (/SELECT detail_key,detail_hash,payload FROM news_details/.test(sql.replace(/\s+/g,' '))) {
+      const bind = stmt.bind.bind(stmt);
+      stmt.bind = (...args) => {
+        const bound=bind(...args), all=bound.all.bind(bound);
+        bound.all=async()=>{const result=await all();
+          db.database.prepare("UPDATE news_projection_state SET active_generation_id=?").run(id("b"));return result;};
+        return bound;
+      };
+    }
+    return stmt;
+  };
+  await assert.rejects(readNewsProjectionArticle(db,article),e=>e.code==="NEWS_ARTICLE_CHANGED");
+});
+
+
+test("news-content article GET uses the raw reader and keeps key requests compatible", async () => {
+  const db = database();
+  await prepareReleaseValidationFixtures(db);
+  const article={source:"wire",source_item_id:"report",revision_number:1,
+    cluster_id:"cluster-1",content_hash:id("c")};
+  const raw={...detail("1"),payload:{content_hash:article.content_hash,summary_zh:"共享摘要"}};
+  const row={...index("1"),...article};
+  await publish(db,await manifest("a",[raw],[row]),[raw],[row]);
+  const runtime={DB:db,ASSETS:{fetch:async()=>new Response("asset")}};
+  globalThis.__AURUM_TEST_WORKER_ENV=runtime;
+  const {default:worker}=await import("../dist/server/index.js");
+  const get=query=>worker.fetch(new Request(`http://localhost/api/news-content?${query}`),runtime,{waitUntil(){},passThroughOnException(){}});
+  const byKey=await (await get(`key=${raw.detail_key}`)).json();
+  const response=await get(`article=${encodeURIComponent(JSON.stringify(article))}`);
+  assert.equal(response.status,200);assert.equal(response.headers.get("cache-control"),"private, no-store");
+  assert.equal((await response.json()).payload.summary_zh,byKey.payload.summary_zh);
+  for (const query of ["article=invalid",`article=${encodeURIComponent(JSON.stringify({...article,revision_number:0}))}`,
+    `article=${encodeURIComponent(JSON.stringify(article))}&key=${raw.detail_key}`]) {
+    assert.equal((await get(query)).status,400);
+  }
+});
+
+
+test("article reference parser bounds identities and preserves encoded source IDs", async () => {
+  const {parseNewsArticleReference,newsArticleDetailUrl}=await import("../app/_lib/news-article-reference.ts");
+  const ref={source:"wire",source_item_id:"https://source.test/a?b=中文&c=1",revision_number:2,cluster_id:"cluster",content_hash:id("a")};
+  assert.deepEqual(parseNewsArticleReference(new URL(newsArticleDetailUrl(ref),"http://local").searchParams.get("article")),ref);
+  for (const value of [null,"invalid","[]","null",JSON.stringify({...ref,content_hash:"x"}),
+    JSON.stringify({...ref,revision_number:-1}),JSON.stringify({...ref,source_item_id:"a".repeat(4097)})]) {
+    assert.equal(parseNewsArticleReference(value),null);
+  }
 });

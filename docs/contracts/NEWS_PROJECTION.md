@@ -24,15 +24,24 @@
 
 ## Event reading projection
 
-The separate news-evidence page projection may carry `canonical_reading` with
-`summary_zh`, `impact_reason_zh`, `source`, `source_item_id` and `annotation_id`.
-It is an optional reading projection of the same point-in-time canonical
-annotation already selected for that event. It does not change event identity,
-eligibility, default model inputs or historical evidence. The evidence resource
-owner opts in; the existing frozen generation hash and bounded page transport
-cover the additional fields. Pending generations finish before a new generation
-publishes reading data. Consumers accept older rows without it and show missing
-text honestly; no title-based join or unrelated annotation fallback is allowed.
+The separate news-evidence page carries an optional `canonical_article` reference:
+`source`, `source_item_id`, `revision_number`, `cluster_id`, and `content_hash`
+from the same canonical revision selected for the event. It MUST NOT copy raw
+article summaries. The opt-in display reference does not alter default model
+inputs, event identity, eligibility, or historical evidence. Existing frozen
+generation hashing and transport cover it; pending generations remain immutable.
+
+On expansion, `/api/news-content?article=...` resolves that reference through the
+existing CURRENT raw projection and returns the same detail used by raw news.
+Resolution examines at most 16 active rows in the indexed cluster and requires
+the exact content hash. Prefer an exact source/item/revision match; otherwise
+only one identical-content representative from raw deduplication is acceptable.
+Reject missing or ambiguous matches and generation changes; never match titles
+or timestamps. Reads do not mutate either projection. Article resolution is
+uncached; immutable detail-key reads retain their existing cache contract.
+Older event rows without a reference remain readable with an explicit missing
+association state. Retrieval failures are retryable and distinct from a raw
+article that has no summary. Normal producer advancement supplies new references.
 
 ## Generation lifecycle
 

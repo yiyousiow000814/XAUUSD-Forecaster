@@ -18,9 +18,9 @@ from tests.fixtures.dashboard_news_fixtures import (
 UTC = timezone.utc
 
 
-@pytest.mark.parametrize("minutes, expected_summary", [(0, "首次发布的摘要。"), (2, "修订后的摘要。")])
-def test_evidence_reading_uses_canonical_annotation_without_changing_model_input(
-    tmp_path, minutes, expected_summary,
+@pytest.mark.parametrize("minutes", [0, 2])
+def test_evidence_article_reference_preserves_model_input_without_copying_summary(
+    tmp_path, minutes,
 ) -> None:
     from xauusd_news.news.semantics.evidence import event_evidence_rows_from_connection
 
@@ -53,17 +53,16 @@ def test_evidence_reading_uses_canonical_annotation_without_changing_model_input
         decision_time = now + timedelta(minutes=minutes)
         original = event_evidence_rows_from_connection(ledger.connection, decision_time)
         projected = event_evidence_rows_from_connection(
-            ledger.connection, decision_time, include_reading=True,
+            ledger.connection, decision_time, include_article=True,
         )
         assert len(projected) == 1
-        reading = projected[0]["canonical_reading"]
+        reading = projected[0]["canonical_article"]
         assert reading == {
-            "summary_zh": expected_summary, "impact_reason_zh": original[0]["impact_reason_zh"],
-            "source": original[0]["canonical_source"],
-            "source_item_id": original[0]["canonical_source_item_id"],
-            "annotation_id": f"accepted-{0 if minutes == 0 else 1}",
+            "source": source, "source_item_id": item_id, "revision_number": 1,
+            "cluster_id": item_id, "content_hash": digest,
         }
-        assert [{k: v for k, v in row.items() if k != "canonical_reading"}
+        assert "summary_zh" not in reading
+        assert [{k: v for k, v in row.items() if k != "canonical_article"}
                 for row in projected] == original
         resource = news_resources._build_news_evidence_resource(
             database, clock=lambda: decision_time,
@@ -72,8 +71,8 @@ def test_evidence_reading_uses_canonical_annotation_without_changing_model_input
         page = news_resources._news_evidence_page(None, 8)
         assert page["snapshot_id"] == resource["snapshot_id"]
         assert len(page["items"]) == 1
-        assert page["items"][0]["canonical_reading"] == reading
-        assert json.loads(json.dumps(page, ensure_ascii=False))["items"][0]["canonical_reading"] == reading
+        assert page["items"][0]["canonical_article"] == reading
+        assert json.loads(json.dumps(page, ensure_ascii=False))["items"][0]["canonical_article"] == reading
     finally:
         ledger.close()
 
