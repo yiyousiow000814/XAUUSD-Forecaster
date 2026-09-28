@@ -2463,7 +2463,7 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(renderer, /scope="col"/);
   assert.match(renderer, /showModal\(\)/);
   assert.match(renderer, /\/api\/news-content\?key=/);
-  assert.match(renderer, /label="摘要"/);
+  assert.match(renderer, /GEMINI 中文摘要/);
   assert.match(renderer, /GEMMA 市场影响判断/);
   assert.doesNotMatch(renderer, /<footer>[\s\S]*完成<\/button>[\s\S]*<\/footer>/);
   assert.doesNotMatch(css, /\.assistant-news-dialog>article>footer button/);
