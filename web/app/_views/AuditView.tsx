@@ -426,8 +426,8 @@ export function CurrentEvent({ row }: { row: NewsEvidence }) {
       : failed ? <p role="alert">原文详情暂时无法读取。<button className="current-event-retry" type="button" onClick={() => {setFailed(false); setAttempt(value => value + 1);}}>重试</button></p>
       : !detail ? <p role="status">正在读取原文摘要…</p>
       : <>
-        <NewsSummary summary={detail.payload.summary_zh} label="GEMINI 中文摘要 · 主报道" />
-        {detail.payload.impact_reason_zh && <section className="gemini-summary current-event-explanation"><span>补充说明 · 主报道</span><p>{publicImpactReason(detail.payload.impact_reason_zh)}</p></section>}
+        <NewsSummary summary={detail.payload.summary_zh} label="摘要" />
+        {detail.payload.impact_reason_zh && <section className="gemini-summary current-event-explanation"><span>补充说明</span><p>{publicImpactReason(detail.payload.impact_reason_zh)}</p></section>}
       </>}
     <details className="current-event-sources">
       <summary><span>{formatExactCount(row.member_count)} 篇报道 · {formatExactCount(row.independent_publishers)} 个独立来源</span><span className="current-event-source-action">来源详情 <ChevronRightIcon aria-hidden="true" /></span></summary>
@@ -658,7 +658,7 @@ export function NewsRow({
           {current.link && <a className="source-link" href={current.link} target="_blank" rel="noreferrer">阅读来源 ↗</a>}
         </div>
         {translated ? <p className="original-headline"><b>原文标题</b>{current.original_headline}</p> : null}
-        {annotationStatus === "READY" ? <NewsSummary summary={current.summary_zh} label={`GEMINI 中文摘要 · 完整读取 ${formatExactCount(row.content_characters)} 字符`} /> : annotationStatus === "QUEUED" ? <section className="gemini-summary summary-queued">
+        {annotationStatus === "READY" ? <NewsSummary summary={current.summary_zh} label="摘要" /> : annotationStatus === "QUEUED" ? <section className="gemini-summary summary-queued">
           <span>中文摘要排队中</span><p>正文已经完整入库，不会截断；系统会依序生成中文摘要，标题翻译独立处理。</p>
         </section> : annotationStatus === "BACKING_OFF" ? <section className="gemini-summary summary-queued">
           <span>暂时退避</span><p>{current.annotation_reason ?? "本次处理未完成；系统会在等待间隔到期后重试。"}</p>
