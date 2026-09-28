@@ -8,6 +8,37 @@ import { transform } from "esbuild";
 const source = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
 const compiled = await transform(source, { loader: "tsx", format: "cjs", jsx: "automatic" });
 
+test("news destination remembers visits across audit tabs and follows explicit history", async () => {
+  const owner = readFileSync(new URL("../app/_components/DashboardNavigation.tsx", import.meta.url), "utf8");
+  const output = await transform(owner, { loader: "tsx", format: "cjs", jsx: "automatic" });
+  const loaded = { exports: {} };
+  let state, effects = [];
+  const hooks = {
+    createContext: () => ({}),
+    useState: initial => [state ??= initial, value => { state = value; }],
+    useEffect: fn => effects.push(fn),
+  };
+  new Function("require", "module", "exports", output.code)(
+    name => name === "react" ? hooks : {}, loaded, loaded.exports,
+  );
+  const visit = view => {
+    const destination = loaded.exports.useNewsNavigationView(view);
+    effects.splice(0).forEach(effect => effect());
+    return destination;
+  };
+  assert.equal(visit("briefs"), "evidence");
+  assert.equal(visit("news"), "news");
+  for (const view of ["search", "stories", "coverage", "briefs"]) {
+    assert.equal(visit(view), "news");
+  }
+  assert.equal(visit("evidence"), "evidence");
+  assert.equal(visit("search"), "evidence");
+  assert.equal(visit("news"), "news", "history back to raw restores the raw destination");
+  assert.equal(visit("briefs"), "news");
+  state = undefined;
+  assert.equal(visit("search"), "evidence", "a new mount uses the default rather than a global preference");
+});
+
 function harness() {
   let cursor = 0;
   const slots = [], effects = [], listeners = new Map(), imports = [], pending = [];

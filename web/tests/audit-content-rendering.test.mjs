@@ -562,7 +562,10 @@ test("news options preserve collapsed direct raw detail reading", () => {
   assert.match(full, /href="\/audit\?view=news"[^>]*>raw 新闻 /);
   assert.match(full, /<option value="evidence"[^>]*>当前新闻 · /);
   assert.match(full, /<option value="news"[^>]*>raw 新闻 · /);
-  assert.match(full, /<details class="audit-news-menu active"><summary>当前新闻 /);
+  assert.match(full, /<summary aria-label="切换新闻类型"><a class="audit-news-current" href="\/audit\?view=evidence" aria-current="page">当前新闻 /);
+  const raw = render("news", baseline);
+  assert.match(raw, /<summary aria-label="切换新闻类型"><a class="audit-news-current" href="\/audit\?view=news" aria-current="page">raw 新闻 /);
+  assert.doesNotMatch(raw, /class="audit-news-current"[^>]*>当前新闻/);
   assert.match(full, /<div class="audit-news-options"><a href="\/audit\?view=evidence" aria-current="page"/);
   assert.match(full, /<optgroup label="新闻"><option value="evidence"/);
   assert.doesNotMatch(full, /当前可用新闻事件/);

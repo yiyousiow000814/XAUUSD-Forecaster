@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ButtonHTMLAttri
 import { ChevronLeftIcon, ChevronRightIcon } from "@radix-ui/react-icons";
 import { newsArticleDetailUrl, type NewsArticleReference } from "../_lib/news-article-reference";
 import CountValue from "../_components/CountValue";
-import { useDashboardNavigation, type AuditViewName } from "../_components/DashboardNavigation";
+import { useDashboardNavigation, useNewsNavigationView, type AuditViewName } from "../_components/DashboardNavigation";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
 import {
   DashboardResourceError, loadDashboardResource, readDashboardResource,
@@ -730,6 +730,7 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
   const [newsError, setNewsError] = useState<string | null>(null);
   const [newsDetails, setNewsDetails] = useState<Record<string, Partial<News>>>({});
   const view = initialView;
+  const newsNavigationView = useNewsNavigationView(view);
   const navigation = useDashboardNavigation();
   const [briefDate, setBriefDate] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
@@ -1195,7 +1196,13 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
           onPointerEnter={event => { if (event.pointerType === "mouse") event.currentTarget.open = true; }}
           onPointerLeave={event => { if (event.pointerType === "mouse") event.currentTarget.open = false; }}
           onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false; }}>
-          <summary onKeyDown={closeNewsMenuOnEscape}>当前新闻 <b><MetricValue phase={statusState}><CountValue value={newsMetrics.events.currently_model_eligible} /></MetricValue></b><ChevronRightIcon aria-hidden="true" /></summary>
+          <summary aria-label="切换新闻类型" onKeyDown={closeNewsMenuOnEscape}>
+            <a className="audit-news-current" href={newsNavigationView === "news" ? "/audit?view=news" : "/audit?view=evidence"}
+              aria-current={view === "news" || view === "evidence" ? "page" : undefined}
+              onClick={event => { event.preventDefault(); event.stopPropagation(); event.currentTarget.closest("details")?.removeAttribute("open"); selectView(newsNavigationView === "news" ? "news" : "evidence"); }}>
+              {newsNavigationView === "news" ? "raw 新闻" : "当前新闻"} <b><MetricValue phase={newsNavigationView === "news" ? newsPhase : statusState}><CountValue value={newsNavigationView === "news" ? readableNewsTotal : newsMetrics.events.currently_model_eligible} /></MetricValue></b>
+            </a><ChevronRightIcon aria-hidden="true" />
+          </summary>
           <div className="audit-news-options">
             <a href="/audit?view=evidence" aria-current={view === "evidence" ? "page" : undefined} onKeyDown={closeNewsMenuOnEscape} onClick={event => { event.preventDefault(); event.currentTarget.closest("details")?.removeAttribute("open"); selectView("evidence"); }}>当前新闻 <b><MetricValue phase={statusState}><CountValue value={newsMetrics.events.currently_model_eligible} /></MetricValue></b></a>
             <a href="/audit?view=news" aria-current={view === "news" ? "page" : undefined} onKeyDown={closeNewsMenuOnEscape} onClick={event => { event.preventDefault(); event.currentTarget.closest("details")?.removeAttribute("open"); selectView("news"); }}>raw 新闻 <b><MetricValue phase={newsPhase}><CountValue value={readableNewsTotal} /></MetricValue></b></a>
