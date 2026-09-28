@@ -35,6 +35,12 @@ and phones. Authentication and private resource permissions do not change.
 
 ## Navigation loading
 
+The desktop news navigation label and count reflect the selected news view:
+current events or raw news. The label is a direct link to that view (defaulting
+to current events from other sections); the separate arrow opens the switcher.
+Mouse hover and keyboard access retain both options. The phone selector uses
+the same selected view and remains the single mobile navigation control.
+
 Switching audit subviews keeps the mounted tab bar and content owner visible;
 only the selected content changes, with resource-specific loading as needed.
 Same-room clicks and history navigation invalidate older room imports without

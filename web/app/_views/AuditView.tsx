@@ -1195,7 +1195,13 @@ export default function AuditView({ initialView }: { initialView: AuditDeskView 
           onPointerEnter={event => { if (event.pointerType === "mouse") event.currentTarget.open = true; }}
           onPointerLeave={event => { if (event.pointerType === "mouse") event.currentTarget.open = false; }}
           onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false; }}>
-          <summary onKeyDown={closeNewsMenuOnEscape}>当前新闻 <b><MetricValue phase={statusState}><CountValue value={newsMetrics.events.currently_model_eligible} /></MetricValue></b><ChevronRightIcon aria-hidden="true" /></summary>
+          <summary aria-label="切换新闻类型" onKeyDown={closeNewsMenuOnEscape}>
+            <a className="audit-news-current" href={view === "news" ? "/audit?view=news" : "/audit?view=evidence"}
+              aria-current={view === "news" || view === "evidence" ? "page" : undefined}
+              onClick={event => { event.preventDefault(); event.stopPropagation(); event.currentTarget.closest("details")?.removeAttribute("open"); selectView(view === "news" ? "news" : "evidence"); }}>
+              {view === "news" ? "raw 新闻" : "当前新闻"} <b><MetricValue phase={view === "news" ? newsPhase : statusState}><CountValue value={view === "news" ? readableNewsTotal : newsMetrics.events.currently_model_eligible} /></MetricValue></b>
+            </a><ChevronRightIcon aria-hidden="true" />
+          </summary>
           <div className="audit-news-options">
             <a href="/audit?view=evidence" aria-current={view === "evidence" ? "page" : undefined} onKeyDown={closeNewsMenuOnEscape} onClick={event => { event.preventDefault(); event.currentTarget.closest("details")?.removeAttribute("open"); selectView("evidence"); }}>当前新闻 <b><MetricValue phase={statusState}><CountValue value={newsMetrics.events.currently_model_eligible} /></MetricValue></b></a>
             <a href="/audit?view=news" aria-current={view === "news" ? "page" : undefined} onKeyDown={closeNewsMenuOnEscape} onClick={event => { event.preventDefault(); event.currentTarget.closest("details")?.removeAttribute("open"); selectView("news"); }}>raw 新闻 <b><MetricValue phase={newsPhase}><CountValue value={readableNewsTotal} /></MetricValue></b></a>
