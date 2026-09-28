@@ -392,12 +392,13 @@ function closeNewsMenuOnEscape(event: KeyboardEvent<HTMLElement>) {
 }
 
 export function CurrentEvent({ row }: { row: NewsEvidence }) {
-  const {payload, failed, retry} = useNewsDetail(row.canonical_article ?? null);
+  const [expanded, setExpanded] = useState(false);
+  const {payload, failed, retry} = useNewsDetail(row.canonical_article ?? null, expanded);
   const detail = payload as Partial<News> | null;
   const sources = row.publisher_domains?.length ? row.publisher_domains
     : row.source_identity_organizations?.length ? row.source_identity_organizations
       : row.source_names?.length ? row.source_names : [row.canonical_source].filter(Boolean);
-  return <details className="current-event">
+  return <details className="current-event" onToggle={event => { if (event.target === event.currentTarget) setExpanded(event.currentTarget.open); }}>
     <summary className="current-event-toggle">
       <div className="current-event-meta"><span>{(row.topics ?? []).map(topic => TOPIC_LABELS[topic] ?? topic).join(" · ") || "新闻事件"}</span><time>{row.source_published_time ? time(row.source_published_time) : "发布时间未提供"}</time></div>
       <div className="current-event-title"><h3>{row.canonical_headline}</h3><ChevronRightIcon aria-hidden="true" /></div>
@@ -540,19 +541,18 @@ export function StoryCard({ story, expanded = false, onToggle }: {
 }
 
 export function NewsRow({
-  row, prefetchedDetail,
+  row,
 }: {
   row: News;
-  prefetchedDetail?: Partial<News>;
 }) {
-  const {payload, failed, retry: fetchDetail} = useNewsDetail(row.detail_key ? row : null);
+  const [expanded, setExpanded] = useState(false);
+  const {payload, failed, retry: retryDetail, retryCount: detailRetryCount} = useNewsDetail(row.detail_key ? row : null, expanded);
   const detailElement = useRef<HTMLDetailsElement>(null);
-  const [detailRetryCount, setDetailRetryCount] = useState(0);
   const [showSlowLoading, setShowSlowLoading] = useState(false);
   const [showSupportingEvidence, setShowSupportingEvidence] = useState(false);
   const detail = payload as Partial<News> | null;
-  const resolvedDetailState = row.summary_zh !== undefined || prefetchedDetail || detail ? "ready" : failed ? "error" : "loading";
-  const current = { ...row, ...(detail ?? prefetchedDetail ?? {}) };
+  const resolvedDetailState = row.summary_zh !== undefined || detail ? "ready" : failed ? "error" : "loading";
+  const current = { ...row, ...(detail ?? {}) };
   const annotationStatus = row.annotation_status === "QUEUED"
     && row.model_visibility !== "NOT_YET_PARSED"
     ? "NOT_REQUIRED"
@@ -571,25 +571,12 @@ export function NewsRow({
   const translated = Boolean(
     current.original_headline && current.headline !== current.original_headline,
   );
-  const retryDetail = () => {
-    setDetailRetryCount(0);
-    void fetchDetail();
-  };
-  useEffect(() => {
-    if (resolvedDetailState !== "error" || detailRetryCount >= 3) return;
-    const timer = window.setTimeout(() => {
-      if (!detailElement.current?.open) return;
-      setDetailRetryCount(count => count + 1);
-      void fetchDetail();
-    }, 3000);
-    return () => window.clearTimeout(timer);
-  }, [detailRetryCount, resolvedDetailState, fetchDetail]);
   useEffect(() => {
     if (resolvedDetailState !== "loading" || !detailElement.current?.open) return;
     const timer = window.setTimeout(() => setShowSlowLoading(true), 180);
     return () => window.clearTimeout(timer);
-  }, [resolvedDetailState]);
-  return <details ref={detailElement} className="news-row" aria-busy={resolvedDetailState === "loading"}>
+  }, [resolvedDetailState, expanded]);
+  return <details ref={detailElement} className="news-row" onToggle={event => { if (event.target === event.currentTarget) setExpanded(event.currentTarget.open); }} aria-busy={resolvedDetailState === "loading"}>
     <summary>
       <div className="news-row-stamp"><b>{row.category}</b><time title="媒体发布时间；列表按此时间排序">发布 {row.source_published_time ? time(row.source_published_time) : "未知"}</time><small title="系统首次采集到这篇新闻的时间">收到 {time(row.collector_first_seen_time)}</small><small className={`eligibility-badge news-reading-${readingStatus.tone}`} title="单篇新闻的整理与时效状态；不表示已纳入当前可用事件">{readingStatus.label}</small></div>
       <div className="news-row-title"><strong>{row.headline}</strong><small>{newsSourceLabel(row)}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}{(row.syndicated_source_count ?? 0) > 1 ? ` · ${row.syndicated_source_count} 个转载来源` : ""}</small></div>

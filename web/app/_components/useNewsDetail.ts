@@ -2,9 +2,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { loadNewsDetail, readNewsDetail, type NewsDetailTarget } from "../_lib/news-detail-loader";
 
-export function useNewsDetail(target: NewsDetailTarget | null) {
+export function useNewsDetail(target: NewsDetailTarget | null, expanded = false) {
   const identity = JSON.stringify(target);
   const [attempt, setAttempt] = useState(0);
+  const [retryCount, setRetryCount] = useState(0);
   const [result, setResult] = useState<{identity: string; payload: Record<string, unknown> | null; failed: boolean} | null>(null);
   const cached = target ? readNewsDetail(target) : null;
   useEffect(() => {
@@ -18,7 +19,16 @@ export function useNewsDetail(target: NewsDetailTarget | null) {
     });
     return () => { cancelled = true; };
   }, [identity, attempt]);
-  const retry = useCallback(() => { setResult(null); setAttempt(value => value + 1); }, []);
+  const retry = useCallback(() => { setRetryCount(0); setResult(null); setAttempt(value => value + 1); }, []);
   const current = result?.identity === identity ? result : null;
-  return { payload: cached?.payload ?? current?.payload ?? null, failed: current?.failed ?? false, retry };
+  useEffect(() => {
+    if (!expanded || !current?.failed || retryCount >= 3) return;
+    const timer = window.setTimeout(() => {
+      setRetryCount(count => count + 1);
+      setResult(null);
+      setAttempt(value => value + 1);
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [expanded, current?.failed, retryCount]);
+  return { retryCount, payload: cached?.payload ?? current?.payload ?? null, failed: current?.failed ?? false, retry };
 }
