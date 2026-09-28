@@ -108,6 +108,17 @@ test("all audit tabs and history commit without hiding the mounted reading surfa
   assert.equal(app.writes.length, count, "history traversal must not push a second entry");
 });
 
+test("the news entry defaults to curated events while raw article links remain valid", async () => {
+  const app = harness();
+  for (const [href, view] of [["/audit", "evidence"], ["/audit?view=news", "news"],
+    ["/audit?view=evidence", "evidence"]]) {
+    await app.navigate(href);
+    app.render();
+    assert.equal(app.view().auditView, view);
+    assert.equal(app.hidden(), false);
+  }
+});
+
 test("same-room clicks and history supersede both success and failure of a pending room import", async () => {
   for (const reject of [false, true]) for (const history of [false, true]) {
     const app = harness();

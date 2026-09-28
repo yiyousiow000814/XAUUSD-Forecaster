@@ -36,7 +36,7 @@ const AUDIT_VIEWS = new Set<AuditViewName>(["briefs", "search", "news", "evidenc
 
 function validAuditView(value: string | null | undefined): AuditViewName {
   if (value === "qa") return "briefs";
-  return value && AUDIT_VIEWS.has(value as AuditViewName) ? value as AuditViewName : "news";
+  return value && AUDIT_VIEWS.has(value as AuditViewName) ? value as AuditViewName : "evidence";
 }
 
 function parseDashboardUrl(url: URL): DashboardLocation | null {

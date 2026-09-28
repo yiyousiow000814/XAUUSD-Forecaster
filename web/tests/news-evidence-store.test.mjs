@@ -110,6 +110,23 @@ test("stages replay-safe batches and binds every read cursor to one generation",
   assert.deepEqual(current.items.map(row => row.event_key), [id("3")]);
 });
 
+test("optional canonical reading survives staging, activation and Preview paging", async () => {
+  const db = database();
+  const snapshotId = id("a");
+  const reading = {summary_zh:"美国发布经济数据。", impact_reason_zh:"更新此前数据。",
+    source:"wire", source_item_id:"report-1", annotation_id:"accepted-1"};
+  const rows = [{...item("1",1),canonical_reading:reading},item("2",2)];
+  await prepareNewsEvidenceSnapshot(db,snapshotId,rows.length);
+  await stageNewsEvidenceBatch(db,snapshotId,0,rows);
+  await activateNewsEvidenceSnapshot(db,snapshotId,rows.length);
+  const options = {mode:"all",rawCursor:null,page:1,pageSize:20};
+  const page = await readNewsEvidencePage(db,options);
+  assert.deepEqual(page.items.find(row=>row.event_key===id("1")).canonical_reading,reading);
+  assert.equal(page.items.find(row=>row.event_key===id("2")).canonical_reading,undefined);
+  const preview = readPreviewNewsEvidencePage({snapshot_id:snapshotId,items:page.items},options);
+  assert.deepEqual(preview.items,page.items);
+});
+
 test("activates first-ever and replacement empty generations idempotently", async () => {
   const firstDb = database();
   const emptyA = id("a");

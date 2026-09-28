@@ -17,6 +17,66 @@ from tests.fixtures.dashboard_news_fixtures import (
 
 UTC = timezone.utc
 
+
+@pytest.mark.parametrize("minutes, expected_summary", [(0, "首次发布的摘要。"), (2, "修订后的摘要。")])
+def test_evidence_reading_uses_canonical_annotation_without_changing_model_input(
+    tmp_path, minutes, expected_summary,
+) -> None:
+    from xauusd_news.news.semantics.evidence import event_evidence_rows_from_connection
+
+    now = datetime(2026, 9, 27, 1, tzinfo=UTC)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now)
+    source, item_id = "bea_economic_releases", "economic-release"
+    body = "Official economic data publication with complete source evidence. " * 20
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    try:
+        ledger.append_news_revision({
+            "source": source, "source_item_id": item_id,
+            "source_published_time": now, "collector_first_seen_time": now,
+            "fetched_time": now, "headline": "Official economic release",
+            "body": body, "content_hash": digest, "cluster_id": item_id,
+        })
+        for offset, summary in [(0, "首次发布的摘要。"), (1, "修订后的摘要。")]:
+            parsed = now + timedelta(minutes=offset)
+            annotation = _basic_annotation_payload(
+                ledger, source=source, item_id=item_id, parsed_at=parsed,
+            )
+            annotation["summary_zh"] = summary
+            ledger.append_annotation({
+                "annotation_id": f"accepted-{offset}", "source": source,
+                "source_item_id": item_id, "revision_number": 1,
+                "raw_content_hash": digest, "annotation": annotation,
+                "llm_model_version": "gemini-3.5-flash-lite", "prompt_version": PROMPT_VERSION,
+                "parse_started_at": parsed, "parsed_at": parsed,
+            })
+        decision_time = now + timedelta(minutes=minutes)
+        original = event_evidence_rows_from_connection(ledger.connection, decision_time)
+        projected = event_evidence_rows_from_connection(
+            ledger.connection, decision_time, include_reading=True,
+        )
+        assert len(projected) == 1
+        reading = projected[0]["canonical_reading"]
+        assert reading == {
+            "summary_zh": expected_summary, "impact_reason_zh": original[0]["impact_reason_zh"],
+            "source": original[0]["canonical_source"],
+            "source_item_id": original[0]["canonical_source_item_id"],
+            "annotation_id": f"accepted-{0 if minutes == 0 else 1}",
+        }
+        assert [{k: v for k, v in row.items() if k != "canonical_reading"}
+                for row in projected] == original
+        resource = news_resources._build_news_evidence_resource(
+            database, clock=lambda: decision_time,
+            manifest_path=tmp_path / "generation.json",
+        )
+        page = news_resources._news_evidence_page(None, 8)
+        assert page["snapshot_id"] == resource["snapshot_id"]
+        assert len(page["items"]) == 1
+        assert page["items"][0]["canonical_reading"] == reading
+        assert json.loads(json.dumps(page, ensure_ascii=False))["items"][0]["canonical_reading"] == reading
+    finally:
+        ledger.close()
+
 def test_news_evidence_display_collapses_frozen_versions_to_one_event() -> None:
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row
