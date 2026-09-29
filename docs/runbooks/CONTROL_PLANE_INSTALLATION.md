@@ -22,3 +22,13 @@ maintenance scope. Preserve current data and configuration. Install and start th
 new owner, verify local/public identity, business health and strict ACK, then
 unregister the old tasks and delete their installed scripts/shortcuts. Preserve
 historical logs/receipts separately. Never delete the authoritative forward root.
+
+When the backup directory is carried from the retired
+`XAUUSD-Forecaster-runtime` root into `xauusd-news-runtime`, the signed
+stale-temporary-reclaim receipt retains its original absolute root. The
+maintenance owner accepts only this known same-home relocation, after checking
+the receipt and confirming the retired root is absent. It preserves the old
+receipt unchanged and writes a separate current-root reclaim state linked by
+digest. An unknown root, surviving old root, changed receipt, or old-root plan
+fails closed. Retention resumes from the current-root state; no historical
+snapshot or receipt is rewritten to make relocation pass.

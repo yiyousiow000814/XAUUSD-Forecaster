@@ -274,9 +274,17 @@ export async function POST(request: Request) {
       });
     }
     let written = 0;
-    for (let start = 0; start < statements.length; start += MAX_BATCH_STATEMENTS) {
-      const results = await binding.batch(statements.slice(start, start + MAX_BATCH_STATEMENTS));
-      written += results.reduce((total, result) => total + Number(result.meta?.changes ?? 0), 0);
+    try {
+      for (let start = 0; start < statements.length; start += MAX_BATCH_STATEMENTS) {
+        const results = await binding.batch(statements.slice(start, start + MAX_BATCH_STATEMENTS));
+        written += results.reduce((total, result) => total + Number(result.meta?.changes ?? 0), 0);
+      }
+    } catch (error) {
+      console.error("market-history D1 write failed", error);
+      return NextResponse.json(
+        { error: "market history storage unavailable" },
+        { status: 503, headers: { "x-aurum-failure-stage": "d1_write" } },
+      );
     }
     return NextResponse.json({
       status: "OK", candles: candles.length,

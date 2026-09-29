@@ -436,7 +436,8 @@ async function genericRoute(request: Request, pathname: string) {
     responseBytes: contentLength !== null
       && Number.isSafeInteger(contentLength) && contentLength >= 0
       ? contentLength : null,
-    failureStage: response.status >= 500 ? "route_handler" : null,
+    failureStage: response.status >= 500
+      ? response.headers.get("x-aurum-failure-stage") ?? "route_handler" : null,
   });
 }
 

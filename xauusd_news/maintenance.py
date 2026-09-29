@@ -35,6 +35,7 @@ LEGACY_BACKUP_TEMP_NAME = re.compile(
 )
 BACKUP_RECLAIM_PLAN = ".proven-stale-backup-reclaim-plan.json"
 BACKUP_RECLAIM_STATE = "proven-stale-backup-reclaim-state.json"
+BACKUP_RECLAIM_RELOCATED_STATE = "proven-stale-backup-reclaim-relocated-state.json"
 BACKUP_RECLAIM_PLAN_SCHEMA = "xauusd.forward.proven-stale-reclaim-plan.v1"
 BACKUP_RECLAIM_STATE_SCHEMA = "xauusd.forward.proven-stale-reclaim.v1"
 BACKUP_RECLAIM_GRACE = timedelta(hours=48)
@@ -307,6 +308,7 @@ def _managed_backup_entries(
         BACKUP_RETENTION_STATE,
         BACKUP_RETENTION_PLAN,
         BACKUP_RECLAIM_STATE,
+        BACKUP_RECLAIM_RELOCATED_STATE,
         BACKUP_RECLAIM_PLAN,
     }
     for target in sorted(backup_root.glob("forward-evidence-*.sqlite3")):
@@ -639,17 +641,47 @@ def _validated_reclaim_state(path: Path, backup_root: Path) -> dict:
     return payload
 
 
+def _reclaim_state_location(backup_root: Path) -> tuple[Path, str | None]:
+    """Keep a signed receipt from the retired runtime immutable after relocation."""
+    state_path = backup_root / BACKUP_RECLAIM_STATE
+    if not state_path.is_file():
+        if (backup_root / BACKUP_RECLAIM_RELOCATED_STATE).exists():
+            raise RuntimeError("BACKUP_RECLAIM_RELOCATION_SOURCE_MISSING")
+        return state_path, None
+    try:
+        _validated_reclaim_state(state_path, backup_root)
+        if (backup_root / BACKUP_RECLAIM_RELOCATED_STATE).exists():
+            raise RuntimeError("BACKUP_RECLAIM_MULTIPLE_STATES")
+        return state_path, None
+    except RuntimeError as error:
+        if str(error) != "BACKUP_RECLAIM_STATE_ROOT_CHANGED":
+            raise
+    if len(backup_root.parents) <= 3:
+        raise RuntimeError("BACKUP_RECLAIM_STATE_ROOT_CHANGED")
+    home = backup_root.parents[3]
+    expected_current = home / "xauusd-news-runtime" / ".local" / "forward" / "backups"
+    expected_old = home / "XAUUSD-Forecaster-runtime" / ".local" / "forward" / "backups"
+    if backup_root != expected_current.resolve():
+        raise RuntimeError("BACKUP_RECLAIM_STATE_ROOT_CHANGED")
+    old = _validated_reclaim_state(state_path, expected_old)
+    if expected_old.exists():
+        raise RuntimeError("BACKUP_RECLAIM_OLD_ROOT_STILL_PRESENT")
+    return backup_root / BACKUP_RECLAIM_RELOCATED_STATE, old["receipt_digest"]
+
+
 def reclaim_proven_stale_backup_temps(
     backup_root: Path, now: datetime,
 ) -> dict:
     """Remove only abandoned legacy backup temp families with complete proof."""
     backup_root = backup_root.resolve()
     plan_path = backup_root / BACKUP_RECLAIM_PLAN
-    state_path = backup_root / BACKUP_RECLAIM_STATE
+    state_path, relocated_from = _reclaim_state_location(backup_root)
     prior = (
         _validated_reclaim_state(state_path, backup_root)
         if state_path.is_file() else None
     )
+    if relocated_from and prior and prior.get("relocated_from_receipt_digest") != relocated_from:
+        raise RuntimeError("BACKUP_RECLAIM_RELOCATION_RECEIPT_CHANGED")
     if plan_path.is_file():
         plan = _validated_reclaim_plan(plan_path, backup_root)
         if prior and prior.get("plan_digest") == plan["plan_digest"]:
@@ -737,6 +769,8 @@ def reclaim_proven_stale_backup_temps(
         "reclaimed": reclaimed_history,
         "unknown": remaining_unknown,
     }
+    if relocated_from:
+        state["relocated_from_receipt_digest"] = relocated_from
     state["receipt_digest"] = _json_digest(state)
     _atomic_json(state_path, state)
     plan_path.unlink(missing_ok=True)
@@ -769,6 +803,12 @@ def apply_backup_retention(
     plan_path = backup_root / BACKUP_RETENTION_PLAN
     deleted: list[dict] = []
     try:
+        # A moved or damaged reclaim receipt must fail before retention deletes
+        # any snapshot from a plan generated under a different root.
+        _reclaim_state_location(backup_root)
+        reclaim_plan_path = backup_root / BACKUP_RECLAIM_PLAN
+        if reclaim_plan_path.is_file():
+            _validated_reclaim_plan(reclaim_plan_path, backup_root)
         source = _source_identity(connection, database)
         if plan_path.exists():
             plan = _validated_retention_plan(

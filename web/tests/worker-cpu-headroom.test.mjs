@@ -684,6 +684,37 @@ test("storage sync families accept identical payloads without repeating physical
 
 });
 
+test("market history reports D1 write failure as retryable storage unavailability", async () => {
+  if (isPreviewBuild) return;
+  const failingEnv = {
+    ...runtimeEnv,
+    DB: {
+      prepare: (...args) => database.prepare(...args),
+      batch: async () => { throw new Error("temporary D1 write failure"); },
+    },
+  };
+  const previousEnvironment = globalThis.__AURUM_TEST_WORKER_ENV;
+  globalThis.__AURUM_TEST_WORKER_ENV = failingEnv;
+  const oldError = console.error;
+  console.error = () => {};
+  try {
+    const response = await invoke("/api/market-history", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ candles: [{
+        time: "2026-08-25T01:00:00.000Z", open: 3380, high: 3382,
+        low: 3379, close: 3381, ticks: 42,
+      }] }),
+    }, failingEnv);
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get("x-aurum-failure-stage"), "d1_write");
+    assert.deepEqual(await response.json(), { error: "market history storage unavailable" });
+  } finally {
+    console.error = oldError;
+    globalThis.__AURUM_TEST_WORKER_ENV = previousEnvironment;
+  }
+});
+
 test("bounds empty, oversized, maximum legal, and concurrent snapshot writes", async () => {
   if (isPreviewBuild) return;
   const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };

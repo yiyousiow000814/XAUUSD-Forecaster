@@ -367,8 +367,24 @@ def _run_scheduled_lane(
     while len(statuses) < maximum:
         worker_id = f"{worker_prefix}-{len(statuses)}"
         job = None
+        # A continuous FAST annotation stream must still leave a bounded
+        # share of live capacity for its downstream impact work.
+        impact_turn = (
+            len(statuses) % 4 == 3
+            and (task_types is None or "ACTIVE_IMPACT" in task_types)
+            and "ACTIVE_IMPACT" not in blocked_snapshot()
+        )
         if has_routine:
-            job = claim_job(
+            if impact_turn:
+                job = claim_job(
+                    ledger.connection,
+                    worker_id=worker_id,
+                    pool=ROUTINE_POOL,
+                    task_types=("ACTIVE_IMPACT",),
+                    queued_before=queued_before,
+                    now=datetime.now(UTC),
+                )
+            job = job or claim_job(
                 ledger.connection,
                 worker_id=worker_id,
                 pool=ROUTINE_POOL,

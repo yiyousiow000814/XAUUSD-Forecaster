@@ -492,6 +492,99 @@ def test_proven_stale_legacy_temp_family_is_reclaimed_with_receipt(
     assert repeated["reclaimed_count"] == 1
 
 
+def _relocated_reclaim_state(tmp_path: Path) -> tuple[Path, Path, bytes]:
+    backup_root = tmp_path / "xauusd-news-runtime" / ".local" / "forward" / "backups"
+    backup_root.mkdir(parents=True)
+    old_root = tmp_path / "XAUUSD-Forecaster-runtime" / ".local" / "forward" / "backups"
+    payload = {
+        "schema": maintenance.BACKUP_RECLAIM_STATE_SCHEMA,
+        "completed_at": NOW.isoformat(),
+        "backup_root": str(old_root.resolve()),
+        "plan_digest": "retired-plan",
+        "previous_receipt_digest": None,
+        "last_reclaimed_count": 0,
+        "last_reclaimed_bytes": 0,
+        "reclaimed_count": 0,
+        "reclaimed_bytes": 0,
+        "reclaimed": [],
+        "unknown": [],
+    }
+    payload["receipt_digest"] = maintenance._json_digest(payload)
+    original = json.dumps(payload).encode("utf-8")
+    path = backup_root / maintenance.BACKUP_RECLAIM_STATE
+    path.write_bytes(original)
+    return backup_root, path, original
+
+
+def test_retired_root_receipt_stays_immutable_and_current_retention_recovers(
+    tmp_path: Path,
+) -> None:
+    backup_root, retired_path, original = _relocated_reclaim_state(tmp_path)
+    ledger = ForwardLedger(backup_root.parent / "forward-evidence.sqlite3", now=NOW)
+    maintenance.ensure_daily_forward_backup(
+        ledger.path, backup_root, NOW, source_connection=ledger.connection,
+    )
+
+    first = maintenance.apply_backup_retention(
+        ledger.path, backup_root, NOW, source_connection=ledger.connection,
+    )
+    current_path = backup_root / maintenance.BACKUP_RECLAIM_RELOCATED_STATE
+    current = json.loads(current_path.read_text(encoding="utf-8"))
+    assert first.status == "NO_CHANGE"
+    assert retired_path.read_bytes() == original
+    assert current["backup_root"] == str(backup_root.resolve())
+    assert current["relocated_from_receipt_digest"] == json.loads(original)["receipt_digest"]
+    assert maintenance._validated_reclaim_state(current_path, backup_root)
+    assert maintenance.reclaim_proven_stale_backup_temps(
+        backup_root, NOW,
+    )["receipt_digest"] == current["receipt_digest"]
+    assert (backup_root / maintenance.BACKUP_RECLAIM_PLAN).exists() is False
+    ledger.close()
+
+
+@pytest.mark.parametrize("condition", ["old_present", "unknown_root", "tampered"])
+def test_reclaim_relocation_rejects_unproven_history(
+    tmp_path: Path, condition: str,
+) -> None:
+    backup_root, retired_path, original = _relocated_reclaim_state(tmp_path)
+    payload = json.loads(original)
+    if condition == "old_present":
+        Path(payload["backup_root"]).mkdir(parents=True)
+    elif condition == "unknown_root":
+        payload["backup_root"] = str(tmp_path / "unrelated" / "backups")
+        payload["receipt_digest"] = maintenance._json_digest({
+            key: value for key, value in payload.items() if key != "receipt_digest"
+        })
+        retired_path.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        payload["last_reclaimed_count"] = 1
+        retired_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises((RuntimeError, json.JSONDecodeError)):
+        maintenance.reclaim_proven_stale_backup_temps(backup_root, NOW)
+    assert not (backup_root / maintenance.BACKUP_RECLAIM_RELOCATED_STATE).exists()
+
+
+def test_retention_checks_reclaim_root_before_any_snapshot_delete(tmp_path: Path) -> None:
+    ledger = _ledger(tmp_path)
+    backup_root = tmp_path / "backup-root"
+    created = _create_daily_backups(ledger, backup_root, count=16)
+    current = backup_root / maintenance.BACKUP_RECLAIM_STATE
+    payload = {
+        "schema": maintenance.BACKUP_RECLAIM_STATE_SCHEMA,
+        "backup_root": str(tmp_path / "unrelated-backups"),
+        "reclaimed": [],
+    }
+    payload["receipt_digest"] = maintenance._json_digest(payload)
+    current.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="BACKUP_RECLAIM_STATE_ROOT_CHANGED"):
+        maintenance.apply_backup_retention(
+            ledger.path, backup_root, NOW, source_connection=ledger.connection,
+        )
+    assert all(item.path.exists() and item.receipt_path.exists() for item in created)
+    ledger.close()
+
+
 def test_legacy_temp_with_live_owner_reference_or_blocking_handle_is_unknown(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
