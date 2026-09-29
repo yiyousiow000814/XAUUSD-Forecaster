@@ -15,7 +15,7 @@ import urllib.request
 DEFAULT_BASE_URL = "https://xauusd-news.yiyousiow1234.workers.dev"
 TIMEOUT_SECONDS = 20
 PAGE_MARKERS = {
-    "/": "XAUUSD News",
+    "/": "黄金资讯",
     "/health": "系统健康状态",
     "/audit": "证据台页面",
 }

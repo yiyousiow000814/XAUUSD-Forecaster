@@ -30,6 +30,10 @@ def test_external_probe_covers_only_public_pages_and_status(monkeypatch) -> None
     assert all("assistant-health" not in item for item in evidence)
 
 
+def test_public_home_marker_matches_server_rendered_product_title() -> None:
+    assert probe.PAGE_MARKERS["/"] == "黄金资讯"
+
+
 def test_external_probe_uses_stable_code_for_render_contract_failure(monkeypatch) -> None:
     def missing_marker(url: str) -> tuple[int, bytes, str]:
         status, body, content_type = _response(url)

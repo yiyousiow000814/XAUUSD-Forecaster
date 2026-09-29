@@ -993,6 +993,45 @@ def test_failed_task_rejoins_queue_without_repeating_in_the_same_batch(
     ledger.close()
 
 
+@pytest.mark.parametrize("concurrent", [False, True])
+def test_fast_annotation_backlog_cannot_starve_live_impact(
+    tmp_path, monkeypatch, concurrent,
+) -> None:
+    from xauusd_news.news.scheduler import runtime as runner
+
+    ledger = ForwardLedger(tmp_path / "fair-impact.sqlite3", now=NOW)
+    created = datetime.now(UTC) - timedelta(minutes=2)
+    for index in range(8):
+        enqueue_job(
+            ledger.connection, task_type="ACTIVE_ANNOTATION", source="source",
+            source_item_id=f"annotation-{index}", revision_number=1,
+            prompt_version="prompt", priority="FAST", now=created + timedelta(seconds=index),
+        )
+    impact_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_IMPACT", source="source",
+        source_item_id="impact", revision_number=1, annotation_id="annotation",
+        prompt_version="prompt", priority="IMMEDIATE", now=created,
+    )
+    monkeypatch.setattr(
+        runner, "configured_api_credentials",
+        lambda: (ApiCredential("account-a", ROUTINE_POOL, "key-a", "fp-a"),),
+    )
+    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner, "_execute_job", lambda *_args, **_kwargs: {"status": "OK"})
+
+    statuses = runner.run_scheduled_batch(ledger, batch_size=None if concurrent else 4)
+
+    assert any(row["job_id"] == impact_id for row in statuses)
+    if not concurrent:
+        assert [row["task_type"] for row in statuses] == [
+            "ACTIVE_ANNOTATION", "ACTIVE_ANNOTATION", "ACTIVE_ANNOTATION", "ACTIVE_IMPACT",
+        ]
+    assert ledger.connection.execute(
+        "SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (impact_id,),
+    ).fetchone()[0] == "COMPLETED"
+    ledger.close()
+
+
 def test_live_admission_is_not_reduced_by_backfill_reserves() -> None:
     connection = _connection()
     _seed_complete_live_quota_days(connection)
