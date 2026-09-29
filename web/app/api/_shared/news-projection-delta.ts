@@ -25,7 +25,7 @@ export async function applyNewsProjectionDelta(binding: D1Database, raw: unknown
   if (!patch || !patch.base || ![patch.base.generation_id, patch.base.snapshot_id,
     patch.base.receipt_digest].every(v => typeof v === "string" && NEWS_GENERATION_ID.test(v))
     || !Array.isArray(patch.indexes) || patch.indexes.length > 32
-    || !Array.isArray(patch.details) || patch.details.length > 8
+    || !Array.isArray(patch.details) || patch.details.length > 16
     || !Array.isArray(patch.removed) || patch.removed.length > 32
     || !patch.indexes.every(v => v && validIndex(v) && v.mirror_contract === NEWS_PROJECTION_CONTRACT_VERSION)
     || !patch.details.every(v => v && validDetail(v))

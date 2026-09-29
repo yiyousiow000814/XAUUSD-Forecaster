@@ -127,7 +127,7 @@ the main-only release contract; data preservation and transport invariants remai
 - Sparse News publication requires both migration0038 fences and a complete
   acknowledged source/target fingerprint inventory. `news-projection-delta-v1` binds its baseline, source
   manifest and exact patch with a separate digest; it must never claim that
-  digest is the full-stream receipt. At most 32 changed indexes, eight changed
+  digest is the full-stream receipt. At most 32 changed indexes, 16 changed
   details, 32 explicit removals and 120,000 request bytes may cross this path.
   A single transaction must recheck the baseline and atomically publish all
   rows, counts and the generation pointer; missing ACK retries are idempotent.

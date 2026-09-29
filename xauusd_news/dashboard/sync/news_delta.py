@@ -20,7 +20,7 @@ def make_news_delta(inventory: dict, baseline: dict, get_batch) -> dict | None:
     # the receiver can prove complete membership of each supplied detail.
     changed_index = sorted(set(changed_index) | set(changed_detail))
     removed = sorted(set(old) - set(entries))
-    if len(changed_index) > 32 or len(changed_detail) > 8 or len(removed) > 32:
+    if len(changed_index) > 32 or len(changed_detail) > 16 or len(removed) > 32:
         return None
 
     def items(kind: str, keys: list[str]) -> list[dict]:
