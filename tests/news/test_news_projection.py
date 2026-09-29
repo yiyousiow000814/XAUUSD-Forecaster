@@ -64,6 +64,16 @@ def test_sparse_inventory_matches_complete_batches_and_bounds_fallback(monkeypat
     assert not valid_news_delta_baseline(news_delta_baseline({}, {}))
     assert make_news_delta(generation([_source_row(i) for i in range(70)]).sync_inventory, baseline,
                            lambda *_: pytest.fail("oversize patch fetched batches")) is None
+    nine_new = generation([_source_row(i) for i in range(9, 57)], "2026-09-14T04:10:00+00:00")
+    nine_patch = make_news_delta(
+        nine_new.sync_inventory, baseline,
+        lambda kind, offset: nine_new.batch_items(kind, offset),
+    )
+    assert nine_patch is not None
+    assert len(nine_patch["patch"]["details"]) == 9
+    assert len(nine_patch["patch"]["indexes"]) == 9
+    assert len(nine_patch["patch"]["removed"]) == 9
+    assert len(json.dumps(nine_patch, ensure_ascii=False, separators=(",", ":")).encode()) <= 120_000
 
     # Exercise the production transport owner with actual frozen batches and
     # serialization, including an accepted patch whose response was lost.

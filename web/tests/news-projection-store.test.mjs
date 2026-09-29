@@ -118,6 +118,35 @@ test("sparse publication atomically replaces membership, preserves immutable evi
   assert.equal((await readNewsProjectionHealth(db)).active_generation_id, patch.source.generation_id);
 });
 
+test("sparse publication accepts nine changed details in one bounded transaction", async () => {
+  const db = database();
+  const baseDetails = [detail("1")], baseIndexes = [index("1")];
+  const base = await manifest("a", baseDetails, baseIndexes);
+  await publish(db, base, baseDetails, baseIndexes);
+  const newDigits = ["0", "2", "3", "4", "5", "6", "7", "8", "9"];
+  const newDetails = newDigits.map(digit => {
+    const payload = { ...detail(digit).payload, body: "b".repeat(9_000) };
+    return { ...detail(digit), detail_hash: hash(JSON.stringify(payload)), payload };
+  });
+  const patch = {
+    base: { generation_id: base.generation_id, snapshot_id: base.snapshot_id,
+      receipt_digest: base.expected_receipt_digest },
+    source: await manifest("b", [detail("1"), ...newDetails],
+      [index("1"), ...newDigits.map(index)]),
+    indexes: newDigits.map(index), details: newDetails, removed: [],
+  };
+  assert.ok(Buffer.byteLength(JSON.stringify(patch)) > 80_000);
+  assert.ok(Buffer.byteLength(JSON.stringify(patch)) < 120_000);
+  const digest = await newsProjectionPayloadHash(patch);
+  const ack = await applyNewsProjectionDelta(db, patch, digest);
+  assert.equal(ack.applied, digest);
+  const health = await readNewsProjectionHealth(db);
+  assert.equal(health.verified_complete, true);
+  assert.equal(health.index_count, 10);
+  assert.equal(health.detail_count, 10);
+  assert.equal((await applyNewsProjectionDelta(db, patch, digest)).applied, digest);
+});
+
 test("production Worker accepts Python sparse transport and enforces authentication and body bounds", async t => {
   if (process.env.WORKERS_CI_BRANCH && process.env.WORKERS_CI_BRANCH !== "main") {
     t.skip("Preview rejects all writes; production mutation rehearsal uses a non-Preview build"); return;
