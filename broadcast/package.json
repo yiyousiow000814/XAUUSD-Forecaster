@@ -9,7 +9,7 @@
     "benchmark": "node tests/load-benchmark.mjs"
   },
   "devDependencies": {
-    "wrangler": "4.123.0"
+    "wrangler": "4.146.0"
   },
   "overrides": {
     "sharp": "0.35.4"
